@@ -1,11 +1,17 @@
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.path_analyzer import CFGPathAnalyzer
+from evaluator.dqm import DecisionQualityMatrix
+from reports.json_reporter import JSONReportWriter
+
+
+SOURCE_FILE = "datasets/sample_code.py"
 
 
 def print_analyzer_report() -> None:
     """Örnek Python dosyası için statik analiz raporu üretir."""
     analyzer = PythonAnalyzer()
-    result = analyzer.analyze_file("datasets/sample_code.py")
+    result = analyzer.analyze_file(SOURCE_FILE)
 
     print("=" * 55)
     print("PYTHON DOSYA ANALİZ RAPORU")
@@ -56,10 +62,7 @@ def print_analyzer_report() -> None:
 def print_cfg_report() -> None:
     """Örnek Python dosyasındaki fonksiyonlar için CFG raporu üretir."""
     builder = ControlFlowGraphBuilder()
-
-    graphs = builder.build_from_file(
-        "datasets/sample_code.py"
-    )
+    graphs = builder.build_from_file(SOURCE_FILE)
 
     if not graphs:
         print("Dosyada CFG üretilebilecek fonksiyon bulunamadı.")
@@ -93,6 +96,119 @@ def print_cfg_report() -> None:
             )
 
 
+def print_dqm_report() -> None:
+    """Yürütme yolları için DQM önceliklendirme raporu üretir."""
+    analyzer = PythonAnalyzer()
+    cfg_builder = ControlFlowGraphBuilder()
+    path_analyzer = CFGPathAnalyzer()
+    dqm = DecisionQualityMatrix()
+
+    analysis_result = analyzer.analyze_file(SOURCE_FILE)
+    graphs = cfg_builder.build_from_file(SOURCE_FILE)
+
+    if not analysis_result.functions or not graphs:
+        print("DQM değerlendirmesi için fonksiyon bulunamadı.")
+        return
+
+    for function, graph in zip(
+        analysis_result.functions,
+        graphs,
+    ):
+        paths = path_analyzer.find_paths(graph)
+
+        scores = dqm.evaluate_paths(
+            function=function,
+            paths=paths,
+        )
+
+        print("=" * 65)
+        print(f"DQM RAPORU: {function.name}")
+        print("=" * 65)
+
+        print(
+            f"Cyclomatic Complexity : "
+            f"{function.cyclomatic_complexity}"
+        )
+        print(f"Risk Seviyesi         : {function.risk_level}")
+        print(f"Yürütme Yolu Sayısı   : {len(paths)}")
+
+        if not scores:
+            print("\nDeğerlendirilebilecek yürütme yolu bulunamadı.")
+            continue
+
+        print("\nYOL ÖNCELİKLERİ")
+        print("-" * 65)
+
+        for rank, score in enumerate(scores, start=1):
+            original_path = paths[score.path_index - 1]
+
+            print(f"\nÖncelik Sırası #{rank}")
+            print(f"Yol Numarası           : {score.path_index}")
+            print(f"Düğüm Yolu             : {original_path.node_ids}")
+            print(f"Kenar Etiketleri       : {original_path.edge_labels}")
+            print(f"Yol Uzunluğu           : {score.path_length}")
+            print(
+                f"Karar Kenarı Sayısı    : "
+                f"{score.decision_edge_count}"
+            )
+            print(f"Döngü İçeriyor mu?     : {score.contains_loop}")
+            print(
+                f"İstisna İçeriyor mu?   : "
+                f"{score.contains_exception}"
+            )
+            print(f"Ham DQM Skoru          : {score.raw_score}")
+            print(
+                f"Normalize DQM Skoru    : "
+                f"{score.normalized_score}"
+            )
+            print(f"Öncelik Seviyesi       : {score.priority_level}")
+
+
+def create_dqm_json_report() -> None:
+    """DQM sonuçlarını JSON dosyası olarak kaydeder."""
+    analyzer = PythonAnalyzer()
+    cfg_builder = ControlFlowGraphBuilder()
+    path_analyzer = CFGPathAnalyzer()
+    dqm = DecisionQualityMatrix()
+    reporter = JSONReportWriter()
+
+    analysis_result = analyzer.analyze_file(SOURCE_FILE)
+    graphs = cfg_builder.build_from_file(SOURCE_FILE)
+
+    if not analysis_result.functions or not graphs:
+        print("JSON raporu için analiz edilebilir fonksiyon bulunamadı.")
+        return
+
+    for function, graph in zip(
+        analysis_result.functions,
+        graphs,
+    ):
+        paths = path_analyzer.find_paths(graph)
+
+        scores = dqm.evaluate_paths(
+            function=function,
+            paths=paths,
+        )
+
+        output_path = (
+            "output/dqm_reports/"
+            f"{function.name}_dqm_report.json"
+        )
+
+        result_path = reporter.write_dqm_report(
+            function=function,
+            paths=paths,
+            scores=scores,
+            output_path=output_path,
+            ource_file=SOURCE_FILE,
+        )
+
+        print(
+            "JSON raporu başarıyla oluşturuldu: "
+            f"{result_path}"
+        )
+
+
 def print_menu() -> None:
     """Uygulama ana menüsünü ekrana yazdırır."""
     print("\n" + "=" * 55)
@@ -100,6 +216,8 @@ def print_menu() -> None:
     print("=" * 55)
     print("1 - Python kod analizi")
     print("2 - Control Flow Graph")
+    print("3 - DQM yol önceliklendirme")
+    print("4 - DQM JSON raporu oluştur")
     print("0 - Çıkış")
 
 
@@ -120,11 +238,24 @@ def main() -> None:
             print_cfg_report()
             continue
 
+        if choice == "3":
+            print()
+            print_dqm_report()
+            continue
+
+        if choice == "4":
+            print()
+            create_dqm_json_report()
+            continue
+
         if choice == "0":
             print("\nProgram sonlandırıldı.")
             break
 
-        print("\nGeçersiz seçim. Lütfen 0, 1 veya 2 girin.")
+        print(
+            "\nGeçersiz seçim. "
+            "Lütfen 0, 1, 2, 3 veya 4 girin."
+        )
 
 
 if __name__ == "__main__":
