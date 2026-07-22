@@ -1,0 +1,203 @@
+from pathlib import Path
+
+import pytest
+
+from generator.file_writer import GeneratedTestFileWriter
+
+
+VALID_SOURCE_CODE = (
+    '"""Otomatik oluşturulmuş test dosyası."""\n'
+    "\n"
+    "\n"
+    "def test_example() -> None:\n"
+    "    assert True\n"
+)
+
+
+def test_write_creates_python_file(
+    tmp_path: Path,
+) -> None:
+    """Geçerli kaynak kodun Python dosyasına yazıldığını doğrular."""
+    writer = GeneratedTestFileWriter()
+    output_path = tmp_path / "test_generated.py"
+
+    result_path = writer.write(
+        source_code=VALID_SOURCE_CODE,
+        output_path=output_path,
+    )
+
+    assert result_path == output_path
+    assert result_path.exists()
+    assert result_path.is_file()
+
+
+def test_write_creates_parent_directories(
+    tmp_path: Path,
+) -> None:
+    """Eksik üst klasörlerin otomatik oluşturulduğunu doğrular."""
+    writer = GeneratedTestFileWriter()
+
+    output_path = (
+        tmp_path
+        / "tests"
+        / "generated"
+        / "test_example.py"
+    )
+
+    result_path = writer.write(
+        source_code=VALID_SOURCE_CODE,
+        output_path=output_path,
+    )
+
+    assert result_path.exists()
+    assert result_path.parent.exists()
+
+
+def test_write_preserves_utf8_content(
+    tmp_path: Path,
+) -> None:
+    """Türkçe karakterlerin ve kaynak içeriğin korunduğunu doğrular."""
+    writer = GeneratedTestFileWriter()
+    output_path = tmp_path / "test_turkish.py"
+
+    source_code = (
+        '"""Türkçe açıklama: ç, ğ, ı, ö, ş, ü."""\n'
+        "\n"
+        "\n"
+        "def test_turkish_characters() -> None:\n"
+        '    message = "Başarılı"\n'
+        '    assert message == "Başarılı"\n'
+    )
+
+    writer.write(
+        source_code=source_code,
+        output_path=output_path,
+    )
+
+    saved_content = output_path.read_text(
+        encoding="utf-8",
+    )
+
+    assert saved_content == source_code
+
+
+@pytest.mark.parametrize(
+    "source_code",
+    [
+        "",
+        "   \n\t",
+    ],
+)
+def test_write_rejects_empty_source_code(
+    tmp_path: Path,
+    source_code: str,
+) -> None:
+    """Boş veya yalnızca boşluk içeren kaynak kodun reddedildiğini doğrular."""
+    writer = GeneratedTestFileWriter()
+
+    with pytest.raises(
+        ValueError,
+        match="Kaynak kod boş olamaz",
+    ):
+        writer.write(
+            source_code=source_code,
+            output_path=tmp_path / "test_empty.py",
+        )
+
+
+def test_write_rejects_invalid_python_syntax(
+    tmp_path: Path,
+) -> None:
+    """Geçersiz Python sözdiziminin dosyaya yazılmadığını doğrular."""
+    writer = GeneratedTestFileWriter()
+    output_path = tmp_path / "test_invalid.py"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Kaynak kod geçerli Python "
+            "sözdizimine sahip değil"
+        ),
+    ):
+        writer.write(
+            source_code="def broken_function(:\n    pass\n",
+            output_path=output_path,
+        )
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "generated_test.txt",
+        "generated_test.json",
+    ],
+)
+def test_write_rejects_non_python_extension(
+    tmp_path: Path,
+    file_name: str,
+) -> None:
+    """Python dışındaki dosya uzantılarının reddedildiğini doğrular."""
+    writer = GeneratedTestFileWriter()
+
+    with pytest.raises(
+        ValueError,
+        match=r"Çıktı dosyasının uzantısı \.py olmalıdır",
+    ):
+        writer.write(
+            source_code=VALID_SOURCE_CODE,
+            output_path=tmp_path / file_name,
+        )
+
+
+def test_write_rejects_existing_file_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    """Mevcut dosyanın varsayılan olarak korunmasını doğrular."""
+    writer = GeneratedTestFileWriter()
+    output_path = tmp_path / "test_existing.py"
+
+    output_path.write_text(
+        "original_content = True\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        FileExistsError,
+        match="Çıktı dosyası zaten mevcut",
+    ):
+        writer.write(
+            source_code=VALID_SOURCE_CODE,
+            output_path=output_path,
+        )
+
+    assert (
+        output_path.read_text(encoding="utf-8")
+        == "original_content = True\n"
+    )
+
+
+def test_write_overwrites_existing_file_when_enabled(
+    tmp_path: Path,
+) -> None:
+    """Overwrite etkinleştirildiğinde mevcut dosyanın güncellendiğini doğrular."""
+    writer = GeneratedTestFileWriter()
+    output_path = tmp_path / "test_existing.py"
+
+    output_path.write_text(
+        "original_content = True\n",
+        encoding="utf-8",
+    )
+
+    result_path = writer.write(
+        source_code=VALID_SOURCE_CODE,
+        output_path=output_path,
+        overwrite=True,
+    )
+
+    assert result_path == output_path
+    assert (
+        output_path.read_text(encoding="utf-8")
+        == VALID_SOURCE_CODE
+    )

@@ -200,7 +200,7 @@ def create_dqm_json_report() -> None:
             paths=paths,
             scores=scores,
             output_path=output_path,
-            ource_file=SOURCE_FILE,
+            source_file=SOURCE_FILE,
         )
 
         print(
