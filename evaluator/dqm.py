@@ -8,7 +8,7 @@ from cfg.path_analyzer import ExecutionPath
 
 @dataclass
 class DQMScore:
-    """Bir yürütme yoluna ait DQM değerlendirme sonucunu temsil eder."""
+    """Bir yÃ¼rÃ¼tme yoluna ait DQM deÄŸerlendirme sonucunu temsil eder."""
 
     path_index: int
     path_length: int
@@ -21,7 +21,7 @@ class DQMScore:
 
 
 class DecisionQualityMatrix:
-    """Yürütme yollarını test önceliğine göre puanlar."""
+    """YÃ¼rÃ¼tme yollarÄ±nÄ± test Ã¶nceliÄŸine gÃ¶re puanlar."""
 
     DECISION_LABELS = {
         "True",
@@ -54,14 +54,14 @@ class DecisionQualityMatrix:
         paths: list[ExecutionPath],
     ) -> list[DQMScore]:
         """
-        Fonksiyona ait yürütme yollarını DQM yaklaşımıyla puanlar.
+        Fonksiyona ait yÃ¼rÃ¼tme yollarÄ±nÄ± DQM yaklaÅŸÄ±mÄ±yla puanlar.
 
         Args:
             function: Fonksiyonun statik analiz bilgileri.
-            paths: CFG üzerinden çıkarılan yürütme yolları.
+            paths: CFG Ã¼zerinden Ã§Ä±karÄ±lan yÃ¼rÃ¼tme yollarÄ±.
 
         Returns:
-            Her yol için oluşturulan DQM skorlarının listesi.
+            Her yol iÃ§in oluÅŸturulan DQM skorlarÄ±nÄ±n listesi.
         """
         if not paths:
             return []
@@ -110,7 +110,7 @@ class DecisionQualityMatrix:
         function: FunctionInfo,
         path: ExecutionPath,
     ) -> float:
-        """Tek bir yürütme yolu için ham DQM skoru hesaplar."""
+        """Tek bir yÃ¼rÃ¼tme yolu iÃ§in ham DQM skoru hesaplar."""
         path_length_score = len(path.node_ids) * 1.0
 
         decision_score = (
@@ -144,7 +144,7 @@ class DecisionQualityMatrix:
 
     @staticmethod
     def _count_decision_edges(path: ExecutionPath) -> int:
-        """Karar bildiren kenar etiketlerinin sayısını hesaplar."""
+        """Karar bildiren kenar etiketlerinin sayÄ±sÄ±nÄ± hesaplar."""
         return sum(
             label
             in DecisionQualityMatrix.DECISION_LABELS
@@ -153,7 +153,7 @@ class DecisionQualityMatrix:
 
     @staticmethod
     def _contains_loop(path: ExecutionPath) -> bool:
-        """Yolun döngü kenarı içerip içermediğini kontrol eder."""
+        """Yolun dÃ¶ngÃ¼ kenarÄ± iÃ§erip iÃ§ermediÄŸini kontrol eder."""
         return any(
             label in DecisionQualityMatrix.LOOP_LABELS
             for label in path.edge_labels
@@ -161,7 +161,7 @@ class DecisionQualityMatrix:
 
     @staticmethod
     def _contains_exception(path: ExecutionPath) -> bool:
-        """Yolun istisna kenarı içerip içermediğini kontrol eder."""
+        """Yolun istisna kenarÄ± iÃ§erip iÃ§ermediÄŸini kontrol eder."""
         return any(
             label in DecisionQualityMatrix.EXCEPTION_LABELS
             for label in path.edge_labels
@@ -172,7 +172,7 @@ class DecisionQualityMatrix:
         raw_score: float,
         maximum_score: float,
     ) -> float:
-        """Ham skoru 0–100 aralığına normalize eder."""
+        """Ham skoru 0â€“100 aralÄ±ÄŸÄ±na normalize eder."""
         if maximum_score <= 0:
             return 0.0
 
@@ -182,7 +182,7 @@ class DecisionQualityMatrix:
     def _determine_priority_level(
         normalized_score: float,
     ) -> str:
-        """Normalize edilmiş skora göre öncelik seviyesini belirler."""
+        """Normalize edilmiÅŸ skora gÃ¶re Ã¶ncelik seviyesini belirler."""
         if normalized_score >= 80:
             return "High"
 
@@ -190,3 +190,4 @@ class DecisionQualityMatrix:
             return "Medium"
 
         return "Low"
+

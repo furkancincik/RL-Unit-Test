@@ -7,14 +7,14 @@ from cfg.control_flow_graph import ControlFlowGraph
 
 @dataclass
 class ExecutionPath:
-    """CFG üzerinde bulunan bir yürütme yolunu temsil eder."""
+    """CFG Ã¼zerinde bulunan bir yÃ¼rÃ¼tme yolunu temsil eder."""
 
     node_ids: list[int]
     edge_labels: list[str | None]
 
 
 class CFGPathAnalyzer:
-    """Control Flow Graph üzerindeki yürütme yollarını analiz eder."""
+    """Control Flow Graph Ã¼zerindeki yÃ¼rÃ¼tme yollarÄ±nÄ± analiz eder."""
 
     def find_paths(
         self,
@@ -22,10 +22,10 @@ class CFGPathAnalyzer:
         max_visits_per_node: int = 2,
     ) -> list[ExecutionPath]:
         """
-        START düğümünden END düğümüne giden yolları çıkarır.
+        START dÃ¼ÄŸÃ¼mÃ¼nden END dÃ¼ÄŸÃ¼mÃ¼ne giden yollarÄ± Ã§Ä±karÄ±r.
 
-        Döngüler sonsuz yol üretmesin diye aynı düğümün ziyaret
-        sayısı sınırlandırılır.
+        DÃ¶ngÃ¼ler sonsuz yol Ã¼retmesin diye aynÄ± dÃ¼ÄŸÃ¼mÃ¼n ziyaret
+        sayÄ±sÄ± sÄ±nÄ±rlandÄ±rÄ±lÄ±r.
         """
         start_node = self._find_node_id(graph, "start")
         end_node = self._find_node_id(graph, "end")
@@ -63,7 +63,7 @@ class CFGPathAnalyzer:
         paths: list[ExecutionPath],
         max_visits_per_node: int,
     ) -> None:
-        """CFG üzerinde sınırlı derinlik öncelikli arama yapar."""
+        """CFG Ã¼zerinde sÄ±nÄ±rlÄ± derinlik Ã¶ncelikli arama yapar."""
         if current_id == end_id:
             paths.append(
                 ExecutionPath(
@@ -107,11 +107,12 @@ class CFGPathAnalyzer:
         graph: ControlFlowGraph,
         node_type: str,
     ) -> int:
-        """Belirtilen türdeki ilk düğümün kimliğini bulur."""
+        """Belirtilen tÃ¼rdeki ilk dÃ¼ÄŸÃ¼mÃ¼n kimliÄŸini bulur."""
         for node in graph.nodes:
             if node.node_type == node_type:
                 return node.node_id
 
         raise ValueError(
-            f"CFG içinde '{node_type}' türünde düğüm bulunamadı."
+            f"CFG iÃ§inde '{node_type}' tÃ¼rÃ¼nde dÃ¼ÄŸÃ¼m bulunamadÄ±."
         )
+

@@ -87,3 +87,4 @@ def test_write_dqm_report_creates_json_file(
         report_data["dqm_scores"][0]["normalized_score"]
         == 100.0
     )
+

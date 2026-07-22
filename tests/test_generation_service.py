@@ -4,9 +4,9 @@ from typing import Final
 
 import pytest
 
-from services.test_generation_service import (
+from services.generation_service import (
     GeneratedTestArtifact,
-    TestGenerationService,
+    GenerationService,
 )
 
 
@@ -17,8 +17,8 @@ MODULE_PATH: Final[str] = "datasets.sample_code"
 def test_generate_for_file_creates_pytest_file(
     tmp_path: Path,
 ) -> None:
-    """Servisin gerçek bir pytest dosyası oluşturduğunu doğrular."""
-    service = TestGenerationService()
+    """Servisin gerÃ§ek bir pytest dosyasÄ± oluÅŸturduÄŸunu doÄŸrular."""
+    service = GenerationService()
 
     artifacts = service.generate_for_file(
         source_file=SOURCE_FILE,
@@ -34,8 +34,8 @@ def test_generate_for_file_creates_pytest_file(
 def test_generate_for_file_returns_artifact_metadata(
     tmp_path: Path,
 ) -> None:
-    """Üretim sonucunun doğru metadata bilgilerini taşıdığını doğrular."""
-    service = TestGenerationService()
+    """Ãœretim sonucunun doÄŸru metadata bilgilerini taÅŸÄ±dÄ±ÄŸÄ±nÄ± doÄŸrular."""
+    service = GenerationService()
 
     artifacts = service.generate_for_file(
         source_file=SOURCE_FILE,
@@ -56,8 +56,8 @@ def test_generate_for_file_returns_artifact_metadata(
 def test_generate_for_file_creates_valid_python_code(
     tmp_path: Path,
 ) -> None:
-    """Servisin oluşturduğu dosyanın geçerli Python kodu olduğunu doğrular."""
-    service = TestGenerationService()
+    """Servisin oluÅŸturduÄŸu dosyanÄ±n geÃ§erli Python kodu olduÄŸunu doÄŸrular."""
+    service = GenerationService()
 
     artifacts = service.generate_for_file(
         source_file=SOURCE_FILE,
@@ -81,14 +81,14 @@ def test_generate_for_file_creates_valid_python_code(
 def test_generate_for_file_rejects_missing_source_file(
     tmp_path: Path,
 ) -> None:
-    """Bulunamayan kaynak dosyanın reddedildiğini doğrular."""
-    service = TestGenerationService()
+    """Bulunamayan kaynak dosyanÄ±n reddedildiÄŸini doÄŸrular."""
+    service = GenerationService()
 
     missing_source = tmp_path / "missing_source.py"
 
     with pytest.raises(
         FileNotFoundError,
-        match="Kaynak dosya bulunamadı",
+        match="Kaynak dosya bulunamadÄ±",
     ):
         service.generate_for_file(
             source_file=missing_source,
@@ -100,8 +100,8 @@ def test_generate_for_file_rejects_missing_source_file(
 def test_generate_for_file_rejects_non_python_source(
     tmp_path: Path,
 ) -> None:
-    """Python dışındaki kaynak dosyaların reddedildiğini doğrular."""
-    service = TestGenerationService()
+    """Python dÄ±ÅŸÄ±ndaki kaynak dosyalarÄ±n reddedildiÄŸini doÄŸrular."""
+    service = GenerationService()
 
     text_file = tmp_path / "sample.txt"
     text_file.write_text(
@@ -111,7 +111,7 @@ def test_generate_for_file_rejects_non_python_source(
 
     with pytest.raises(
         ValueError,
-        match=r"Kaynak dosyanın uzantısı \.py olmalıdır",
+        match=r"Kaynak dosyanÄ±n uzantÄ±sÄ± \.py olmalÄ±dÄ±r",
     ):
         service.generate_for_file(
             source_file=text_file,
@@ -123,8 +123,8 @@ def test_generate_for_file_rejects_non_python_source(
 def test_generate_for_file_rejects_file_without_functions(
     tmp_path: Path,
 ) -> None:
-    """Fonksiyon içermeyen Python dosyasının reddedildiğini doğrular."""
-    service = TestGenerationService()
+    """Fonksiyon iÃ§ermeyen Python dosyasÄ±nÄ±n reddedildiÄŸini doÄŸrular."""
+    service = GenerationService()
 
     source_file = tmp_path / "constants.py"
     source_file.write_text(
@@ -134,7 +134,7 @@ def test_generate_for_file_rejects_file_without_functions(
 
     with pytest.raises(
         ValueError,
-        match="analiz edilebilir fonksiyon bulunamadı",
+        match="analiz edilebilir fonksiyon bulunamadÄ±",
     ):
         service.generate_for_file(
             source_file=source_file,
@@ -146,8 +146,8 @@ def test_generate_for_file_rejects_file_without_functions(
 def test_generate_for_file_protects_existing_output(
     tmp_path: Path,
 ) -> None:
-    """Mevcut test dosyasının varsayılan olarak korunmasını doğrular."""
-    service = TestGenerationService()
+    """Mevcut test dosyasÄ±nÄ±n varsayÄ±lan olarak korunmasÄ±nÄ± doÄŸrular."""
+    service = GenerationService()
     output_directory = tmp_path / "generated"
 
     service.generate_for_file(
@@ -158,7 +158,7 @@ def test_generate_for_file_protects_existing_output(
 
     with pytest.raises(
         FileExistsError,
-        match="Çıktı dosyası zaten mevcut",
+        match="Ã‡Ä±ktÄ± dosyasÄ± zaten mevcut",
     ):
         service.generate_for_file(
             source_file=SOURCE_FILE,
@@ -170,8 +170,8 @@ def test_generate_for_file_protects_existing_output(
 def test_generate_for_file_overwrites_output_when_enabled(
     tmp_path: Path,
 ) -> None:
-    """Overwrite etkinleştirildiğinde mevcut testin yenilendiğini doğrular."""
-    service = TestGenerationService()
+    """Overwrite etkinleÅŸtirildiÄŸinde mevcut testin yenilendiÄŸini doÄŸrular."""
+    service = GenerationService()
     output_directory = tmp_path / "generated"
 
     first_artifacts = service.generate_for_file(
@@ -199,3 +199,4 @@ def test_generate_for_file_overwrites_output_when_enabled(
 
     assert "temporary_content" not in regenerated_content
     assert "def test_calculate_score_" in regenerated_content
+

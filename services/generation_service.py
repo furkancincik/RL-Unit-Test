@@ -15,12 +15,12 @@ from generator.scenario_generator import TestScenarioGenerator
 @dataclass(frozen=True, slots=True)
 class GeneratedTestArtifact:
     """
-    Otomatik test üretim işleminin sonucunu temsil eder.
+    Otomatik test Ã¼retim iÅŸleminin sonucunu temsil eder.
 
     Attributes:
-        function_name: Test üretilen fonksiyonun adı.
-        scenario_count: Fonksiyon için oluşturulan senaryo sayısı.
-        output_path: Oluşturulan pytest dosyasının yolu.
+        function_name: Test Ã¼retilen fonksiyonun adÄ±.
+        scenario_count: Fonksiyon iÃ§in oluÅŸturulan senaryo sayÄ±sÄ±.
+        output_path: OluÅŸturulan pytest dosyasÄ±nÄ±n yolu.
     """
 
     function_name: str
@@ -28,8 +28,8 @@ class GeneratedTestArtifact:
     output_path: Path
 
 
-class TestGenerationService:
-    """Kaynak kod analizinden pytest dosyasına kadar süreci yönetir."""
+class GenerationService:
+    """Kaynak kod analizinden pytest dosyasÄ±na kadar sÃ¼reci yÃ¶netir."""
 
     def __init__(
         self,
@@ -42,19 +42,19 @@ class TestGenerationService:
         file_writer: GeneratedTestFileWriter | None = None,
     ) -> None:
         """
-        Test üretim servisinin bağımlılıklarını hazırlar.
+        Test Ã¼retim servisinin baÄŸÄ±mlÄ±lÄ±klarÄ±nÄ± hazÄ±rlar.
 
-        Bağımlılıklar dışarıdan verilmezse varsayılan uygulamalar
-        otomatik olarak oluşturulur.
+        BaÄŸÄ±mlÄ±lÄ±klar dÄ±ÅŸarÄ±dan verilmezse varsayÄ±lan uygulamalar
+        otomatik olarak oluÅŸturulur.
 
         Args:
-            analyzer: Python statik analiz bileşeni.
-            cfg_builder: Control Flow Graph üreticisi.
-            path_analyzer: Yürütme yolu analiz bileşeni.
-            dqm: DQM değerlendirme bileşeni.
-            scenario_generator: Test senaryosu üreticisi.
-            pytest_generator: Pytest kaynak kodu üreticisi.
-            file_writer: Üretilen kodu dosyaya yazan bileşen.
+            analyzer: Python statik analiz bileÅŸeni.
+            cfg_builder: Control Flow Graph Ã¼reticisi.
+            path_analyzer: YÃ¼rÃ¼tme yolu analiz bileÅŸeni.
+            dqm: DQM deÄŸerlendirme bileÅŸeni.
+            scenario_generator: Test senaryosu Ã¼reticisi.
+            pytest_generator: Pytest kaynak kodu Ã¼reticisi.
+            file_writer: Ãœretilen kodu dosyaya yazan bileÅŸen.
         """
         self._analyzer = analyzer or PythonAnalyzer()
         self._cfg_builder = cfg_builder or ControlFlowGraphBuilder()
@@ -79,26 +79,26 @@ class TestGenerationService:
         overwrite: bool = False,
     ) -> list[GeneratedTestArtifact]:
         """
-        Kaynak dosyadaki fonksiyonlar için pytest dosyaları üretir.
+        Kaynak dosyadaki fonksiyonlar iÃ§in pytest dosyalarÄ± Ã¼retir.
 
-        Her fonksiyon için analiz, CFG, yürütme yolu, DQM ve test
-        senaryosu işlemleri uygulanır. Üretilen pytest kodu belirtilen
-        çıktı klasörüne kaydedilir.
+        Her fonksiyon iÃ§in analiz, CFG, yÃ¼rÃ¼tme yolu, DQM ve test
+        senaryosu iÅŸlemleri uygulanÄ±r. Ãœretilen pytest kodu belirtilen
+        Ã§Ä±ktÄ± klasÃ¶rÃ¼ne kaydedilir.
 
         Args:
-            source_file: Analiz edilecek Python kaynak dosyası.
-            module_path: Kaynak dosyanın Python import yolu.
-                Örnek: ``datasets.sample_code``.
-            output_directory: Üretilen testlerin kaydedileceği klasör.
-            overwrite: Mevcut test dosyalarının üzerine yazılmasına
-                izin verilip verilmediği.
+            source_file: Analiz edilecek Python kaynak dosyasÄ±.
+            module_path: Kaynak dosyanÄ±n Python import yolu.
+                Ã–rnek: ``datasets.sample_code``.
+            output_directory: Ãœretilen testlerin kaydedileceÄŸi klasÃ¶r.
+            overwrite: Mevcut test dosyalarÄ±nÄ±n Ã¼zerine yazÄ±lmasÄ±na
+                izin verilip verilmediÄŸi.
 
         Returns:
-            Oluşturulan test dosyalarına ait sonuç listesi.
+            OluÅŸturulan test dosyalarÄ±na ait sonuÃ§ listesi.
 
         Raises:
             ValueError: Kaynak dosyada analiz edilebilir fonksiyon veya
-                eşleşen CFG bulunmadığında.
+                eÅŸleÅŸen CFG bulunmadÄ±ÄŸÄ±nda.
         """
         normalized_source_file = self._normalize_source_file(
             source_file
@@ -116,17 +116,17 @@ class TestGenerationService:
 
         if not analysis_result.functions:
             raise ValueError(
-                "Kaynak dosyada analiz edilebilir fonksiyon bulunamadı."
+                "Kaynak dosyada analiz edilebilir fonksiyon bulunamadÄ±."
             )
 
         if not graphs:
             raise ValueError(
-                "Kaynak dosyada test üretimine uygun CFG bulunamadı."
+                "Kaynak dosyada test Ã¼retimine uygun CFG bulunamadÄ±."
             )
 
         if len(analysis_result.functions) != len(graphs):
             raise ValueError(
-                "Fonksiyon analizi ile CFG sonuçlarının sayısı eşleşmiyor."
+                "Fonksiyon analizi ile CFG sonuÃ§larÄ±nÄ±n sayÄ±sÄ± eÅŸleÅŸmiyor."
             )
 
         artifacts: list[GeneratedTestArtifact] = []
@@ -181,42 +181,42 @@ class TestGenerationService:
         source_file: str | Path,
     ) -> Path:
         """
-        Kaynak dosya yolunu doğrular.
+        Kaynak dosya yolunu doÄŸrular.
 
         Args:
-            source_file: Analiz edilecek dosyanın yolu.
+            source_file: Analiz edilecek dosyanÄ±n yolu.
 
         Returns:
-            Doğrulanmış Path nesnesi.
+            DoÄŸrulanmÄ±ÅŸ Path nesnesi.
 
         Raises:
-            TypeError: Yol string veya Path değilse.
-            ValueError: Yol boşsa veya uzantısı ``.py`` değilse.
+            TypeError: Yol string veya Path deÄŸilse.
+            ValueError: Yol boÅŸsa veya uzantÄ±sÄ± ``.py`` deÄŸilse.
             FileNotFoundError: Kaynak dosya bulunamazsa.
         """
         if not isinstance(source_file, (str, Path)):
             raise TypeError(
-                "Kaynak dosya yolu string veya Path olmalıdır."
+                "Kaynak dosya yolu string veya Path olmalÄ±dÄ±r."
             )
 
         if isinstance(source_file, str) and not source_file.strip():
-            raise ValueError("Kaynak dosya yolu boş olamaz.")
+            raise ValueError("Kaynak dosya yolu boÅŸ olamaz.")
 
         path = Path(source_file)
 
         if path.suffix.lower() != ".py":
             raise ValueError(
-                "Kaynak dosyanın uzantısı .py olmalıdır."
+                "Kaynak dosyanÄ±n uzantÄ±sÄ± .py olmalÄ±dÄ±r."
             )
 
         if not path.exists():
             raise FileNotFoundError(
-                f"Kaynak dosya bulunamadı: {path}"
+                f"Kaynak dosya bulunamadÄ±: {path}"
             )
 
         if not path.is_file():
             raise ValueError(
-                f"Kaynak dosya yolu bir dosya olmalıdır: {path}"
+                f"Kaynak dosya yolu bir dosya olmalÄ±dÄ±r: {path}"
             )
 
         return path
@@ -226,27 +226,28 @@ class TestGenerationService:
         output_directory: str | Path,
     ) -> Path:
         """
-        Çıktı klasörü yolunu doğrular.
+        Ã‡Ä±ktÄ± klasÃ¶rÃ¼ yolunu doÄŸrular.
 
         Args:
-            output_directory: Test dosyalarının kaydedileceği klasör.
+            output_directory: Test dosyalarÄ±nÄ±n kaydedileceÄŸi klasÃ¶r.
 
         Returns:
-            Normalize edilmiş Path nesnesi.
+            Normalize edilmiÅŸ Path nesnesi.
 
         Raises:
-            TypeError: Yol string veya Path değilse.
-            ValueError: Yol boşsa.
+            TypeError: Yol string veya Path deÄŸilse.
+            ValueError: Yol boÅŸsa.
         """
         if not isinstance(output_directory, (str, Path)):
             raise TypeError(
-                "Çıktı klasörü string veya Path olmalıdır."
+                "Ã‡Ä±ktÄ± klasÃ¶rÃ¼ string veya Path olmalÄ±dÄ±r."
             )
 
         if (
             isinstance(output_directory, str)
             and not output_directory.strip()
         ):
-            raise ValueError("Çıktı klasörü boş olamaz.")
+            raise ValueError("Ã‡Ä±ktÄ± klasÃ¶rÃ¼ boÅŸ olamaz.")
 
         return Path(output_directory)
+

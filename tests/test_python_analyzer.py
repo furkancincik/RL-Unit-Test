@@ -48,7 +48,7 @@ def test_analyze_file_rejects_non_python_files(
 
     text_file = tmp_path / "sample.txt"
     text_file.write_text(
-        "örnek içerik",
+        "Ã¶rnek iÃ§erik",
         encoding="utf-8",
     )
 
@@ -89,3 +89,4 @@ def test_determine_risk_level(
     result = PythonAnalyzer._determine_risk_level(complexity)
 
     assert result == expected_risk
+

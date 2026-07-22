@@ -10,7 +10,7 @@ SOURCE_FILE = "datasets/sample_code.py"
 
 
 def create_scenarios():
-    """Testlerde kullanılacak senaryoları üretir."""
+    """Testlerde kullanÄ±lacak senaryolarÄ± Ã¼retir."""
     analyzer = PythonAnalyzer()
     cfg_builder = ControlFlowGraphBuilder()
     path_analyzer = CFGPathAnalyzer()
@@ -82,10 +82,11 @@ def test_generate_rejects_empty_function_name() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Fonksiyon adı boş olamaz",
+        match="Fonksiyon adÄ± boÅŸ olamaz",
     ):
         generator.generate(
             function_name=" ",
             paths=[],
             scores=[],
         )
+

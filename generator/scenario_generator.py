@@ -9,20 +9,20 @@ from evaluator.dqm import DQMScore
 @dataclass(frozen=True, slots=True)
 class TestScenario:
     """
-    Bir yürütme yolu için oluşturulan öncelikli test senaryosunu temsil eder.
+    Bir yÃ¼rÃ¼tme yolu iÃ§in oluÅŸturulan Ã¶ncelikli test senaryosunu temsil eder.
 
     Attributes:
-        scenario_id: Senaryonun benzersiz kimliği.
-        name: Test senaryosunun okunabilir adı.
-        path_index: Senaryonun ilişkili olduğu yürütme yolu numarası.
-        priority_rank: DQM sıralamasındaki öncelik sırası.
-        priority_level: Senaryonun High, Medium veya Low öncelik seviyesi.
-        dqm_score: Normalize edilmiş DQM skoru.
-        node_ids: Yürütme yolunda ziyaret edilen CFG düğümleri.
-        edge_labels: Yürütme yolundaki kenar etiketleri.
-        contains_loop: Yolun döngü içerip içermediği.
-        contains_exception: Yolun istisna akışı içerip içermediği.
-        description: Senaryonun açıklaması.
+        scenario_id: Senaryonun benzersiz kimliÄŸi.
+        name: Test senaryosunun okunabilir adÄ±.
+        path_index: Senaryonun iliÅŸkili olduÄŸu yÃ¼rÃ¼tme yolu numarasÄ±.
+        priority_rank: DQM sÄ±ralamasÄ±ndaki Ã¶ncelik sÄ±rasÄ±.
+        priority_level: Senaryonun High, Medium veya Low Ã¶ncelik seviyesi.
+        dqm_score: Normalize edilmiÅŸ DQM skoru.
+        node_ids: YÃ¼rÃ¼tme yolunda ziyaret edilen CFG dÃ¼ÄŸÃ¼mleri.
+        edge_labels: YÃ¼rÃ¼tme yolundaki kenar etiketleri.
+        contains_loop: Yolun dÃ¶ngÃ¼ iÃ§erip iÃ§ermediÄŸi.
+        contains_exception: Yolun istisna akÄ±ÅŸÄ± iÃ§erip iÃ§ermediÄŸi.
+        description: Senaryonun aÃ§Ä±klamasÄ±.
     """
 
     scenario_id: str
@@ -39,7 +39,7 @@ class TestScenario:
 
 
 class TestScenarioGenerator:
-    """DQM sonuçlarından önceliklendirilmiş test senaryoları üretir."""
+    """DQM sonuÃ§larÄ±ndan Ã¶nceliklendirilmiÅŸ test senaryolarÄ± Ã¼retir."""
 
     def generate(
         self,
@@ -48,23 +48,23 @@ class TestScenarioGenerator:
         scores: list[DQMScore],
     ) -> list[TestScenario]:
         """
-        Bir fonksiyona ait yürütme yollarını test senaryolarına dönüştürür.
+        Bir fonksiyona ait yÃ¼rÃ¼tme yollarÄ±nÄ± test senaryolarÄ±na dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r.
 
         Args:
-            function_name: Analiz edilen fonksiyonun adı.
-            paths: CFG üzerinden elde edilen yürütme yolları.
-            scores: DQM tarafından önceliklendirilmiş yol skorları.
+            function_name: Analiz edilen fonksiyonun adÄ±.
+            paths: CFG Ã¼zerinden elde edilen yÃ¼rÃ¼tme yollarÄ±.
+            scores: DQM tarafÄ±ndan Ã¶nceliklendirilmiÅŸ yol skorlarÄ±.
 
         Returns:
-            DQM önceliğine göre sıralanmış test senaryoları.
+            DQM Ã¶nceliÄŸine gÃ¶re sÄ±ralanmÄ±ÅŸ test senaryolarÄ±.
 
         Raises:
-            ValueError: Fonksiyon adı boşsa veya geçersiz yol numarası varsa.
+            ValueError: Fonksiyon adÄ± boÅŸsa veya geÃ§ersiz yol numarasÄ± varsa.
         """
         normalized_function_name = function_name.strip()
 
         if not normalized_function_name:
-            raise ValueError("Fonksiyon adı boş olamaz.")
+            raise ValueError("Fonksiyon adÄ± boÅŸ olamaz.")
 
         scenarios: list[TestScenario] = []
 
@@ -107,23 +107,23 @@ class TestScenarioGenerator:
         path_index: int,
     ) -> ExecutionPath:
         """
-        Bir tabanlı yol numarasına göre yürütme yolunu döndürür.
+        Bir tabanlÄ± yol numarasÄ±na gÃ¶re yÃ¼rÃ¼tme yolunu dÃ¶ndÃ¼rÃ¼r.
 
         Args:
-            paths: Mevcut yürütme yolları.
-            path_index: DQM sonucundaki bir tabanlı yol numarası.
+            paths: Mevcut yÃ¼rÃ¼tme yollarÄ±.
+            path_index: DQM sonucundaki bir tabanlÄ± yol numarasÄ±.
 
         Returns:
-            İstenen yürütme yolu.
+            Ä°stenen yÃ¼rÃ¼tme yolu.
 
         Raises:
-            ValueError: Yol numarası mevcut yollarla eşleşmiyorsa.
+            ValueError: Yol numarasÄ± mevcut yollarla eÅŸleÅŸmiyorsa.
         """
         zero_based_index = path_index - 1
 
         if zero_based_index < 0 or zero_based_index >= len(paths):
             raise ValueError(
-                f"Geçersiz yürütme yolu numarası: {path_index}"
+                f"GeÃ§ersiz yÃ¼rÃ¼tme yolu numarasÄ±: {path_index}"
             )
 
         return paths[zero_based_index]
@@ -133,7 +133,7 @@ class TestScenarioGenerator:
         function_name: str,
         priority_rank: int,
     ) -> str:
-        """Senaryo için kararlı bir kimlik oluşturur."""
+        """Senaryo iÃ§in kararlÄ± bir kimlik oluÅŸturur."""
         return (
             f"{function_name.lower()}_"
             f"scenario_{priority_rank:03d}"
@@ -144,10 +144,10 @@ class TestScenarioGenerator:
         function_name: str,
         path_index: int,
     ) -> str:
-        """Okunabilir test senaryosu adı oluşturur."""
+        """Okunabilir test senaryosu adÄ± oluÅŸturur."""
         return (
             f"{function_name} fonksiyonu "
-            f"yürütme yolu {path_index}"
+            f"yÃ¼rÃ¼tme yolu {path_index}"
         )
 
     @staticmethod
@@ -155,22 +155,23 @@ class TestScenarioGenerator:
         function_name: str,
         score: DQMScore,
     ) -> str:
-        """DQM bilgilerine göre senaryo açıklaması oluşturur."""
+        """DQM bilgilerine gÃ¶re senaryo aÃ§Ä±klamasÄ± oluÅŸturur."""
         properties: list[str] = [
-            f"{score.priority_level} öncelikli",
+            f"{score.priority_level} Ã¶ncelikli",
             f"DQM skoru {score.normalized_score}",
         ]
 
         if score.contains_loop:
-            properties.append("döngü akışı içeriyor")
+            properties.append("dÃ¶ngÃ¼ akÄ±ÅŸÄ± iÃ§eriyor")
 
         if score.contains_exception:
-            properties.append("istisna akışı içeriyor")
+            properties.append("istisna akÄ±ÅŸÄ± iÃ§eriyor")
 
         joined_properties = ", ".join(properties)
 
         return (
             f"{function_name} fonksiyonunun "
-            f"{score.path_index}. yürütme yolu için oluşturuldu; "
+            f"{score.path_index}. yÃ¼rÃ¼tme yolu iÃ§in oluÅŸturuldu; "
             f"{joined_properties}."
         )
+

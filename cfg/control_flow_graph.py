@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass
 class CFGNode:
-    """Kontrol akış grafiğindeki bir düğümü temsil eder."""
+    """Kontrol akÄ±ÅŸ grafiÄŸindeki bir dÃ¼ÄŸÃ¼mÃ¼ temsil eder."""
 
     node_id: int
     label: str
@@ -17,7 +17,7 @@ class CFGNode:
 
 @dataclass
 class CFGEdge:
-    """İki CFG düğümü arasındaki yönlü bağlantıyı temsil eder."""
+    """Ä°ki CFG dÃ¼ÄŸÃ¼mÃ¼ arasÄ±ndaki yÃ¶nlÃ¼ baÄŸlantÄ±yÄ± temsil eder."""
 
     source_id: int
     target_id: int
@@ -26,7 +26,7 @@ class CFGEdge:
 
 @dataclass
 class ControlFlowGraph:
-    """Bir fonksiyona ait kontrol akış grafiğini temsil eder."""
+    """Bir fonksiyona ait kontrol akÄ±ÅŸ grafiÄŸini temsil eder."""
 
     function_name: str
     nodes: list[CFGNode] = field(default_factory=list)
@@ -34,7 +34,7 @@ class ControlFlowGraph:
 
 
 class ControlFlowGraphBuilder:
-    """Python fonksiyonlarından kontrol akış grafiği üretir."""
+    """Python fonksiyonlarÄ±ndan kontrol akÄ±ÅŸ grafiÄŸi Ã¼retir."""
 
     def __init__(self) -> None:
         self._node_counter = 0
@@ -45,18 +45,18 @@ class ControlFlowGraphBuilder:
         file_path: str | Path,
     ) -> list[ControlFlowGraph]:
         """
-        Python dosyasındaki fonksiyonlar için CFG üretir.
+        Python dosyasÄ±ndaki fonksiyonlar iÃ§in CFG Ã¼retir.
 
         Args:
-            file_path: Analiz edilecek Python dosyasının yolu.
+            file_path: Analiz edilecek Python dosyasÄ±nÄ±n yolu.
 
         Returns:
-            Fonksiyonlara ait kontrol akış graflarının listesi.
+            Fonksiyonlara ait kontrol akÄ±ÅŸ graflarÄ±nÄ±n listesi.
 
         Raises:
             FileNotFoundError: Dosya bulunamazsa.
-            ValueError: Dosya Python dosyası değilse.
-            SyntaxError: Python sözdizimi geçersizse.
+            ValueError: Dosya Python dosyasÄ± deÄŸilse.
+            SyntaxError: Python sÃ¶zdizimi geÃ§ersizse.
         """
         path = Path(file_path)
 
@@ -80,7 +80,7 @@ class ControlFlowGraphBuilder:
         self,
         function_node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> ControlFlowGraph:
-        """Tek bir fonksiyon için CFG oluşturur."""
+        """Tek bir fonksiyon iÃ§in CFG oluÅŸturur."""
         self._node_counter = 0
         self._graph = ControlFlowGraph(
             function_name=function_node.name,
@@ -119,10 +119,10 @@ class ControlFlowGraphBuilder:
         end_node_id: int,
     ) -> list[tuple[int, str | None]]:
         """
-        Bir kod bloğundaki ifadeleri sırayla CFG'ye ekler.
+        Bir kod bloÄŸundaki ifadeleri sÄ±rayla CFG'ye ekler.
 
         Returns:
-            Bloğun devam edebilen çıkış yolları.
+            BloÄŸun devam edebilen Ã§Ä±kÄ±ÅŸ yollarÄ±.
         """
         current_paths = incoming_paths
 
@@ -203,7 +203,7 @@ class ControlFlowGraphBuilder:
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
     ) -> list[tuple[int, str | None]]:
-        """Bir if ifadesinin True ve False yollarını oluşturur."""
+        """Bir if ifadesinin True ve False yollarÄ±nÄ± oluÅŸturur."""
         condition_node = self._create_node(
             label=ast.unparse(statement.test),
             node_type="if",
@@ -240,7 +240,7 @@ class ControlFlowGraphBuilder:
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
     ) -> list[tuple[int, str | None]]:
-        """While döngüsünün kontrol akışını oluşturur."""
+        """While dÃ¶ngÃ¼sÃ¼nÃ¼n kontrol akÄ±ÅŸÄ±nÄ± oluÅŸturur."""
         condition_node = self._create_node(
             label=ast.unparse(statement.test),
             node_type="while",
@@ -286,7 +286,7 @@ class ControlFlowGraphBuilder:
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
     ) -> list[tuple[int, str | None]]:
-        """For döngüsünün kontrol akışını oluşturur."""
+        """For dÃ¶ngÃ¼sÃ¼nÃ¼n kontrol akÄ±ÅŸÄ±nÄ± oluÅŸturur."""
         loop_label = (
             f"{ast.unparse(statement.target)} in "
             f"{ast.unparse(statement.iter)}"
@@ -337,7 +337,7 @@ class ControlFlowGraphBuilder:
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
     ) -> list[tuple[int, str | None]]:
-        """Try/except yapısının kontrol akışını oluşturur."""
+        """Try/except yapÄ±sÄ±nÄ±n kontrol akÄ±ÅŸÄ±nÄ± oluÅŸturur."""
         try_node = self._create_node(
             label="try",
             node_type="try",
@@ -413,9 +413,9 @@ class ControlFlowGraphBuilder:
         node_type: str,
         line_number: int | None = None,
     ) -> CFGNode:
-        """Yeni bir CFG düğümü oluşturur."""
+        """Yeni bir CFG dÃ¼ÄŸÃ¼mÃ¼ oluÅŸturur."""
         if self._graph is None:
-            raise RuntimeError("CFG henüz başlatılmadı.")
+            raise RuntimeError("CFG henÃ¼z baÅŸlatÄ±lmadÄ±.")
 
         self._node_counter += 1
 
@@ -436,9 +436,9 @@ class ControlFlowGraphBuilder:
         target_id: int,
         label: str | None = None,
     ) -> None:
-        """CFG'ye yönlü bir kenar ekler."""
+        """CFG'ye yÃ¶nlÃ¼ bir kenar ekler."""
         if self._graph is None:
-            raise RuntimeError("CFG henüz başlatılmadı.")
+            raise RuntimeError("CFG henÃ¼z baÅŸlatÄ±lmadÄ±.")
 
         self._graph.edges.append(
             CFGEdge(
@@ -453,7 +453,7 @@ class ControlFlowGraphBuilder:
         incoming_paths: list[tuple[int, str | None]],
         target_id: int,
     ) -> None:
-        """Önceki yolları verilen hedef düğüme bağlar."""
+        """Ã–nceki yollarÄ± verilen hedef dÃ¼ÄŸÃ¼me baÄŸlar."""
         for source_id, edge_label in incoming_paths:
             self._add_edge(
                 source_id=source_id,
@@ -463,23 +463,24 @@ class ControlFlowGraphBuilder:
 
     @staticmethod
     def _statement_to_text(statement: ast.stmt) -> str:
-        """AST ifadesini okunabilir Python metnine dönüştürür."""
+        """AST ifadesini okunabilir Python metnine dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r."""
         return ast.unparse(statement)
 
     @staticmethod
     def _validate_file(path: Path) -> None:
-        """Analiz edilecek dosyanın geçerliliğini kontrol eder."""
+        """Analiz edilecek dosyanÄ±n geÃ§erliliÄŸini kontrol eder."""
         if not path.exists():
             raise FileNotFoundError(
-                f"Dosya bulunamadı: {path}"
+                f"Dosya bulunamadÄ±: {path}"
             )
 
         if not path.is_file():
             raise ValueError(
-                f"Belirtilen yol bir dosya değil: {path}"
+                f"Belirtilen yol bir dosya deÄŸil: {path}"
             )
 
         if path.suffix.lower() != ".py":
             raise ValueError(
-                "Yalnızca Python dosyaları analiz edilebilir."
+                "YalnÄ±zca Python dosyalarÄ± analiz edilebilir."
             )
+

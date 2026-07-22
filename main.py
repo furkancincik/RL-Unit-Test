@@ -1,11 +1,19 @@
+﻿from pathlib import Path
+
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from cfg.path_analyzer import CFGPathAnalyzer
 from evaluator.dqm import DecisionQualityMatrix
 from reports.json_reporter import JSONReportWriter
+from services.automation_service import (
+    AutomationService,
+    AutomationSummary,
+)
 
 
 SOURCE_FILE = "datasets/sample_code.py"
+MODULE_PATH = "datasets.sample_code"
+GENERATED_TEST_DIRECTORY = Path("output/generated_tests")
 
 
 def print_analyzer_report() -> None:
@@ -113,6 +121,7 @@ def print_dqm_report() -> None:
     for function, graph in zip(
         analysis_result.functions,
         graphs,
+        strict=True,
     ):
         paths = path_analyzer.find_paths(graph)
 
@@ -182,6 +191,7 @@ def create_dqm_json_report() -> None:
     for function, graph in zip(
         analysis_result.functions,
         graphs,
+        strict=True,
     ):
         paths = path_analyzer.find_paths(graph)
 
@@ -209,6 +219,118 @@ def create_dqm_json_report() -> None:
         )
 
 
+def run_automated_test_pipeline(
+    source_file: str | Path = SOURCE_FILE,
+    module_path: str = MODULE_PATH,
+    output_directory: str | Path = GENERATED_TEST_DIRECTORY,
+    *,
+    overwrite: bool = True,
+    timeout_seconds: float = 30.0,
+) -> AutomationSummary:
+    """
+    Kaynak dosya için otomatik pytest dosyaları üretir ve çalıştırır.
+
+    Args:
+        source_file: Analiz edilecek Python kaynak dosyası.
+        module_path: Kaynak dosyanın Python modül yolu.
+        output_directory: Üretilen testlerin kaydedileceği klasör.
+        overwrite: Mevcut test dosyalarının yenilenmesine izin verir.
+        timeout_seconds: Her test dosyası için çalışma süresi sınırı.
+
+    Returns:
+        Test üretme ve çalıştırma sonuçlarını içeren özet.
+    """
+    service = AutomationService()
+
+    summary = service.generate_and_execute(
+        source_file=source_file,
+        module_path=module_path,
+        output_directory=output_directory,
+        overwrite=overwrite,
+        timeout_seconds=timeout_seconds,
+    )
+
+    print("=" * 65)
+    print("OTOMATİK TEST ÜRETİM VE ÇALIŞTIRMA RAPORU")
+    print("=" * 65)
+
+    print(
+        f"Üretilen Test Dosyası     : "
+        f"{summary.generated_file_count}"
+    )
+    print(
+        f"Başarılı Test Dosyası     : "
+        f"{summary.successful_file_count}"
+    )
+    print(
+        f"Başarısız Test Dosyası    : "
+        f"{summary.failed_file_count}"
+    )
+    print(
+        f"Üretilen Senaryo Sayısı   : "
+        f"{summary.total_generated_scenario_count}"
+    )
+    print(
+        f"Başarılı Pytest Sayısı    : "
+        f"{summary.total_passed_test_count}"
+    )
+    print(
+        f"Başarısız Pytest Sayısı   : "
+        f"{summary.total_failed_test_count}"
+    )
+    print(
+        f"Genel İşlem Başarılı mı?  : "
+        f"{summary.success}"
+    )
+
+    for index, result in enumerate(
+        summary.results,
+        start=1,
+    ):
+        print("\n" + "-" * 65)
+        print(f"TEST DOSYASI #{index}")
+        print("-" * 65)
+
+        print(
+            f"Fonksiyon Adı             : "
+            f"{result.artifact.function_name}"
+        )
+        print(
+            f"Senaryo Sayısı            : "
+            f"{result.artifact.scenario_count}"
+        )
+        print(
+            f"Dosya Yolu                : "
+            f"{result.artifact.output_path}"
+        )
+        print(
+            f"Çıkış Kodu                : "
+            f"{result.execution.exit_code}"
+        )
+        print(
+            f"Çalışma Süresi            : "
+            f"{result.execution.duration_seconds:.3f} saniye"
+        )
+        print(
+            f"Başarılı Test             : "
+            f"{result.execution.passed_count}"
+        )
+        print(
+            f"Başarısız Test            : "
+            f"{result.execution.failed_count}"
+        )
+        print(
+            f"Hatalı Test               : "
+            f"{result.execution.error_count}"
+        )
+        print(
+            f"Atlanan Test              : "
+            f"{result.execution.skipped_count}"
+        )
+
+    return summary
+
+
 def print_menu() -> None:
     """Uygulama ana menüsünü ekrana yazdırır."""
     print("\n" + "=" * 55)
@@ -218,6 +340,7 @@ def print_menu() -> None:
     print("2 - Control Flow Graph")
     print("3 - DQM yol önceliklendirme")
     print("4 - DQM JSON raporu oluştur")
+    print("5 - Otomatik test üret ve çalıştır")
     print("0 - Çıkış")
 
 
@@ -248,13 +371,32 @@ def main() -> None:
             create_dqm_json_report()
             continue
 
+        if choice == "5":
+            print()
+
+            try:
+                run_automated_test_pipeline()
+            except (
+                FileNotFoundError,
+                TypeError,
+                ValueError,
+                TimeoutError,
+                OSError,
+            ) as error:
+                print(
+                    "Otomatik test işlemi tamamlanamadı: "
+                    f"{error}"
+                )
+
+            continue
+
         if choice == "0":
             print("\nProgram sonlandırıldı.")
             break
 
         print(
             "\nGeçersiz seçim. "
-            "Lütfen 0, 1, 2, 3 veya 4 girin."
+            "Lütfen 0, 1, 2, 3, 4 veya 5 girin."
         )
 
 

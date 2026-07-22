@@ -83,3 +83,4 @@ def test_dqm_returns_empty_list_for_empty_paths() -> None:
     )
 
     assert scores == []
+

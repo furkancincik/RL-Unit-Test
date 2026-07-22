@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 class GeneratedTestFileWriter:
-    """Üretilen pytest kaynak kodunu güvenli biçimde dosyaya yazar."""
+    """Ãœretilen pytest kaynak kodunu gÃ¼venli biÃ§imde dosyaya yazar."""
 
     def write(
         self,
@@ -19,23 +19,23 @@ class GeneratedTestFileWriter:
         """
         Python kaynak kodunu belirtilen dosyaya kaydeder.
 
-        Yazma işleminden önce kaynak kodun geçerli Python sözdizimine
-        sahip olduğu doğrulanır. Dosya, geçici bir dosya üzerinden atomik
-        olarak oluşturulur.
+        Yazma iÅŸleminden Ã¶nce kaynak kodun geÃ§erli Python sÃ¶zdizimine
+        sahip olduÄŸu doÄŸrulanÄ±r. Dosya, geÃ§ici bir dosya Ã¼zerinden atomik
+        olarak oluÅŸturulur.
 
         Args:
-            source_code: Dosyaya yazılacak Python kaynak kodu.
-            output_path: Oluşturulacak ``.py`` dosyasının yolu.
-            overwrite: Mevcut dosyanın üzerine yazılmasına izin verilip
-                verilmediği.
+            source_code: Dosyaya yazÄ±lacak Python kaynak kodu.
+            output_path: OluÅŸturulacak ``.py`` dosyasÄ±nÄ±n yolu.
+            overwrite: Mevcut dosyanÄ±n Ã¼zerine yazÄ±lmasÄ±na izin verilip
+                verilmediÄŸi.
 
         Returns:
-            Oluşturulan dosyanın Path nesnesi.
+            OluÅŸturulan dosyanÄ±n Path nesnesi.
 
         Raises:
-            TypeError: Kaynak kod veya çıktı yolu geçersiz türdeyse.
-            ValueError: Kaynak kod boşsa, Python sözdizimi geçersizse
-                veya çıktı uzantısı ``.py`` değilse.
+            TypeError: Kaynak kod veya Ã§Ä±ktÄ± yolu geÃ§ersiz tÃ¼rdeyse.
+            ValueError: Kaynak kod boÅŸsa, Python sÃ¶zdizimi geÃ§ersizse
+                veya Ã§Ä±ktÄ± uzantÄ±sÄ± ``.py`` deÄŸilse.
             FileExistsError: Dosya mevcutken overwrite False ise.
         """
         normalized_source = self._validate_source_code(source_code)
@@ -43,7 +43,7 @@ class GeneratedTestFileWriter:
 
         if path.exists() and not overwrite:
             raise FileExistsError(
-                f"Çıktı dosyası zaten mevcut: {path}"
+                f"Ã‡Ä±ktÄ± dosyasÄ± zaten mevcut: {path}"
             )
 
         path.parent.mkdir(
@@ -61,31 +61,31 @@ class GeneratedTestFileWriter:
     @staticmethod
     def _validate_source_code(source_code: str) -> str:
         """
-        Python kaynak kodunu doğrular.
+        Python kaynak kodunu doÄŸrular.
 
         Args:
-            source_code: Doğrulanacak kaynak kod.
+            source_code: DoÄŸrulanacak kaynak kod.
 
         Returns:
-            Doğrulanmış kaynak kod.
+            DoÄŸrulanmÄ±ÅŸ kaynak kod.
 
         Raises:
-            TypeError: Kaynak kod string değilse.
-            ValueError: Kaynak kod boşsa veya sözdizimi geçersizse.
+            TypeError: Kaynak kod string deÄŸilse.
+            ValueError: Kaynak kod boÅŸsa veya sÃ¶zdizimi geÃ§ersizse.
         """
         if not isinstance(source_code, str):
             raise TypeError(
-                "Kaynak kod string türünde olmalıdır."
+                "Kaynak kod string tÃ¼rÃ¼nde olmalÄ±dÄ±r."
             )
 
         if not source_code.strip():
-            raise ValueError("Kaynak kod boş olamaz.")
+            raise ValueError("Kaynak kod boÅŸ olamaz.")
 
         try:
             ast.parse(source_code)
         except SyntaxError as error:
             raise ValueError(
-                "Kaynak kod geçerli Python sözdizimine sahip değil."
+                "Kaynak kod geÃ§erli Python sÃ¶zdizimine sahip deÄŸil."
             ) from error
 
         return source_code
@@ -95,31 +95,31 @@ class GeneratedTestFileWriter:
         output_path: str | Path,
     ) -> Path:
         """
-        Çıktı dosyası yolunu doğrular ve Path nesnesine dönüştürür.
+        Ã‡Ä±ktÄ± dosyasÄ± yolunu doÄŸrular ve Path nesnesine dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r.
 
         Args:
-            output_path: Doğrulanacak çıktı yolu.
+            output_path: DoÄŸrulanacak Ã§Ä±ktÄ± yolu.
 
         Returns:
-            Normalize edilmiş Path nesnesi.
+            Normalize edilmiÅŸ Path nesnesi.
 
         Raises:
-            TypeError: Yol string veya Path değilse.
-            ValueError: Yol boşsa veya uzantısı ``.py`` değilse.
+            TypeError: Yol string veya Path deÄŸilse.
+            ValueError: Yol boÅŸsa veya uzantÄ±sÄ± ``.py`` deÄŸilse.
         """
         if not isinstance(output_path, (str, Path)):
             raise TypeError(
-                "Çıktı yolu string veya Path türünde olmalıdır."
+                "Ã‡Ä±ktÄ± yolu string veya Path tÃ¼rÃ¼nde olmalÄ±dÄ±r."
             )
 
         if isinstance(output_path, str) and not output_path.strip():
-            raise ValueError("Çıktı yolu boş olamaz.")
+            raise ValueError("Ã‡Ä±ktÄ± yolu boÅŸ olamaz.")
 
         path = Path(output_path)
 
         if path.suffix.lower() != ".py":
             raise ValueError(
-                "Çıktı dosyasının uzantısı .py olmalıdır."
+                "Ã‡Ä±ktÄ± dosyasÄ±nÄ±n uzantÄ±sÄ± .py olmalÄ±dÄ±r."
             )
 
         return path
@@ -130,11 +130,11 @@ class GeneratedTestFileWriter:
         output_path: Path,
     ) -> None:
         """
-        Kaynak kodu geçici dosya üzerinden atomik biçimde yazar.
+        Kaynak kodu geÃ§ici dosya Ã¼zerinden atomik biÃ§imde yazar.
 
         Args:
-            source_code: Yazılacak Python kaynak kodu.
-            output_path: Nihai çıktı dosyasının yolu.
+            source_code: YazÄ±lacak Python kaynak kodu.
+            output_path: Nihai Ã§Ä±ktÄ± dosyasÄ±nÄ±n yolu.
         """
         temporary_path: Path | None = None
 
@@ -160,3 +160,4 @@ class GeneratedTestFileWriter:
                 temporary_path.unlink(missing_ok=True)
 
             raise
+

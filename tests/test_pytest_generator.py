@@ -22,11 +22,11 @@ FUNCTION_NAME: Final[str] = "calculate_score"
 
 def create_generated_pytest_code() -> tuple[str, str, int]:
     """
-    Gerçek analiz işlem hattını kullanarak pytest kaynak kodu üretir.
+    GerÃ§ek analiz iÅŸlem hattÄ±nÄ± kullanarak pytest kaynak kodu Ã¼retir.
 
     Returns:
-        Üretilen pytest kaynak kodunu, analiz edilen fonksiyonun adını
-        ve oluşturulan senaryo sayısını içeren tuple.
+        Ãœretilen pytest kaynak kodunu, analiz edilen fonksiyonun adÄ±nÄ±
+        ve oluÅŸturulan senaryo sayÄ±sÄ±nÄ± iÃ§eren tuple.
     """
     analyzer = PythonAnalyzer()
     cfg_builder = ControlFlowGraphBuilder()
@@ -71,23 +71,23 @@ def create_minimal_scenario(
     scenario_id: str = "sample_scenario_001",
     path_index: int = 1,
     priority_rank: int = 1,
-    description: str = "Örnek test senaryosu.",
+    description: str = "Ã–rnek test senaryosu.",
 ) -> ScenarioModel:
     """
-    PytestGenerator testlerinde kullanılacak minimal senaryo oluşturur.
+    PytestGenerator testlerinde kullanÄ±lacak minimal senaryo oluÅŸturur.
 
     Args:
-        scenario_id: Senaryonun benzersiz kimliği.
-        path_index: İlişkili yürütme yolunun numarası.
-        priority_rank: DQM öncelik sırası.
-        description: Senaryo açıklaması.
+        scenario_id: Senaryonun benzersiz kimliÄŸi.
+        path_index: Ä°liÅŸkili yÃ¼rÃ¼tme yolunun numarasÄ±.
+        priority_rank: DQM Ã¶ncelik sÄ±rasÄ±.
+        description: Senaryo aÃ§Ä±klamasÄ±.
 
     Returns:
-        Testlerde kullanılmaya hazır TestScenario nesnesi.
+        Testlerde kullanÄ±lmaya hazÄ±r TestScenario nesnesi.
     """
     return ScenarioModel(
         scenario_id=scenario_id,
-        name="Örnek senaryo",
+        name="Ã–rnek senaryo",
         path_index=path_index,
         priority_rank=priority_rank,
         priority_level="High",
@@ -101,7 +101,7 @@ def create_minimal_scenario(
 
 
 def test_generate_creates_valid_python_code() -> None:
-    """Üretilen metnin geçerli Python kaynak kodu olduğunu doğrular."""
+    """Ãœretilen metnin geÃ§erli Python kaynak kodu olduÄŸunu doÄŸrular."""
     generated_code, _, _ = create_generated_pytest_code()
 
     syntax_tree = ast.parse(generated_code)
@@ -110,7 +110,7 @@ def test_generate_creates_valid_python_code() -> None:
 
 
 def test_generate_creates_test_for_each_scenario() -> None:
-    """Her senaryo için ayrı bir pytest fonksiyonu üretildiğini doğrular."""
+    """Her senaryo iÃ§in ayrÄ± bir pytest fonksiyonu Ã¼retildiÄŸini doÄŸrular."""
     generated_code, function_name, scenario_count = (
         create_generated_pytest_code()
     )
@@ -124,7 +124,7 @@ def test_generate_creates_test_for_each_scenario() -> None:
 
 
 def test_generate_contains_target_import() -> None:
-    """Üretilen kaynak kodda hedef fonksiyon importunu doğrular."""
+    """Ãœretilen kaynak kodda hedef fonksiyon importunu doÄŸrular."""
     generated_code, function_name, _ = (
         create_generated_pytest_code()
     )
@@ -137,18 +137,18 @@ def test_generate_contains_target_import() -> None:
 
 
 def test_generate_contains_scenario_metadata() -> None:
-    """Üretilen testlerde senaryo metadata bilgilerinin yer aldığını doğrular."""
+    """Ãœretilen testlerde senaryo metadata bilgilerinin yer aldÄ±ÄŸÄ±nÄ± doÄŸrular."""
     generated_code, _, _ = create_generated_pytest_code()
 
-    assert "Senaryo kimliği:" in generated_code
-    assert "DQM önceliği:" in generated_code
+    assert "Senaryo kimliÄŸi:" in generated_code
+    assert "DQM Ã¶nceliÄŸi:" in generated_code
     assert "Normalize DQM skoru:" in generated_code
-    assert "CFG düğüm yolu:" in generated_code
-    assert "CFG kenarları:" in generated_code
+    assert "CFG dÃ¼ÄŸÃ¼m yolu:" in generated_code
+    assert "CFG kenarlarÄ±:" in generated_code
 
 
 def test_generate_contains_callable_assertion() -> None:
-    """Üretilen testlerin hedef fonksiyonun çağrılabilirliğini doğruladığını test eder."""
+    """Ãœretilen testlerin hedef fonksiyonun Ã§aÄŸrÄ±labilirliÄŸini doÄŸruladÄ±ÄŸÄ±nÄ± test eder."""
     generated_code, _, _ = create_generated_pytest_code()
 
     assert "_target_function = calculate_score" in generated_code
@@ -156,24 +156,24 @@ def test_generate_contains_callable_assertion() -> None:
 
 
 def test_generate_does_not_include_unnecessary_pass_statement() -> None:
-    """Üretilen test gövdelerinde gereksiz pass ifadesi bulunmadığını doğrular."""
+    """Ãœretilen test gÃ¶vdelerinde gereksiz pass ifadesi bulunmadÄ±ÄŸÄ±nÄ± doÄŸrular."""
     generated_code, _, _ = create_generated_pytest_code()
 
     assert "\n    pass\n" not in generated_code
     assert (
-        "# TODO: Senaryoya uygun girdiler ve doğrulamalar üretilecek."
+        "# TODO: Senaryoya uygun girdiler ve doÄŸrulamalar Ã¼retilecek."
         in generated_code
     )
 
 
 def test_generate_safely_handles_special_characters_in_description() -> None:
-    """Özel karakter içeren açıklamaların Python sözdizimini bozmadığını doğrular."""
+    """Ã–zel karakter iÃ§eren aÃ§Ä±klamalarÄ±n Python sÃ¶zdizimini bozmadÄ±ÄŸÄ±nÄ± doÄŸrular."""
     generator = PytestGenerator()
 
     scenario = create_minimal_scenario(
         description=(
-            'Açıklama "çift tırnak", \'tek tırnak\' ve\n'
-            'yeni satır içeriyor.'
+            'AÃ§Ä±klama "Ã§ift tÄ±rnak", \'tek tÄ±rnak\' ve\n'
+            'yeni satÄ±r iÃ§eriyor.'
         ),
     )
 
@@ -186,7 +186,7 @@ def test_generate_safely_handles_special_characters_in_description() -> None:
     syntax_tree = ast.parse(generated_code)
 
     assert isinstance(syntax_tree, ast.Module)
-    assert "Açıklama" in generated_code
+    assert "AÃ§Ä±klama" in generated_code
 
 
 @pytest.mark.parametrize(
@@ -195,37 +195,37 @@ def test_generate_safely_handles_special_characters_in_description() -> None:
         (
             " ",
             FUNCTION_NAME,
-            "Modül yolu boş olamaz",
+            "ModÃ¼l yolu boÅŸ olamaz",
         ),
         (
             MODULE_PATH,
             " ",
-            "Fonksiyon adı boş olamaz",
+            "Fonksiyon adÄ± boÅŸ olamaz",
         ),
         (
             "datasets/sample_code",
             FUNCTION_NAME,
-            "Geçersiz Python modül yolu",
+            "GeÃ§ersiz Python modÃ¼l yolu",
         ),
         (
             "datasets..sample_code",
             FUNCTION_NAME,
-            "Geçersiz Python modül yolu",
+            "GeÃ§ersiz Python modÃ¼l yolu",
         ),
         (
             "datasets.class",
             FUNCTION_NAME,
-            "Geçersiz Python modül yolu",
+            "GeÃ§ersiz Python modÃ¼l yolu",
         ),
         (
             MODULE_PATH,
             "calculate-score",
-            "Geçersiz Python fonksiyon adı",
+            "GeÃ§ersiz Python fonksiyon adÄ±",
         ),
         (
             MODULE_PATH,
             "class",
-            "Geçersiz Python fonksiyon adı",
+            "GeÃ§ersiz Python fonksiyon adÄ±",
         ),
     ],
 )
@@ -234,7 +234,7 @@ def test_generate_rejects_invalid_names(
     function_name: str,
     expected_message: str,
 ) -> None:
-    """Geçersiz modül yolları ve fonksiyon adlarının reddedildiğini doğrular."""
+    """GeÃ§ersiz modÃ¼l yollarÄ± ve fonksiyon adlarÄ±nÄ±n reddedildiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     with pytest.raises(
@@ -251,7 +251,7 @@ def test_generate_rejects_invalid_names(
 
 
 def test_generate_rejects_empty_scenario_list() -> None:
-    """Boş senaryo koleksiyonuyla test üretilemediğini doğrular."""
+    """BoÅŸ senaryo koleksiyonuyla test Ã¼retilemediÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     with pytest.raises(
@@ -266,7 +266,7 @@ def test_generate_rejects_empty_scenario_list() -> None:
 
 
 def test_generate_rejects_invalid_scenario_type() -> None:
-    """TestScenario dışındaki nesnelerin reddedildiğini doğrular."""
+    """TestScenario dÄ±ÅŸÄ±ndaki nesnelerin reddedildiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     invalid_scenarios: Sequence[object] = [
@@ -275,7 +275,7 @@ def test_generate_rejects_invalid_scenario_type() -> None:
 
     with pytest.raises(
         TypeError,
-        match="Bütün senaryolar TestScenario türünde olmalıdır",
+        match="BÃ¼tÃ¼n senaryolar TestScenario tÃ¼rÃ¼nde olmalÄ±dÄ±r",
     ):
         generator.generate(
             module_path=MODULE_PATH,
@@ -285,7 +285,7 @@ def test_generate_rejects_invalid_scenario_type() -> None:
 
 
 def test_generate_rejects_empty_scenario_id() -> None:
-    """Boş senaryo kimliğinin reddedildiğini doğrular."""
+    """BoÅŸ senaryo kimliÄŸinin reddedildiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     scenario = create_minimal_scenario(
@@ -294,7 +294,7 @@ def test_generate_rejects_empty_scenario_id() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Senaryo kimliği boş olamaz",
+        match="Senaryo kimliÄŸi boÅŸ olamaz",
     ):
         generator.generate(
             module_path=MODULE_PATH,
@@ -309,22 +309,22 @@ def test_generate_rejects_empty_scenario_id() -> None:
         (
             0,
             1,
-            "Yürütme yolu numarası 1 veya daha büyük olmalıdır",
+            "YÃ¼rÃ¼tme yolu numarasÄ± 1 veya daha bÃ¼yÃ¼k olmalÄ±dÄ±r",
         ),
         (
             -1,
             1,
-            "Yürütme yolu numarası 1 veya daha büyük olmalıdır",
+            "YÃ¼rÃ¼tme yolu numarasÄ± 1 veya daha bÃ¼yÃ¼k olmalÄ±dÄ±r",
         ),
         (
             1,
             0,
-            "Öncelik sırası 1 veya daha büyük olmalıdır",
+            "Ã–ncelik sÄ±rasÄ± 1 veya daha bÃ¼yÃ¼k olmalÄ±dÄ±r",
         ),
         (
             1,
             -1,
-            "Öncelik sırası 1 veya daha büyük olmalıdır",
+            "Ã–ncelik sÄ±rasÄ± 1 veya daha bÃ¼yÃ¼k olmalÄ±dÄ±r",
         ),
     ],
 )
@@ -333,7 +333,7 @@ def test_generate_rejects_invalid_scenario_indices(
     priority_rank: int,
     expected_message: str,
 ) -> None:
-    """Geçersiz yol ve öncelik numaralarının reddedildiğini doğrular."""
+    """GeÃ§ersiz yol ve Ã¶ncelik numaralarÄ±nÄ±n reddedildiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     scenario = create_minimal_scenario(
@@ -353,7 +353,7 @@ def test_generate_rejects_invalid_scenario_indices(
 
 
 def test_generate_rejects_duplicate_test_function_names() -> None:
-    """Aynı isimde iki pytest fonksiyonu üretilmesini engeller."""
+    """AynÄ± isimde iki pytest fonksiyonu Ã¼retilmesini engeller."""
     generator = PytestGenerator()
 
     first_scenario = create_minimal_scenario(
@@ -369,7 +369,7 @@ def test_generate_rejects_duplicate_test_function_names() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Aynı pytest fonksiyon adı birden fazla kez üretilemez",
+        match="AynÄ± pytest fonksiyon adÄ± birden fazla kez Ã¼retilemez",
     ):
         generator.generate(
             module_path=MODULE_PATH,
@@ -382,7 +382,7 @@ def test_generate_rejects_duplicate_test_function_names() -> None:
 
 
 def test_generate_creates_stable_test_function_name() -> None:
-    """Yol ve öncelik değerlerinden kararlı test adı üretildiğini doğrular."""
+    """Yol ve Ã¶ncelik deÄŸerlerinden kararlÄ± test adÄ± Ã¼retildiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     scenario = create_minimal_scenario(
@@ -403,7 +403,7 @@ def test_generate_creates_stable_test_function_name() -> None:
 
 
 def test_generate_ends_with_single_newline() -> None:
-    """Üretilen kaynak kodun tek satır sonu karakteriyle bittiğini doğrular."""
+    """Ãœretilen kaynak kodun tek satÄ±r sonu karakteriyle bittiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     generated_code = generator.generate(
@@ -416,3 +416,4 @@ def test_generate_ends_with_single_newline() -> None:
 
     assert generated_code.endswith("\n")
     assert not generated_code.endswith("\n\n")
+

@@ -7,7 +7,7 @@ from generator.scenario_generator import TestScenario
 
 
 class PytestGenerator:
-    """Test senaryolarından geçerli pytest kaynak kodu üretir."""
+    """Test senaryolarÄ±ndan geÃ§erli pytest kaynak kodu Ã¼retir."""
 
     def generate(
         self,
@@ -16,21 +16,21 @@ class PytestGenerator:
         scenarios: Sequence[TestScenario],
     ) -> str:
         """
-        Verilen test senaryoları için pytest kaynak kodu üretir.
+        Verilen test senaryolarÄ± iÃ§in pytest kaynak kodu Ã¼retir.
 
         Args:
-            module_path: Test edilecek fonksiyonun bulunduğu Python
-                modül yolu. Örnek: ``datasets.sample_code``.
-            function_name: Test edilecek fonksiyonun adı.
-            scenarios: DQM tabanlı test senaryoları.
+            module_path: Test edilecek fonksiyonun bulunduÄŸu Python
+                modÃ¼l yolu. Ã–rnek: ``datasets.sample_code``.
+            function_name: Test edilecek fonksiyonun adÄ±.
+            scenarios: DQM tabanlÄ± test senaryolarÄ±.
 
         Returns:
-            Geçerli Python sözdizimine sahip pytest kaynak kodu.
+            GeÃ§erli Python sÃ¶zdizimine sahip pytest kaynak kodu.
 
         Raises:
-            TypeError: Senaryo koleksiyonunda geçersiz tür bulunduğunda.
-            ValueError: Modül yolu, fonksiyon adı veya senaryolar
-                geçersiz olduğunda.
+            TypeError: Senaryo koleksiyonunda geÃ§ersiz tÃ¼r bulunduÄŸunda.
+            ValueError: ModÃ¼l yolu, fonksiyon adÄ± veya senaryolar
+                geÃ§ersiz olduÄŸunda.
         """
         normalized_module_path = module_path.strip()
         normalized_function_name = function_name.strip()
@@ -42,7 +42,7 @@ class PytestGenerator:
         )
 
         code_lines: list[str] = [
-            '"""Otomatik oluşturulmuş pytest test taslakları."""',
+            '"""Otomatik oluÅŸturulmuÅŸ pytest test taslaklarÄ±."""',
             "",
             (
                 f"from {normalized_module_path} "
@@ -62,8 +62,8 @@ class PytestGenerator:
 
             if test_name in generated_test_names:
                 raise ValueError(
-                    "Aynı pytest fonksiyon adı birden fazla kez "
-                    f"üretilemez: {test_name}"
+                    "AynÄ± pytest fonksiyon adÄ± birden fazla kez "
+                    f"Ã¼retilemez: {test_name}"
                 )
 
             generated_test_names.add(test_name)
@@ -89,34 +89,34 @@ class PytestGenerator:
         scenarios: Sequence[TestScenario],
     ) -> None:
         """
-        Pytest üretim girdilerini doğrular.
+        Pytest Ã¼retim girdilerini doÄŸrular.
 
         Args:
-            module_path: Normalize edilmiş Python modül yolu.
-            function_name: Normalize edilmiş fonksiyon adı.
-            scenarios: Test senaryoları.
+            module_path: Normalize edilmiÅŸ Python modÃ¼l yolu.
+            function_name: Normalize edilmiÅŸ fonksiyon adÄ±.
+            scenarios: Test senaryolarÄ±.
 
         Raises:
-            TypeError: Senaryo türlerinden biri geçersiz olduğunda.
-            ValueError: Girdilerden biri geçersiz olduğunda.
+            TypeError: Senaryo tÃ¼rlerinden biri geÃ§ersiz olduÄŸunda.
+            ValueError: Girdilerden biri geÃ§ersiz olduÄŸunda.
         """
         if not module_path:
-            raise ValueError("Modül yolu boş olamaz.")
+            raise ValueError("ModÃ¼l yolu boÅŸ olamaz.")
 
         if not function_name:
-            raise ValueError("Fonksiyon adı boş olamaz.")
+            raise ValueError("Fonksiyon adÄ± boÅŸ olamaz.")
 
         if not scenarios:
             raise ValueError("En az bir test senaryosu gereklidir.")
 
         if not cls._is_valid_module_path(module_path):
             raise ValueError(
-                f"Geçersiz Python modül yolu: {module_path}"
+                f"GeÃ§ersiz Python modÃ¼l yolu: {module_path}"
             )
 
         if not cls._is_valid_identifier(function_name):
             raise ValueError(
-                f"Geçersiz Python fonksiyon adı: {function_name}"
+                f"GeÃ§ersiz Python fonksiyon adÄ±: {function_name}"
             )
 
         for scenario in scenarios:
@@ -128,31 +128,31 @@ class PytestGenerator:
         scenario: TestScenario,
     ) -> None:
         """
-        Tek bir test senaryosunun geçerliliğini doğrular.
+        Tek bir test senaryosunun geÃ§erliliÄŸini doÄŸrular.
 
         Args:
-            scenario: Doğrulanacak test senaryosu.
+            scenario: DoÄŸrulanacak test senaryosu.
 
         Raises:
-            TypeError: Nesne TestScenario türünde değilse.
-            ValueError: Senaryonun alanları geçersizse.
+            TypeError: Nesne TestScenario tÃ¼rÃ¼nde deÄŸilse.
+            ValueError: Senaryonun alanlarÄ± geÃ§ersizse.
         """
         if not isinstance(scenario, TestScenario):
             raise TypeError(
-                "Bütün senaryolar TestScenario türünde olmalıdır."
+                "BÃ¼tÃ¼n senaryolar TestScenario tÃ¼rÃ¼nde olmalÄ±dÄ±r."
             )
 
         if not scenario.scenario_id.strip():
-            raise ValueError("Senaryo kimliği boş olamaz.")
+            raise ValueError("Senaryo kimliÄŸi boÅŸ olamaz.")
 
         if scenario.path_index < 1:
             raise ValueError(
-                "Yürütme yolu numarası 1 veya daha büyük olmalıdır."
+                "YÃ¼rÃ¼tme yolu numarasÄ± 1 veya daha bÃ¼yÃ¼k olmalÄ±dÄ±r."
             )
 
         if scenario.priority_rank < 1:
             raise ValueError(
-                "Öncelik sırası 1 veya daha büyük olmalıdır."
+                "Ã–ncelik sÄ±rasÄ± 1 veya daha bÃ¼yÃ¼k olmalÄ±dÄ±r."
             )
 
     @classmethod
@@ -161,13 +161,13 @@ class PytestGenerator:
         module_path: str,
     ) -> bool:
         """
-        Noktayla ayrılmış Python modül yolunu doğrular.
+        Noktayla ayrÄ±lmÄ±ÅŸ Python modÃ¼l yolunu doÄŸrular.
 
         Args:
-            module_path: Doğrulanacak modül yolu.
+            module_path: DoÄŸrulanacak modÃ¼l yolu.
 
         Returns:
-            Bütün parçalar geçerli Python tanımlayıcılarıysa True.
+            BÃ¼tÃ¼n parÃ§alar geÃ§erli Python tanÄ±mlayÄ±cÄ±larÄ±ysa True.
         """
         parts = module_path.split(".")
 
@@ -179,13 +179,13 @@ class PytestGenerator:
     @staticmethod
     def _is_valid_identifier(value: str) -> bool:
         """
-        Bir değerin geçerli Python tanımlayıcısı olduğunu doğrular.
+        Bir deÄŸerin geÃ§erli Python tanÄ±mlayÄ±cÄ±sÄ± olduÄŸunu doÄŸrular.
 
         Args:
-            value: Kontrol edilecek değer.
+            value: Kontrol edilecek deÄŸer.
 
         Returns:
-            Değer geçerli bir tanımlayıcı ve anahtar kelime değilse True.
+            DeÄŸer geÃ§erli bir tanÄ±mlayÄ±cÄ± ve anahtar kelime deÄŸilse True.
         """
         return value.isidentifier() and not keyword.iskeyword(value)
 
@@ -196,30 +196,30 @@ class PytestGenerator:
         test_name: str,
     ) -> list[str]:
         """
-        Tek bir senaryo için pytest test fonksiyonu oluşturur.
+        Tek bir senaryo iÃ§in pytest test fonksiyonu oluÅŸturur.
 
         Args:
-            function_name: Test edilecek fonksiyonun adı.
-            scenario: Test fonksiyonu oluşturulacak senaryo.
-            test_name: Oluşturulan pytest fonksiyonunun adı.
+            function_name: Test edilecek fonksiyonun adÄ±.
+            scenario: Test fonksiyonu oluÅŸturulacak senaryo.
+            test_name: OluÅŸturulan pytest fonksiyonunun adÄ±.
 
         Returns:
-            Test fonksiyonunu oluşturan kaynak kod satırları.
+            Test fonksiyonunu oluÅŸturan kaynak kod satÄ±rlarÄ±.
         """
         description_literal = repr(scenario.description)
 
         return [
             f"def {test_name}() -> None:",
             f"    {description_literal}",
-            f"    # Senaryo kimliği: {scenario.scenario_id}",
-            f"    # DQM önceliği: {scenario.priority_level}",
+            f"    # Senaryo kimliÄŸi: {scenario.scenario_id}",
+            f"    # DQM Ã¶nceliÄŸi: {scenario.priority_level}",
             f"    # Normalize DQM skoru: {scenario.dqm_score}",
-            f"    # CFG düğüm yolu: {list(scenario.node_ids)}",
-            f"    # CFG kenarları: {list(scenario.edge_labels)}",
+            f"    # CFG dÃ¼ÄŸÃ¼m yolu: {list(scenario.node_ids)}",
+            f"    # CFG kenarlarÄ±: {list(scenario.edge_labels)}",
             f"    _target_function = {function_name}",
             "",
             "    assert callable(_target_function)",
-            "    # TODO: Senaryoya uygun girdiler ve doğrulamalar üretilecek.",
+            "    # TODO: Senaryoya uygun girdiler ve doÄŸrulamalar Ã¼retilecek.",
         ]
 
     @staticmethod
@@ -228,17 +228,18 @@ class PytestGenerator:
         scenario: TestScenario,
     ) -> str:
         """
-        Senaryo için kararlı ve geçerli pytest fonksiyon adı oluşturur.
+        Senaryo iÃ§in kararlÄ± ve geÃ§erli pytest fonksiyon adÄ± oluÅŸturur.
 
         Args:
-            function_name: Test edilen fonksiyonun adı.
+            function_name: Test edilen fonksiyonun adÄ±.
             scenario: Test senaryosu.
 
         Returns:
-            ``test_`` ile başlayan pytest fonksiyon adı.
+            ``test_`` ile baÅŸlayan pytest fonksiyon adÄ±.
         """
         return (
             f"test_{function_name}_"
             f"path_{scenario.path_index}_"
             f"priority_{scenario.priority_rank}"
         )
+

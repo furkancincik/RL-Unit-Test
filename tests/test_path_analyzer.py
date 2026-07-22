@@ -43,3 +43,4 @@ def test_paths_contain_expected_edge_labels() -> None:
     assert [None, "True", None] in edge_label_paths
     assert [None, "False", "True", None] in edge_label_paths
     assert [None, "False", "False", None] in edge_label_paths
+
