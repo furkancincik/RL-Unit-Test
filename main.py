@@ -9,6 +9,10 @@ from services.automation_service import (
     AutomationService,
     AutomationSummary,
 )
+from services.coverage_workflow_service import (
+    CoverageWorkflowService,
+    CoverageWorkflowSummary,
+)
 
 
 SOURCE_FILE = "datasets/sample_code.py"
@@ -331,6 +335,136 @@ def run_automated_test_pipeline(
     return summary
 
 
+def run_coverage_pipeline(
+    source_file: str | Path = SOURCE_FILE,
+    module_path: str = MODULE_PATH,
+    output_directory: str | Path = GENERATED_TEST_DIRECTORY,
+    *,
+    overwrite: bool = True,
+    timeout_seconds: float = 30.0,
+) -> CoverageWorkflowSummary:
+    """
+    Kaynak dosya için test üretir ve coverage ölçümü gerçekleştirir.
+
+    Args:
+        source_file: Coverage uygulanacak Python kaynak dosyası.
+        module_path: Kaynak dosyanın Python import yolu.
+        output_directory: Üretilen testlerin kaydedileceği klasör.
+        overwrite: Mevcut test dosyalarının yenilenmesine izin verir.
+        timeout_seconds: Coverage ölçümü için çalışma süresi sınırı.
+
+    Returns:
+        Test üretimi ve coverage sonuçlarını içeren özet.
+    """
+    service = CoverageWorkflowService()
+
+    summary = service.generate_and_measure(
+        source_file=source_file,
+        module_path=module_path,
+        output_directory=output_directory,
+        overwrite=overwrite,
+        timeout_seconds=timeout_seconds,
+    )
+
+    print("=" * 65)
+    print("OTOMATİK TEST COVERAGE RAPORU")
+    print("=" * 65)
+
+    print(
+        f"Ölçülen Test Dosyası      : "
+        f"{summary.measured_file_count}"
+    )
+    print(
+        f"Başarılı Dosya            : "
+        f"{summary.successful_file_count}"
+    )
+    print(
+        f"Başarısız Dosya           : "
+        f"{summary.failed_file_count}"
+    )
+    print(
+        f"Tam Coverage Dosyası      : "
+        f"{summary.full_coverage_file_count}"
+    )
+    print(
+        f"Ortalama Satır Coverage   : "
+        f"%{summary.average_line_coverage_percent:.2f}"
+    )
+    print(
+        f"Ortalama Branch Coverage  : "
+        f"%{summary.average_branch_coverage_percent:.2f}"
+    )
+    print(
+        f"Genel İşlem Başarılı mı?  : "
+        f"{summary.success}"
+    )
+
+    for index, result in enumerate(
+        summary.results,
+        start=1,
+    ):
+        coverage = result.coverage
+
+        print("\n" + "-" * 65)
+        print(f"COVERAGE SONUCU #{index}")
+        print("-" * 65)
+
+        print(
+            f"Fonksiyon Adı             : "
+            f"{result.artifact.function_name}"
+        )
+        print(
+            f"Test Dosyası              : "
+            f"{result.artifact.output_path}"
+        )
+        print(
+            f"Satır Coverage            : "
+            f"%{coverage.line_coverage_percent:.2f}"
+        )
+        print(
+            f"Branch Coverage           : "
+            f"%{coverage.branch_coverage_percent:.2f}"
+        )
+        print(
+            f"Çalıştırılan Satır        : "
+            f"{coverage.covered_line_count}"
+        )
+        print(
+            f"Eksik Satır               : "
+            f"{coverage.missing_line_count}"
+        )
+        print(
+            f"Toplam Satır              : "
+            f"{coverage.total_line_count}"
+        )
+        print(
+            f"Çalıştırılan Branch       : "
+            f"{coverage.covered_branch_count}"
+        )
+        print(
+            f"Eksik Branch              : "
+            f"{coverage.missing_branch_count}"
+        )
+        print(
+            f"Toplam Branch             : "
+            f"{coverage.total_branch_count}"
+        )
+        print(
+            f"Test Çıkış Kodu           : "
+            f"{coverage.test_exit_code}"
+        )
+        print(
+            f"Çalışma Süresi            : "
+            f"{coverage.duration_seconds:.3f} saniye"
+        )
+        print(
+            f"Tam Coverage mı?          : "
+            f"{coverage.has_full_coverage}"
+        )
+
+    return summary
+
+
 def print_menu() -> None:
     """Uygulama ana menüsünü ekrana yazdırır."""
     print("\n" + "=" * 55)
@@ -341,6 +475,7 @@ def print_menu() -> None:
     print("3 - DQM yol önceliklendirme")
     print("4 - DQM JSON raporu oluştur")
     print("5 - Otomatik test üret ve çalıştır")
+    print("6 - Otomatik test üret ve coverage ölç")
     print("0 - Çıkış")
 
 
@@ -390,13 +525,33 @@ def main() -> None:
 
             continue
 
+        if choice == "6":
+            print()
+
+            try:
+                run_coverage_pipeline()
+            except (
+                FileNotFoundError,
+                TypeError,
+                ValueError,
+                TimeoutError,
+                RuntimeError,
+                OSError,
+            ) as error:
+                print(
+                    "Coverage işlemi tamamlanamadı: "
+                    f"{error}"
+                )
+
+            continue
+
         if choice == "0":
             print("\nProgram sonlandırıldı.")
             break
 
         print(
             "\nGeçersiz seçim. "
-            "Lütfen 0, 1, 2, 3, 4 veya 5 girin."
+            "Lütfen 0, 1, 2, 3, 4, 5 veya 6 girin."
         )
 
 
