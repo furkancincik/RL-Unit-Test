@@ -33,7 +33,7 @@ class TestInputGenerator:
         path: ExecutionPath,
     ) -> TestInputResult:
         """
-        Yürütme yolundaki basit koşulları analiz eder.
+        Yürütme yolundaki basit ve birleşik koşulları analiz eder.
 
         Desteklenen koşullar:
         - Değişken ile sayısal sabit karşılaştırması
@@ -41,6 +41,8 @@ class TestInputGenerator:
         - Sabitin karşılaştırmanın sağında veya solunda olması
         - Doğrudan Boolean değişken kullanımı
         - not ile terslenen Boolean değişken kullanımı
+        - and ile birleştirilmiş koşullar
+        - or ile birleştirilmiş koşullar
         """
         generated_inputs: list[GeneratedInput] = []
 
@@ -54,13 +56,12 @@ class TestInputGenerator:
             if edge_label not in {"True", "False"}:
                 continue
 
-            generated_input = self._generate_from_condition(
+            condition_inputs = self._generate_from_condition(
                 condition=node.label,
                 branch=edge_label,
             )
 
-            if generated_input is not None:
-                generated_inputs.append(generated_input)
+            generated_inputs.extend(condition_inputs)
 
         return TestInputResult(values=tuple(generated_inputs))
 
@@ -82,8 +83,8 @@ class TestInputGenerator:
         self,
         condition: str,
         branch: str,
-    ) -> GeneratedInput | None:
-        """Basit bir koşuldan test girdisi üretir."""
+    ) -> tuple[GeneratedInput, ...]:
+        """Bir koşuldan bir veya daha fazla test girdisi üretir."""
 
         try:
             expression = ast.parse(
@@ -91,7 +92,55 @@ class TestInputGenerator:
                 mode="eval",
             ).body
         except SyntaxError:
-            return None
+            return ()
+
+        return self._generate_from_expression(
+            expression=expression,
+            condition=condition,
+            branch=branch,
+        )
+
+    def _generate_from_expression(
+        self,
+        expression: ast.expr,
+        condition: str,
+        branch: str,
+    ) -> tuple[GeneratedInput, ...]:
+        """Bir AST ifadesinden test girdileri üretir."""
+
+        if isinstance(expression, ast.BoolOp):
+            if isinstance(expression.op, ast.And):
+                generated_inputs: list[GeneratedInput] = []
+
+                for child_expression in expression.values:
+                    child_inputs = self._generate_from_expression(
+                        expression=child_expression,
+                        condition=ast.unparse(child_expression),
+                        branch=branch,
+                    )
+
+                    generated_inputs.extend(child_inputs)
+
+                return tuple(generated_inputs)
+
+            if isinstance(expression.op, ast.Or):
+                generated_inputs = []
+
+                for index, child_expression in enumerate(expression.values):
+                    child_branch = self._resolve_or_child_branch(
+                        parent_branch=branch,
+                        child_index=index,
+                    )
+
+                    child_inputs = self._generate_from_expression(
+                        expression=child_expression,
+                        condition=ast.unparse(child_expression),
+                        branch=child_branch,
+                    )
+
+                    generated_inputs.extend(child_inputs)
+
+                return tuple(generated_inputs)
 
         direct_boolean_input = self._generate_direct_boolean_input(
             expression=expression,
@@ -100,7 +149,41 @@ class TestInputGenerator:
         )
 
         if direct_boolean_input is not None:
-            return direct_boolean_input
+            return (direct_boolean_input,)
+
+        comparison_input = self._generate_comparison_input(
+            expression=expression,
+            condition=condition,
+            branch=branch,
+        )
+
+        if comparison_input is not None:
+            return (comparison_input,)
+
+        return ()
+
+    @staticmethod
+    def _resolve_or_child_branch(
+        parent_branch: str,
+        child_index: int,
+    ) -> str:
+        """OR ifadesindeki alt koşulların dal yönünü belirler."""
+
+        if parent_branch == "False":
+            return "False"
+
+        if child_index == 0:
+            return "True"
+
+        return "False"
+
+    def _generate_comparison_input(
+        self,
+        expression: ast.expr,
+        condition: str,
+        branch: str,
+    ) -> GeneratedInput | None:
+        """Tek bir karşılaştırma ifadesinden test girdisi üretir."""
 
         if not isinstance(expression, ast.Compare):
             return None
@@ -117,18 +200,10 @@ class TestInputGenerator:
         parameter_name: str
         constant_value: int | float | bool | None
 
-        # Örnek:
-        # x > 10
-        # x >= -5
-        # is_active == True
         if isinstance(expression.left, ast.Name):
             parameter_name = expression.left.id
             constant_value = self._extract_constant_value(comparator)
 
-        # Örnek:
-        # 10 < x
-        # -5 < x
-        # True == is_active
         elif isinstance(comparator, ast.Name):
             parameter_name = comparator.id
             constant_value = self._extract_constant_value(
@@ -181,7 +256,6 @@ class TestInputGenerator:
 
         is_true_branch = branch == "True"
 
-        # Örnek: if is_active:
         if isinstance(expression, ast.Name):
             return GeneratedInput(
                 parameter_name=expression.id,
@@ -190,7 +264,6 @@ class TestInputGenerator:
                 branch=branch,
             )
 
-        # Örnek: if not is_active:
         if (
             isinstance(expression, ast.UnaryOp)
             and isinstance(expression.op, ast.Not)

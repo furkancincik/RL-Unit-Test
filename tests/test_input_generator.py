@@ -159,7 +159,6 @@ def test_generate_values_for_supported_comparison_operators(
         "x > y",
         "items[0] > 10",
         "x > 1 < 20",
-        "x and y",
     ],
 )
 
@@ -458,3 +457,255 @@ def test_generate_values_for_direct_boolean_conditions(
     assert generated_input.value is expected_value
     assert generated_input.condition == condition
     assert generated_input.branch == branch
+
+
+@pytest.mark.parametrize(
+    ("branch", "expected"),
+    [
+        (
+            "True",
+            {
+                "x": True,
+                "y": True,
+            },
+        ),
+        (
+            "False",
+            {
+                "x": False,
+                "y": False,
+            },
+        ),
+    ],
+)
+def test_generate_values_for_direct_boolean_and_condition(
+    branch: str,
+    expected: dict[str, bool],
+) -> None:
+    graph, path = create_graph_and_path(
+        condition="x and y",
+        branch=branch,
+    )
+
+    result = TestInputGenerator().generate(
+        graph=graph,
+        path=path,
+    )
+
+    generated = {
+        item.parameter_name: item.value
+        for item in result.values
+    }
+
+    assert generated == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "condition",
+        "branch",
+        "expected",
+    ),
+    [
+        (
+            "x > 10 and y < 5",
+            "True",
+            {
+                "x": 11,
+                "y": 4,
+            },
+        ),
+        (
+            "x > 10 and y < 5",
+            "False",
+            {
+                "x": 10,
+                "y": 5,
+            },
+        ),
+    ],
+)
+def test_generate_values_for_and_condition(
+    condition: str,
+    branch: str,
+    expected: dict[str, int],
+) -> None:
+    graph, path = create_graph_and_path(
+        condition=condition,
+        branch=branch,
+    )
+
+    result = TestInputGenerator().generate(
+        graph=graph,
+        path=path,
+    )
+
+    generated = {
+        item.parameter_name: item.value
+        for item in result.values
+    }
+
+    assert generated == expected
+
+@pytest.mark.parametrize(
+    ("condition", "branch", "expected"),
+    [
+        (
+            "x > 10 and flag",
+            "True",
+            {
+                "x": 11,
+                "flag": True,
+            },
+        ),
+        (
+            "x > 10 and flag",
+            "False",
+            {
+                "x": 10,
+                "flag": False,
+            },
+        ),
+        (
+            "x > 10 and not flag",
+            "True",
+            {
+                "x": 11,
+                "flag": False,
+            },
+        ),
+        (
+            "x > 10 and not flag",
+            "False",
+            {
+                "x": 10,
+                "flag": True,
+            },
+        ),
+    ],
+)
+def test_generate_values_for_mixed_and_condition(
+    condition: str,
+    branch: str,
+    expected: dict[str, object],
+) -> None:
+    graph, path = create_graph_and_path(
+        condition=condition,
+        branch=branch,
+    )
+
+    result = TestInputGenerator().generate(
+        graph=graph,
+        path=path,
+    )
+
+    generated = {
+        item.parameter_name: item.value
+        for item in result.values
+    }
+
+    assert generated == expected
+
+
+@pytest.mark.parametrize(
+    ("condition", "branch", "expected"),
+    [
+        (
+            "x > 10 or y < 5",
+            "True",
+            {
+                "x": 11,
+                "y": 5,
+            },
+        ),
+        (
+            "x > 10 or y < 5",
+            "False",
+            {
+                "x": 10,
+                "y": 5,
+            },
+        ),
+    ],
+)
+def test_generate_values_for_or_condition(
+    condition: str,
+    branch: str,
+    expected: dict[str, int],
+) -> None:
+    graph, path = create_graph_and_path(
+        condition=condition,
+        branch=branch,
+    )
+
+    result = TestInputGenerator().generate(
+        graph=graph,
+        path=path,
+    )
+
+    generated = {
+        item.parameter_name: item.value
+        for item in result.values
+    }
+
+    assert generated == expected
+
+
+@pytest.mark.parametrize(
+    ("condition", "branch", "expected"),
+    [
+        (
+            "flag or is_admin",
+            "True",
+            {
+                "flag": True,
+                "is_admin": False,
+            },
+        ),
+        (
+            "flag or is_admin",
+            "False",
+            {
+                "flag": False,
+                "is_admin": False,
+            },
+        ),
+        (
+            "not flag or is_admin",
+            "True",
+            {
+                "flag": False,
+                "is_admin": False,
+            },
+        ),
+        (
+            "not flag or is_admin",
+            "False",
+            {
+                "flag": True,
+                "is_admin": False,
+            },
+        ),
+    ],
+)
+def test_generate_values_for_boolean_or_condition(
+    condition: str,
+    branch: str,
+    expected: dict[str, bool],
+) -> None:
+    graph, path = create_graph_and_path(
+        condition=condition,
+        branch=branch,
+    )
+
+    result = TestInputGenerator().generate(
+        graph=graph,
+        path=path,
+    )
+
+    generated = {
+        item.parameter_name: item.value
+        for item in result.values
+    }
+
+    assert generated == expected
