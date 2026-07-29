@@ -7,22 +7,22 @@ from evaluator.dqm import DQMScore
 
 
 @dataclass(frozen=True, slots=True)
-class TestScenario:
+class Scenario:
     """
-    Bir yÃ¼rÃ¼tme yolu iÃ§in oluÅŸturulan Ã¶ncelikli test senaryosunu temsil eder.
+    Bir yürütme yolu için oluşturulan öncelikli test senaryosunu temsil eder.
 
     Attributes:
-        scenario_id: Senaryonun benzersiz kimliÄŸi.
-        name: Test senaryosunun okunabilir adÄ±.
-        path_index: Senaryonun iliÅŸkili olduÄŸu yÃ¼rÃ¼tme yolu numarasÄ±.
-        priority_rank: DQM sÄ±ralamasÄ±ndaki Ã¶ncelik sÄ±rasÄ±.
-        priority_level: Senaryonun High, Medium veya Low Ã¶ncelik seviyesi.
-        dqm_score: Normalize edilmiÅŸ DQM skoru.
-        node_ids: YÃ¼rÃ¼tme yolunda ziyaret edilen CFG dÃ¼ÄŸÃ¼mleri.
-        edge_labels: YÃ¼rÃ¼tme yolundaki kenar etiketleri.
-        contains_loop: Yolun dÃ¶ngÃ¼ iÃ§erip iÃ§ermediÄŸi.
-        contains_exception: Yolun istisna akÄ±ÅŸÄ± iÃ§erip iÃ§ermediÄŸi.
-        description: Senaryonun aÃ§Ä±klamasÄ±.
+        scenario_id: Senaryonun benzersiz kimliği.
+        name: Test senaryosunun okunabilir adı.
+        path_index: Senaryonun ilişkili olduğu yürütme yolu numarası.
+        priority_rank: DQM sıralamasındaki öncelik sırası.
+        priority_level: Senaryonun High, Medium veya Low öncelik seviyesi.
+        dqm_score: Normalize edilmiş DQM skoru.
+        node_ids: Yürütme yolunda ziyaret edilen CFG düğümleri.
+        edge_labels: Yürütme yolundaki kenar etiketleri.
+        contains_loop: Yolun döngü içerip içermediği.
+        contains_exception: Yolun istisna akışı içerip içermediği.
+        description: Senaryonun açıklaması.
     """
 
     scenario_id: str
@@ -38,35 +38,35 @@ class TestScenario:
     description: str
 
 
-class TestScenarioGenerator:
-    """DQM sonuÃ§larÄ±ndan Ã¶nceliklendirilmiÅŸ test senaryolarÄ± Ã¼retir."""
+class ScenarioGenerator:
+    """DQM sonuçlarından önceliklendirilmiş test senaryoları üretir."""
 
     def generate(
         self,
         function_name: str,
         paths: list[ExecutionPath],
         scores: list[DQMScore],
-    ) -> list[TestScenario]:
+    ) -> list[Scenario]:
         """
-        Bir fonksiyona ait yÃ¼rÃ¼tme yollarÄ±nÄ± test senaryolarÄ±na dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r.
+        Bir fonksiyona ait yürütme yollarını test senaryolarına dönüştürür.
 
         Args:
-            function_name: Analiz edilen fonksiyonun adÄ±.
-            paths: CFG Ã¼zerinden elde edilen yÃ¼rÃ¼tme yollarÄ±.
-            scores: DQM tarafÄ±ndan Ã¶nceliklendirilmiÅŸ yol skorlarÄ±.
+            function_name: Analiz edilen fonksiyonun adı.
+            paths: CFG üzerinden elde edilen yürütme yolları.
+            scores: DQM tarafından önceliklendirilmiş yol skorları.
 
         Returns:
-            DQM Ã¶nceliÄŸine gÃ¶re sÄ±ralanmÄ±ÅŸ test senaryolarÄ±.
+            DQM önceliğine göre sıralanmış test senaryoları.
 
         Raises:
-            ValueError: Fonksiyon adÄ± boÅŸsa veya geÃ§ersiz yol numarasÄ± varsa.
+            ValueError: Fonksiyon adı boşsa veya geçersiz yol numarası varsa.
         """
         normalized_function_name = function_name.strip()
 
         if not normalized_function_name:
-            raise ValueError("Fonksiyon adÄ± boÅŸ olamaz.")
+            raise ValueError("Fonksiyon adı boş olamaz.")
 
-        scenarios: list[TestScenario] = []
+        scenarios: list[Scenario] = []
 
         for priority_rank, score in enumerate(scores, start=1):
             path = self._get_path(
@@ -74,7 +74,7 @@ class TestScenarioGenerator:
                 path_index=score.path_index,
             )
 
-            scenario = TestScenario(
+            scenario = Scenario(
                 scenario_id=self._create_scenario_id(
                     function_name=normalized_function_name,
                     priority_rank=priority_rank,
@@ -107,23 +107,23 @@ class TestScenarioGenerator:
         path_index: int,
     ) -> ExecutionPath:
         """
-        Bir tabanlÄ± yol numarasÄ±na gÃ¶re yÃ¼rÃ¼tme yolunu dÃ¶ndÃ¼rÃ¼r.
+        Bir tabanlı yol numarasına göre yürütme yolunu döndürür.
 
         Args:
-            paths: Mevcut yÃ¼rÃ¼tme yollarÄ±.
-            path_index: DQM sonucundaki bir tabanlÄ± yol numarasÄ±.
+            paths: Mevcut yürütme yolları.
+            path_index: DQM sonucundaki bir tabanlı yol numarası.
 
         Returns:
-            Ä°stenen yÃ¼rÃ¼tme yolu.
+            İstenen yürütme yolu.
 
         Raises:
-            ValueError: Yol numarasÄ± mevcut yollarla eÅŸleÅŸmiyorsa.
+            ValueError: Yol numarası mevcut yollarla eşleşmiyorsa.
         """
         zero_based_index = path_index - 1
 
         if zero_based_index < 0 or zero_based_index >= len(paths):
             raise ValueError(
-                f"GeÃ§ersiz yÃ¼rÃ¼tme yolu numarasÄ±: {path_index}"
+                f"Geçersiz yürütme yolu numarası: {path_index}"
             )
 
         return paths[zero_based_index]
@@ -133,7 +133,7 @@ class TestScenarioGenerator:
         function_name: str,
         priority_rank: int,
     ) -> str:
-        """Senaryo iÃ§in kararlÄ± bir kimlik oluÅŸturur."""
+        """Senaryo için kararlı bir kimlik oluşturur."""
         return (
             f"{function_name.lower()}_"
             f"scenario_{priority_rank:03d}"
@@ -144,10 +144,10 @@ class TestScenarioGenerator:
         function_name: str,
         path_index: int,
     ) -> str:
-        """Okunabilir test senaryosu adÄ± oluÅŸturur."""
+        """Okunabilir test senaryosu adı oluşturur."""
         return (
             f"{function_name} fonksiyonu "
-            f"yÃ¼rÃ¼tme yolu {path_index}"
+            f"yürütme yolu {path_index}"
         )
 
     @staticmethod
@@ -155,23 +155,23 @@ class TestScenarioGenerator:
         function_name: str,
         score: DQMScore,
     ) -> str:
-        """DQM bilgilerine gÃ¶re senaryo aÃ§Ä±klamasÄ± oluÅŸturur."""
+        """DQM bilgilerine göre senaryo açıklaması oluşturur."""
         properties: list[str] = [
-            f"{score.priority_level} Ã¶ncelikli",
+            f"{score.priority_level} öncelikli",
             f"DQM skoru {score.normalized_score}",
         ]
 
         if score.contains_loop:
-            properties.append("dÃ¶ngÃ¼ akÄ±ÅŸÄ± iÃ§eriyor")
+            properties.append("döngü akışı içeriyor")
 
         if score.contains_exception:
-            properties.append("istisna akÄ±ÅŸÄ± iÃ§eriyor")
+            properties.append("istisna akışı içeriyor")
 
         joined_properties = ", ".join(properties)
 
         return (
             f"{function_name} fonksiyonunun "
-            f"{score.path_index}. yÃ¼rÃ¼tme yolu iÃ§in oluÅŸturuldu; "
+            f"{score.path_index}. yürütme yolu için oluşturuldu; "
             f"{joined_properties}."
         )
 

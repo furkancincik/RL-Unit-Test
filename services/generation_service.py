@@ -9,7 +9,7 @@ from cfg.path_analyzer import CFGPathAnalyzer
 from evaluator.dqm import DecisionQualityMatrix
 from generator.file_writer import GeneratedTestFileWriter
 from generator.pytest_generator import PytestGenerator
-from generator.scenario_generator import TestScenarioGenerator
+from generator.scenario_generator import ScenarioGenerator
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,7 @@ class GenerationService:
         cfg_builder: ControlFlowGraphBuilder | None = None,
         path_analyzer: CFGPathAnalyzer | None = None,
         dqm: DecisionQualityMatrix | None = None,
-        scenario_generator: TestScenarioGenerator | None = None,
+        scenario_generator: ScenarioGenerator | None = None,
         pytest_generator: PytestGenerator | None = None,
         file_writer: GeneratedTestFileWriter | None = None,
     ) -> None:
@@ -61,7 +61,7 @@ class GenerationService:
         self._path_analyzer = path_analyzer or CFGPathAnalyzer()
         self._dqm = dqm or DecisionQualityMatrix()
         self._scenario_generator = (
-            scenario_generator or TestScenarioGenerator()
+            scenario_generator or ScenarioGenerator()
         )
         self._pytest_generator = (
             pytest_generator or PytestGenerator()

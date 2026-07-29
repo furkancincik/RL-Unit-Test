@@ -3,7 +3,7 @@ from __future__ import annotations
 import keyword
 from collections.abc import Sequence
 
-from generator.scenario_generator import TestScenario
+from generator.scenario_generator import Scenario
 
 
 class PytestGenerator:
@@ -13,7 +13,7 @@ class PytestGenerator:
         self,
         module_path: str,
         function_name: str,
-        scenarios: Sequence[TestScenario],
+        scenarios: Sequence[Scenario],
     ) -> str:
         """
         Verilen test senaryolarÄ± iÃ§in pytest kaynak kodu Ã¼retir.
@@ -86,7 +86,7 @@ class PytestGenerator:
         cls,
         module_path: str,
         function_name: str,
-        scenarios: Sequence[TestScenario],
+        scenarios: Sequence[Scenario],
     ) -> None:
         """
         Pytest Ã¼retim girdilerini doÄŸrular.
@@ -125,7 +125,7 @@ class PytestGenerator:
     @classmethod
     def _validate_scenario(
         cls,
-        scenario: TestScenario,
+        scenario: Scenario,
     ) -> None:
         """
         Tek bir test senaryosunun geÃ§erliliÄŸini doÄŸrular.
@@ -134,12 +134,12 @@ class PytestGenerator:
             scenario: DoÄŸrulanacak test senaryosu.
 
         Raises:
-            TypeError: Nesne TestScenario tÃ¼rÃ¼nde deÄŸilse.
+            TypeError: Nesne Scenario tÃ¼rÃ¼nde deÄŸilse.
             ValueError: Senaryonun alanlarÄ± geÃ§ersizse.
         """
-        if not isinstance(scenario, TestScenario):
+        if not isinstance(scenario, Scenario):
             raise TypeError(
-                "BÃ¼tÃ¼n senaryolar TestScenario tÃ¼rÃ¼nde olmalÄ±dÄ±r."
+                "BÃ¼tÃ¼n senaryolar Scenario tÃ¼rÃ¼nde olmalÄ±dÄ±r."
             )
 
         if not scenario.scenario_id.strip():
@@ -192,7 +192,7 @@ class PytestGenerator:
     def _create_test_function(
         self,
         function_name: str,
-        scenario: TestScenario,
+        scenario: Scenario,
         test_name: str,
     ) -> list[str]:
         """
@@ -225,7 +225,7 @@ class PytestGenerator:
     @staticmethod
     def _create_test_name(
         function_name: str,
-        scenario: TestScenario,
+        scenario: Scenario,
     ) -> str:
         """
         Senaryo iÃ§in kararlÄ± ve geÃ§erli pytest fonksiyon adÄ± oluÅŸturur.

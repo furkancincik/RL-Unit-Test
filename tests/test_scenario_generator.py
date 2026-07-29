@@ -1,21 +1,23 @@
+import re
+
 import pytest
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from cfg.path_analyzer import CFGPathAnalyzer
 from evaluator.dqm import DecisionQualityMatrix
-from generator.scenario_generator import TestScenarioGenerator
+from generator.scenario_generator import ScenarioGenerator
 
 SOURCE_FILE = "datasets/sample_code.py"
 
 
 def create_scenarios():
-    """Testlerde kullanÄ±lacak senaryolarÄ± Ã¼retir."""
+    """Testlerde kullanılacak senaryoları üretir."""
     analyzer = PythonAnalyzer()
     cfg_builder = ControlFlowGraphBuilder()
     path_analyzer = CFGPathAnalyzer()
     dqm = DecisionQualityMatrix()
-    scenario_generator = TestScenarioGenerator()
+    scenario_generator = ScenarioGenerator()
 
     function = analyzer.analyze_file(
         SOURCE_FILE
@@ -78,15 +80,14 @@ def test_generate_maps_execution_path_information() -> None:
 
 
 def test_generate_rejects_empty_function_name() -> None:
-    generator = TestScenarioGenerator()
+    generator = ScenarioGenerator()
 
     with pytest.raises(
         ValueError,
-        match="Fonksiyon adÄ± boÅŸ olamaz",
+        match=re.escape("Fonksiyon adı boş olamaz."),
     ):
         generator.generate(
             function_name=" ",
             paths=[],
             scores=[],
         )
-

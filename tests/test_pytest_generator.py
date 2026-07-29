@@ -10,8 +10,8 @@ from cfg.path_analyzer import CFGPathAnalyzer
 from evaluator.dqm import DecisionQualityMatrix
 from generator.pytest_generator import PytestGenerator
 from generator.scenario_generator import (
-    TestScenario as ScenarioModel,
-    TestScenarioGenerator,
+    Scenario as ScenarioModel,
+    ScenarioGenerator,
 )
 
 
@@ -32,7 +32,7 @@ def create_generated_pytest_code() -> tuple[str, str, int]:
     cfg_builder = ControlFlowGraphBuilder()
     path_analyzer = CFGPathAnalyzer()
     dqm = DecisionQualityMatrix()
-    scenario_generator = TestScenarioGenerator()
+    scenario_generator = ScenarioGenerator()
     pytest_generator = PytestGenerator()
 
     analysis_result = analyzer.analyze_file(SOURCE_FILE)
@@ -83,7 +83,7 @@ def create_minimal_scenario(
         description: Senaryo aÃ§Ä±klamasÄ±.
 
     Returns:
-        Testlerde kullanÄ±lmaya hazÄ±r TestScenario nesnesi.
+        Testlerde kullanÄ±lmaya hazÄ±r Scenario nesnesi.
     """
     return ScenarioModel(
         scenario_id=scenario_id,
@@ -266,7 +266,7 @@ def test_generate_rejects_empty_scenario_list() -> None:
 
 
 def test_generate_rejects_invalid_scenario_type() -> None:
-    """TestScenario dÄ±ÅŸÄ±ndaki nesnelerin reddedildiÄŸini doÄŸrular."""
+    """Scenario dÄ±ÅŸÄ±ndaki nesnelerin reddedildiÄŸini doÄŸrular."""
     generator = PytestGenerator()
 
     invalid_scenarios: Sequence[object] = [
@@ -275,7 +275,7 @@ def test_generate_rejects_invalid_scenario_type() -> None:
 
     with pytest.raises(
         TypeError,
-        match="BÃ¼tÃ¼n senaryolar TestScenario tÃ¼rÃ¼nde olmalÄ±dÄ±r",
+        match="BÃ¼tÃ¼n senaryolar Scenario tÃ¼rÃ¼nde olmalÄ±dÄ±r",
     ):
         generator.generate(
             module_path=MODULE_PATH,
