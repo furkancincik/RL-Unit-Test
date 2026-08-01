@@ -13,6 +13,7 @@ from services.coverage_workflow_service import (
     CoverageWorkflowService,
     CoverageWorkflowSummary,
 )
+from services.rl_demo_service import RLDemoService
 
 
 SOURCE_FILE = "datasets/sample_code.py"
@@ -476,6 +477,7 @@ def print_menu() -> None:
     print("4 - DQM JSON raporu oluştur")
     print("5 - Otomatik test üret ve çalıştır")
     print("6 - Otomatik test üret ve coverage ölç")
+    print("7 - Q-Learning eğitim demosu")
     print("0 - Çıkış")
 
 
@@ -545,13 +547,31 @@ def main() -> None:
 
             continue
 
+        if choice == "7":
+            print()
+
+            try:
+                demo_service = RLDemoService()
+                demo_service.run()
+            except (
+                TypeError,
+                ValueError,
+                RuntimeError,
+            ) as error:
+                print(
+                    "Q-Learning demosu tamamlanamadı: "
+                    f"{error}"
+                )
+
+            continue
+
         if choice == "0":
             print("\nProgram sonlandırıldı.")
             break
 
         print(
             "\nGeçersiz seçim. "
-            "Lütfen 0, 1, 2, 3, 4, 5 veya 6 girin."
+            "Lütfen 0, 1, 2, 3, 4, 5, 6 veya 7 girin."
         )
 
 

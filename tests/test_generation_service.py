@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import ast
 from pathlib import Path
-from typing import Final
 
 import pytest
 
@@ -9,194 +10,328 @@ from services.generation_service import (
     GenerationService,
 )
 
+SOURCE_FILE = Path("datasets/sample_code.py")
+MODULE_PATH = "datasets.sample_code"
 
-SOURCE_FILE: Final[str] = "datasets/sample_code.py"
-MODULE_PATH: Final[str] = "datasets.sample_code"
 
-
-def test_generate_for_file_creates_pytest_file(
+def test_generate_for_file_creates_test_artifact(
     tmp_path: Path,
 ) -> None:
-    """Servisin gerÃ§ek bir pytest dosyasÄ± oluÅŸturduÄŸunu doÄŸrular."""
     service = GenerationService()
 
     artifacts = service.generate_for_file(
         source_file=SOURCE_FILE,
         module_path=MODULE_PATH,
         output_directory=tmp_path,
+        overwrite=True,
     )
 
     assert len(artifacts) == 1
-    assert artifacts[0].output_path.exists()
-    assert artifacts[0].output_path.is_file()
+
+    artifact = artifacts[0]
+
+    assert isinstance(
+        artifact,
+        GeneratedTestArtifact,
+    )
+    assert artifact.function_name == "calculate_score"
+    assert artifact.scenario_count == 3
+    assert artifact.output_path.exists()
 
 
-def test_generate_for_file_returns_artifact_metadata(
+def test_generate_for_file_creates_expected_file_name(
     tmp_path: Path,
 ) -> None:
-    """Ãœretim sonucunun doÄŸru metadata bilgilerini taÅŸÄ±dÄ±ÄŸÄ±nÄ± doÄŸrular."""
     service = GenerationService()
 
     artifacts = service.generate_for_file(
         source_file=SOURCE_FILE,
         module_path=MODULE_PATH,
         output_directory=tmp_path,
+        overwrite=True,
     )
 
-    artifact = artifacts[0]
-
-    assert isinstance(artifact, GeneratedTestArtifact)
-    assert artifact.function_name == "calculate_score"
-    assert artifact.scenario_count == 3
-    assert artifact.output_path == (
+    assert artifacts[0].output_path == (
         tmp_path / "test_calculate_score.py"
     )
 
 
-def test_generate_for_file_creates_valid_python_code(
+def test_generated_file_contains_target_import(
     tmp_path: Path,
 ) -> None:
-    """Servisin oluÅŸturduÄŸu dosyanÄ±n geÃ§erli Python kodu olduÄŸunu doÄŸrular."""
     service = GenerationService()
 
     artifacts = service.generate_for_file(
         source_file=SOURCE_FILE,
         module_path=MODULE_PATH,
         output_directory=tmp_path,
+        overwrite=True,
     )
 
-    generated_code = artifacts[0].output_path.read_text(
-        encoding="utf-8"
+    generated_source = artifacts[
+        0
+    ].output_path.read_text(
+        encoding="utf-8",
     )
 
-    syntax_tree = ast.parse(generated_code)
-
-    assert isinstance(syntax_tree, ast.Module)
     assert (
-        "from datasets.sample_code import calculate_score"
-        in generated_code
+        "from datasets.sample_code "
+        "import calculate_score"
+    ) in generated_source
+
+
+def test_generated_file_contains_three_real_tests(
+    tmp_path: Path,
+) -> None:
+    service = GenerationService()
+
+    artifacts = service.generate_for_file(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        output_directory=tmp_path,
+        overwrite=True,
     )
+
+    generated_source = artifacts[
+        0
+    ].output_path.read_text(
+        encoding="utf-8",
+    )
+
+    assert generated_source.count(
+        "def test_calculate_score_"
+    ) == 3
+
+    assert generated_source.count(
+        "result = calculate_score("
+    ) == 3
+
+
+def test_generated_file_does_not_contain_placeholder_test(
+    tmp_path: Path,
+) -> None:
+    service = GenerationService()
+
+    artifacts = service.generate_for_file(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        output_directory=tmp_path,
+        overwrite=True,
+    )
+
+    generated_source = artifacts[
+        0
+    ].output_path.read_text(
+        encoding="utf-8",
+    )
+
+    assert "assert callable" not in generated_source
+    assert "_target_function" not in generated_source
+    assert "TODO" not in generated_source
+
+
+def test_generated_file_contains_all_expected_results(
+    tmp_path: Path,
+) -> None:
+    service = GenerationService()
+
+    artifacts = service.generate_for_file(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        output_directory=tmp_path,
+        overwrite=True,
+    )
+
+    generated_source = artifacts[
+        0
+    ].output_path.read_text(
+        encoding="utf-8",
+    )
+
+    assert (
+        "assert result == 'Başarılı'"
+        in generated_source
+    )
+    assert (
+        "assert result == 'Orta'"
+        in generated_source
+    )
+    assert (
+        "assert result == 'Başarısız'"
+        in generated_source
+    )
+
+
+def test_generated_file_uses_inputs_matching_paths(
+    tmp_path: Path,
+) -> None:
+    service = GenerationService()
+
+    artifacts = service.generate_for_file(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        output_directory=tmp_path,
+        overwrite=True,
+    )
+
+    generated_source = artifacts[
+        0
+    ].output_path.read_text(
+        encoding="utf-8",
+    )
+
+    syntax_tree = ast.parse(generated_source)
+
+    generated_scores: list[int | float] = []
+
+    for node in ast.walk(syntax_tree):
+        if not isinstance(node, ast.Call):
+            continue
+
+        if not isinstance(node.func, ast.Name):
+            continue
+
+        if node.func.id != "calculate_score":
+            continue
+
+        for keyword_argument in node.keywords:
+            if keyword_argument.arg != "score":
+                continue
+
+            value = ast.literal_eval(
+                keyword_argument.value
+            )
+
+            generated_scores.append(value)
+
+    assert len(generated_scores) == 3
+
+    assert any(
+        score >= 85
+        for score in generated_scores
+    )
+
+    assert any(
+        50 <= score < 85
+        for score in generated_scores
+    )
+
+    assert any(
+        score < 50
+        for score in generated_scores
+    )
+
+
+def test_generated_file_has_valid_python_syntax(
+    tmp_path: Path,
+) -> None:
+    service = GenerationService()
+
+    artifacts = service.generate_for_file(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        output_directory=tmp_path,
+        overwrite=True,
+    )
+
+    generated_source = artifacts[
+        0
+    ].output_path.read_text(
+        encoding="utf-8",
+    )
+
+    ast.parse(generated_source)
 
 
 def test_generate_for_file_rejects_missing_source_file(
     tmp_path: Path,
 ) -> None:
-    """Bulunamayan kaynak dosyanÄ±n reddedildiÄŸini doÄŸrular."""
     service = GenerationService()
 
-    missing_source = tmp_path / "missing_source.py"
+    missing_file = (
+        tmp_path / "missing_source.py"
+    )
 
     with pytest.raises(
         FileNotFoundError,
-        match="Kaynak dosya bulunamadÄ±",
+        match="Kaynak dosya bulunamadı",
     ):
         service.generate_for_file(
-            source_file=missing_source,
+            source_file=missing_file,
             module_path=MODULE_PATH,
-            output_directory=tmp_path / "generated",
+            output_directory=tmp_path,
+            overwrite=True,
         )
 
 
-def test_generate_for_file_rejects_non_python_source(
+def test_generate_for_file_rejects_non_python_file(
     tmp_path: Path,
 ) -> None:
-    """Python dÄ±ÅŸÄ±ndaki kaynak dosyalarÄ±n reddedildiÄŸini doÄŸrular."""
     service = GenerationService()
 
-    text_file = tmp_path / "sample.txt"
-    text_file.write_text(
-        "sample content",
+    invalid_file = tmp_path / "source.txt"
+
+    invalid_file.write_text(
+        "not a Python file",
         encoding="utf-8",
     )
 
     with pytest.raises(
         ValueError,
-        match=r"Kaynak dosyanÄ±n uzantÄ±sÄ± \.py olmalÄ±dÄ±r",
+        match="uzantısı .py olmalıdır",
     ):
         service.generate_for_file(
-            source_file=text_file,
+            source_file=invalid_file,
             module_path=MODULE_PATH,
-            output_directory=tmp_path / "generated",
+            output_directory=tmp_path,
+            overwrite=True,
         )
 
 
-def test_generate_for_file_rejects_file_without_functions(
+def test_generate_for_file_rejects_invalid_module_path(
     tmp_path: Path,
 ) -> None:
-    """Fonksiyon iÃ§ermeyen Python dosyasÄ±nÄ±n reddedildiÄŸini doÄŸrular."""
     service = GenerationService()
-
-    source_file = tmp_path / "constants.py"
-    source_file.write_text(
-        "APPLICATION_NAME = 'RL Unit Test'\n",
-        encoding="utf-8",
-    )
 
     with pytest.raises(
         ValueError,
-        match="analiz edilebilir fonksiyon bulunamadÄ±",
+        match="Geçersiz Python modül yolu",
     ):
         service.generate_for_file(
-            source_file=source_file,
-            module_path="constants",
-            output_directory=tmp_path / "generated",
+            source_file=SOURCE_FILE,
+            module_path="datasets/sample_code",
+            output_directory=tmp_path,
+            overwrite=True,
         )
 
 
-def test_generate_for_file_protects_existing_output(
+def test_generate_for_file_rejects_empty_module_path(
     tmp_path: Path,
 ) -> None:
-    """Mevcut test dosyasÄ±nÄ±n varsayÄ±lan olarak korunmasÄ±nÄ± doÄŸrular."""
     service = GenerationService()
-    output_directory = tmp_path / "generated"
-
-    service.generate_for_file(
-        source_file=SOURCE_FILE,
-        module_path=MODULE_PATH,
-        output_directory=output_directory,
-    )
 
     with pytest.raises(
-        FileExistsError,
-        match="Ã‡Ä±ktÄ± dosyasÄ± zaten mevcut",
+        ValueError,
+        match="Modül yolu boş olamaz",
+    ):
+        service.generate_for_file(
+            source_file=SOURCE_FILE,
+            module_path=" ",
+            output_directory=tmp_path,
+            overwrite=True,
+        )
+
+
+def test_generate_for_file_rejects_empty_output_directory() -> None:
+    service = GenerationService()
+
+    with pytest.raises(
+        ValueError,
+        match="Çıktı klasörü boş olamaz",
     ):
         service.generate_for_file(
             source_file=SOURCE_FILE,
             module_path=MODULE_PATH,
-            output_directory=output_directory,
+            output_directory=" ",
+            overwrite=True,
         )
-
-
-def test_generate_for_file_overwrites_output_when_enabled(
-    tmp_path: Path,
-) -> None:
-    """Overwrite etkinleÅŸtirildiÄŸinde mevcut testin yenilendiÄŸini doÄŸrular."""
-    service = GenerationService()
-    output_directory = tmp_path / "generated"
-
-    first_artifacts = service.generate_for_file(
-        source_file=SOURCE_FILE,
-        module_path=MODULE_PATH,
-        output_directory=output_directory,
-    )
-
-    first_output = first_artifacts[0].output_path
-    first_output.write_text(
-        "temporary_content = True\n",
-        encoding="utf-8",
-    )
-
-    second_artifacts = service.generate_for_file(
-        source_file=SOURCE_FILE,
-        module_path=MODULE_PATH,
-        output_directory=output_directory,
-        overwrite=True,
-    )
-
-    regenerated_content = second_artifacts[0].output_path.read_text(
-        encoding="utf-8"
-    )
-
-    assert "temporary_content" not in regenerated_content
-    assert "def test_calculate_score_" in regenerated_content
-

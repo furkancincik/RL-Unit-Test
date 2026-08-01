@@ -57,6 +57,7 @@ class CoverageService:
         )
 
         start_time = time.perf_counter()
+        working_directory = Path.cwd().resolve()
 
         with tempfile.TemporaryDirectory(
             prefix="rl_unit_test_coverage_"
@@ -89,6 +90,7 @@ class CoverageService:
                     timeout=normalized_timeout,
                     check=False,
                     env=environment,
+                    cwd=working_directory,
                 )
             except subprocess.TimeoutExpired as error:
                 duration_seconds = (
@@ -120,6 +122,7 @@ class CoverageService:
                     timeout=remaining_timeout,
                     check=False,
                     env=environment,
+                    cwd=working_directory,
                 )
             except subprocess.TimeoutExpired as error:
                 duration_seconds = (
@@ -169,7 +172,7 @@ class CoverageService:
             "coverage",
             "run",
             "--branch",
-            f"--include={source_file}",
+            f"--include={source_file.as_posix()}",
             "-m",
             "pytest",
             str(test_file),
@@ -190,7 +193,7 @@ class CoverageService:
             "json",
             "-o",
             str(output_file),
-            f"--include={source_file}",
+            f"--include={source_file.as_posix()}",
         )
 
     @staticmethod

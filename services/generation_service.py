@@ -15,12 +15,17 @@ from generator.scenario_generator import ScenarioGenerator
 @dataclass(frozen=True, slots=True)
 class GeneratedTestArtifact:
     """
-    Otomatik test Ã¼retim iÅŸleminin sonucunu temsil eder.
+    Otomatik test üretim işleminin sonucunu temsil eder.
 
     Attributes:
-        function_name: Test Ã¼retilen fonksiyonun adÄ±.
-        scenario_count: Fonksiyon iÃ§in oluÅŸturulan senaryo sayÄ±sÄ±.
-        output_path: OluÅŸturulan pytest dosyasÄ±nÄ±n yolu.
+        function_name:
+            Test üretilen fonksiyonun adı.
+
+        scenario_count:
+            Fonksiyon için oluşturulan senaryo sayısı.
+
+        output_path:
+            Oluşturulan pytest dosyasının yolu.
     """
 
     function_name: str
@@ -29,7 +34,26 @@ class GeneratedTestArtifact:
 
 
 class GenerationService:
-    """Kaynak kod analizinden pytest dosyasÄ±na kadar sÃ¼reci yÃ¶netir."""
+    """
+    Kaynak kod analizinden pytest dosyasının oluşturulmasına kadar
+    test üretim sürecini uçtan uca yönetir.
+
+    İş akışı:
+
+    PythonAnalyzer
+        ↓
+    ControlFlowGraphBuilder
+        ↓
+    CFGPathAnalyzer
+        ↓
+    DecisionQualityMatrix
+        ↓
+    ScenarioGenerator
+        ↓
+    PytestGenerator
+        ↓
+    GeneratedTestFileWriter
+    """
 
     def __init__(
         self,
@@ -42,23 +66,40 @@ class GenerationService:
         file_writer: GeneratedTestFileWriter | None = None,
     ) -> None:
         """
-        Test Ã¼retim servisinin baÄŸÄ±mlÄ±lÄ±klarÄ±nÄ± hazÄ±rlar.
+        Test üretim servisinin bağımlılıklarını hazırlar.
 
-        BaÄŸÄ±mlÄ±lÄ±klar dÄ±ÅŸarÄ±dan verilmezse varsayÄ±lan uygulamalar
-        otomatik olarak oluÅŸturulur.
+        Bağımlılıklar dışarıdan verilmezse varsayılan uygulamalar
+        otomatik olarak oluşturulur.
 
         Args:
-            analyzer: Python statik analiz bileÅŸeni.
-            cfg_builder: Control Flow Graph Ã¼reticisi.
-            path_analyzer: YÃ¼rÃ¼tme yolu analiz bileÅŸeni.
-            dqm: DQM deÄŸerlendirme bileÅŸeni.
-            scenario_generator: Test senaryosu Ã¼reticisi.
-            pytest_generator: Pytest kaynak kodu Ã¼reticisi.
-            file_writer: Ãœretilen kodu dosyaya yazan bileÅŸen.
+            analyzer:
+                Python statik analiz bileşeni.
+
+            cfg_builder:
+                Control Flow Graph üreticisi.
+
+            path_analyzer:
+                Yürütme yolu analiz bileşeni.
+
+            dqm:
+                DQM değerlendirme bileşeni.
+
+            scenario_generator:
+                Test senaryosu üreticisi.
+
+            pytest_generator:
+                Pytest kaynak kodu üreticisi.
+
+            file_writer:
+                Üretilen pytest kodunu dosyaya yazan bileşen.
         """
         self._analyzer = analyzer or PythonAnalyzer()
-        self._cfg_builder = cfg_builder or ControlFlowGraphBuilder()
-        self._path_analyzer = path_analyzer or CFGPathAnalyzer()
+        self._cfg_builder = (
+            cfg_builder or ControlFlowGraphBuilder()
+        )
+        self._path_analyzer = (
+            path_analyzer or CFGPathAnalyzer()
+        )
         self._dqm = dqm or DecisionQualityMatrix()
         self._scenario_generator = (
             scenario_generator or ScenarioGenerator()
@@ -79,54 +120,82 @@ class GenerationService:
         overwrite: bool = False,
     ) -> list[GeneratedTestArtifact]:
         """
-        Kaynak dosyadaki fonksiyonlar iÃ§in pytest dosyalarÄ± Ã¼retir.
+        Kaynak dosyadaki fonksiyonlar için pytest dosyaları üretir.
 
-        Her fonksiyon iÃ§in analiz, CFG, yÃ¼rÃ¼tme yolu, DQM ve test
-        senaryosu iÅŸlemleri uygulanÄ±r. Ãœretilen pytest kodu belirtilen
-        Ã§Ä±ktÄ± klasÃ¶rÃ¼ne kaydedilir.
+        Her fonksiyon için sırasıyla:
+
+        - Statik analiz,
+        - CFG oluşturma,
+        - Yürütme yollarını çıkarma,
+        - DQM değerlendirmesi,
+        - Somut test girdisi üretimi,
+        - Scenario oluşturma,
+        - Pytest kodu üretme,
+        - Dosyaya yazma
+
+        işlemleri uygulanır.
 
         Args:
-            source_file: Analiz edilecek Python kaynak dosyasÄ±.
-            module_path: Kaynak dosyanÄ±n Python import yolu.
-                Ã–rnek: ``datasets.sample_code``.
-            output_directory: Ãœretilen testlerin kaydedileceÄŸi klasÃ¶r.
-            overwrite: Mevcut test dosyalarÄ±nÄ±n Ã¼zerine yazÄ±lmasÄ±na
-                izin verilip verilmediÄŸi.
+            source_file:
+                Analiz edilecek Python kaynak dosyası.
+
+            module_path:
+                Kaynak dosyanın Python import yolu.
+                Örnek: ``datasets.sample_code``.
+
+            output_directory:
+                Üretilen testlerin kaydedileceği klasör.
+
+            overwrite:
+                Mevcut test dosyalarının üzerine yazılmasına izin
+                verilip verilmediği.
 
         Returns:
-            OluÅŸturulan test dosyalarÄ±na ait sonuÃ§ listesi.
+            Oluşturulan test dosyalarına ait artifact listesi.
 
         Raises:
-            ValueError: Kaynak dosyada analiz edilebilir fonksiyon veya
-                eÅŸleÅŸen CFG bulunmadÄ±ÄŸÄ±nda.
+            ValueError:
+                Kaynak dosyada analiz edilebilir fonksiyon veya
+                eşleşen CFG bulunmadığında.
         """
         normalized_source_file = self._normalize_source_file(
             source_file
         )
+
+        normalized_module_path = self._normalize_module_path(
+            module_path
+        )
+
         normalized_output_directory = (
-            self._normalize_output_directory(output_directory)
+            self._normalize_output_directory(
+                output_directory
+            )
         )
 
         analysis_result = self._analyzer.analyze_file(
             normalized_source_file
         )
+
         graphs = self._cfg_builder.build_from_file(
             normalized_source_file
         )
 
         if not analysis_result.functions:
             raise ValueError(
-                "Kaynak dosyada analiz edilebilir fonksiyon bulunamadÄ±."
+                "Kaynak dosyada analiz edilebilir fonksiyon "
+                "bulunamadı."
             )
 
         if not graphs:
             raise ValueError(
-                "Kaynak dosyada test Ã¼retimine uygun CFG bulunamadÄ±."
+                "Kaynak dosyada test üretimine uygun CFG "
+                "bulunamadı."
             )
 
         if len(analysis_result.functions) != len(graphs):
             raise ValueError(
-                "Fonksiyon analizi ile CFG sonuÃ§larÄ±nÄ±n sayÄ±sÄ± eÅŸleÅŸmiyor."
+                "Fonksiyon analizi ile CFG sonuçlarının sayısı "
+                "eşleşmiyor."
             )
 
         artifacts: list[GeneratedTestArtifact] = []
@@ -136,21 +205,53 @@ class GenerationService:
             graphs,
             strict=True,
         ):
-            paths = self._path_analyzer.find_paths(graph)
+            if function.name != graph.function_name:
+                raise ValueError(
+                    "Fonksiyon analizi ile CFG fonksiyon adı "
+                    "eşleşmiyor: "
+                    f"{function.name} != {graph.function_name}"
+                )
+
+            paths = self._path_analyzer.find_paths(
+                graph
+            )
+
+            if not paths:
+                raise ValueError(
+                    f"{function.name} fonksiyonu için yürütme "
+                    "yolu bulunamadı."
+                )
 
             scores = self._dqm.evaluate_paths(
                 function=function,
                 paths=paths,
             )
 
+            if not scores:
+                raise ValueError(
+                    f"{function.name} fonksiyonu için DQM "
+                    "sonucu üretilemedi."
+                )
+
+            parameter_names = self._extract_parameter_names(
+                function.parameters
+            )
+
             scenarios = self._scenario_generator.generate(
                 function_name=function.name,
                 paths=paths,
                 scores=scores,
+                parameter_names=parameter_names,
             )
 
+            if not scenarios:
+                raise ValueError(
+                    f"{function.name} fonksiyonu için test "
+                    "senaryosu üretilemedi."
+                )
+
             generated_code = self._pytest_generator.generate(
-                module_path=module_path,
+                module_path=normalized_module_path,
                 function_name=function.name,
                 scenarios=scenarios,
             )
@@ -177,77 +278,144 @@ class GenerationService:
         return artifacts
 
     @staticmethod
+    def _extract_parameter_names(
+        parameters: object,
+    ) -> tuple[str, ...]:
+        """
+        PythonAnalyzer çıktısındaki parametreleri normalize eder.
+
+        Analyzer parametreleri liste veya tuple biçiminde döndürebilir.
+        Sonuç her zaman ScenarioGenerator tarafından beklenen tuple
+        yapısına dönüştürülür.
+        """
+        if not isinstance(parameters, (list, tuple)):
+            raise TypeError(
+                "Fonksiyon parametreleri liste veya tuple "
+                "olmalıdır."
+            )
+
+        normalized_parameters: list[str] = []
+
+        for parameter in parameters:
+            if not isinstance(parameter, str):
+                raise TypeError(
+                    "Fonksiyon parametre adları string olmalıdır."
+                )
+
+            normalized_parameter = parameter.strip()
+
+            if not normalized_parameter:
+                raise ValueError(
+                    "Fonksiyon parametre adı boş olamaz."
+                )
+
+            normalized_parameters.append(
+                normalized_parameter
+            )
+
+        if (
+            len(set(normalized_parameters))
+            != len(normalized_parameters)
+        ):
+            raise ValueError(
+                "Fonksiyon parametre adları tekrar edemez."
+            )
+
+        return tuple(normalized_parameters)
+
+    @staticmethod
     def _normalize_source_file(
         source_file: str | Path,
     ) -> Path:
         """
-        Kaynak dosya yolunu doÄŸrular.
-
-        Args:
-            source_file: Analiz edilecek dosyanÄ±n yolu.
-
-        Returns:
-            DoÄŸrulanmÄ±ÅŸ Path nesnesi.
-
-        Raises:
-            TypeError: Yol string veya Path deÄŸilse.
-            ValueError: Yol boÅŸsa veya uzantÄ±sÄ± ``.py`` deÄŸilse.
-            FileNotFoundError: Kaynak dosya bulunamazsa.
+        Kaynak dosya yolunu doğrular ve mutlak yola dönüştürür.
         """
         if not isinstance(source_file, (str, Path)):
             raise TypeError(
-                "Kaynak dosya yolu string veya Path olmalÄ±dÄ±r."
+                "Kaynak dosya yolu string veya Path olmalıdır."
             )
 
-        if isinstance(source_file, str) and not source_file.strip():
-            raise ValueError("Kaynak dosya yolu boÅŸ olamaz.")
+        if (
+            isinstance(source_file, str)
+            and not source_file.strip()
+        ):
+            raise ValueError(
+                "Kaynak dosya yolu boş olamaz."
+            )
 
         path = Path(source_file)
 
         if path.suffix.lower() != ".py":
             raise ValueError(
-                "Kaynak dosyanÄ±n uzantÄ±sÄ± .py olmalÄ±dÄ±r."
+                "Kaynak dosyanın uzantısı .py olmalıdır."
             )
 
         if not path.exists():
             raise FileNotFoundError(
-                f"Kaynak dosya bulunamadÄ±: {path}"
+                f"Kaynak dosya bulunamadı: {path}"
             )
 
         if not path.is_file():
             raise ValueError(
-                f"Kaynak dosya yolu bir dosya olmalÄ±dÄ±r: {path}"
+                f"Kaynak dosya yolu bir dosya olmalıdır: "
+                f"{path}"
             )
 
-        return path
+        return path.resolve()
+
+    @staticmethod
+    def _normalize_module_path(
+        module_path: str,
+    ) -> str:
+        """
+        Python modül yolunu doğrular ve normalize eder.
+        """
+        if not isinstance(module_path, str):
+            raise TypeError(
+                "Modül yolu string olmalıdır."
+            )
+
+        normalized_module_path = module_path.strip()
+
+        if not normalized_module_path:
+            raise ValueError(
+                "Modül yolu boş olamaz."
+            )
+
+        module_parts = normalized_module_path.split(".")
+
+        if any(
+            not part.isidentifier()
+            for part in module_parts
+        ):
+            raise ValueError(
+                f"Geçersiz Python modül yolu: "
+                f"{normalized_module_path}"
+            )
+
+        return normalized_module_path
 
     @staticmethod
     def _normalize_output_directory(
         output_directory: str | Path,
     ) -> Path:
         """
-        Ã‡Ä±ktÄ± klasÃ¶rÃ¼ yolunu doÄŸrular.
-
-        Args:
-            output_directory: Test dosyalarÄ±nÄ±n kaydedileceÄŸi klasÃ¶r.
-
-        Returns:
-            Normalize edilmiÅŸ Path nesnesi.
-
-        Raises:
-            TypeError: Yol string veya Path deÄŸilse.
-            ValueError: Yol boÅŸsa.
+        Çıktı klasörü yolunu doğrular.
         """
-        if not isinstance(output_directory, (str, Path)):
+        if not isinstance(
+            output_directory,
+            (str, Path),
+        ):
             raise TypeError(
-                "Ã‡Ä±ktÄ± klasÃ¶rÃ¼ string veya Path olmalÄ±dÄ±r."
+                "Çıktı klasörü string veya Path olmalıdır."
             )
 
         if (
             isinstance(output_directory, str)
             and not output_directory.strip()
         ):
-            raise ValueError("Ã‡Ä±ktÄ± klasÃ¶rÃ¼ boÅŸ olamaz.")
+            raise ValueError(
+                "Çıktı klasörü boş olamaz."
+            )
 
         return Path(output_directory)
-
