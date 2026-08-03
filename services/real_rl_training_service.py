@@ -13,6 +13,10 @@ from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
 )
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
 from rl.coverage_environment import CoverageEnvironment
 from rl.coverage_state import CoverageState
 from rl.epsilon_greedy_policy import EpsilonGreedyPolicy
@@ -62,6 +66,10 @@ class RealRLTrainingResult:
         q_table_state_count:
             Eğitim sonunda Q-Table içerisinde bulunan state sayısı.
 
+        final_coverage_result:
+            Eğitim sonunda elde edilen son başarılı dosya veya
+            fonksiyon bazlı coverage sonucu.
+
         report:
             Terminalde veya dosyada kullanılabilecek eğitim raporu.
     """
@@ -73,6 +81,7 @@ class RealRLTrainingResult:
     session_result: TrainingSessionResult
     statistics: TrainingStatistics
     q_table_state_count: int
+    final_coverage_result: CoverageResult | FunctionCoverageResult
     report: str
 
     @property
@@ -89,6 +98,49 @@ class RealRLTrainingResult:
     def completed_episode_count(self) -> int:
         """Tamamlanan episode sayısını döndürür."""
         return self.session_result.completed_episode_count
+
+    @property
+    def function_coverage(
+        self,
+    ) -> FunctionCoverageResult | None:
+        """Son sonuç fonksiyon bazlıysa fonksiyon coverage'ını döndürür."""
+        if isinstance(
+            self.final_coverage_result,
+            FunctionCoverageResult,
+        ):
+            return self.final_coverage_result
+
+        return None
+
+    @property
+    def file_coverage(self) -> CoverageResult:
+        """
+        Son ölçüme ait dosya geneli coverage sonucunu döndürür.
+        """
+        if isinstance(
+            self.final_coverage_result,
+            FunctionCoverageResult,
+        ):
+            return self.final_coverage_result.file_coverage
+
+        return self.final_coverage_result
+
+    @property
+    def has_full_function_coverage(self) -> bool | None:
+        """
+        Fonksiyon bazlı ölçüm varsa tam coverage durumunu döndürür.
+        """
+        function_coverage = self.function_coverage
+
+        if function_coverage is None:
+            return None
+
+        return function_coverage.has_full_coverage
+
+    @property
+    def has_full_file_coverage(self) -> bool:
+        """Dosya geneli coverage'ın tam olup olmadığını döndürür."""
+        return self.file_coverage.has_full_coverage
 
 
 class RealRLTrainingService:
@@ -335,6 +387,8 @@ class RealRLTrainingService:
             module_path=normalized_module_path,
             function_name=normalized_function_name,
             output_directory=normalized_output_directory,
+            function_start_line=function.line_number,
+            function_end_line=function.end_line_number,
             overwrite=overwrite,
             timeout_seconds=timeout_seconds,
         )
@@ -395,9 +449,21 @@ class RealRLTrainingService:
             episode_count=episode_count,
         )
 
+        final_coverage_result = (
+            suite_transition.last_coverage_result
+        )
+
+        if final_coverage_result is None:
+            raise RuntimeError(
+                "RL eğitimi tamamlandı ancak son coverage sonucu "
+                "bulunamadı."
+            )
+
         report = self._report_formatter.format_session(
             result=session_result,
             statistics=statistics,
+            function_name=normalized_function_name,
+            coverage_result=final_coverage_result,
         )
 
         return RealRLTrainingResult(
@@ -408,6 +474,7 @@ class RealRLTrainingService:
             session_result=session_result,
             statistics=statistics,
             q_table_state_count=len(q_table),
+            final_coverage_result=final_coverage_result,
             report=report,
         )
 

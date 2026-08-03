@@ -5,6 +5,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
+
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
@@ -12,6 +17,9 @@ from evaluator.dqm import DQMScore, DecisionQualityMatrix
 from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
+)
+from rl.scenario_suite_coverage_transition import (
+    ScenarioSuiteCoverageTransition,
 )
 from rl.training_report_formatter import TrainingReportFormatter
 from rl.training_session import (
@@ -52,6 +60,8 @@ def create_function_analysis() -> Mock:
     function.name = "calculate_score"
     function.parameters = ["score"]
     function.branch_count = 1
+    function.line_number = 1
+    function.end_line_number = 4
 
     return function
 
@@ -128,6 +138,71 @@ def create_session_result() -> TrainingSessionResult:
         episodes=(episode,),
         requested_episode_count=1,
         completed_episode_count=1,
+    )
+
+
+def create_function_coverage_result(
+    tmp_path: Path,
+) -> FunctionCoverageResult:
+    """Mock eğitim akışı için kontrollü coverage sonucu oluşturur."""
+    source_file = create_source_file(tmp_path).resolve()
+    test_file = (
+        tmp_path
+        / "test_calculate_score_scenario_suite.py"
+    ).resolve()
+
+    file_coverage = CoverageResult(
+        source_file=source_file,
+        test_file=test_file,
+        line_coverage_percent=100.0,
+        branch_coverage_percent=100.0,
+        covered_line_count=4,
+        missing_line_count=0,
+        total_line_count=4,
+        covered_branch_count=2,
+        missing_branch_count=0,
+        total_branch_count=2,
+        test_exit_code=0,
+        duration_seconds=0.01,
+    )
+
+    return FunctionCoverageResult(
+        source_file=source_file,
+        test_file=test_file,
+        function_name="calculate_score",
+        start_line=1,
+        end_line=4,
+        line_coverage_percent=100.0,
+        branch_coverage_percent=100.0,
+        covered_lines=(1, 2, 3, 4),
+        missing_lines=(),
+        covered_branch_count=2,
+        missing_branch_count=0,
+        test_exit_code=0,
+        duration_seconds=0.01,
+        file_coverage=file_coverage,
+    )
+
+
+@pytest.fixture(autouse=True)
+def provide_mock_transition_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    TrainingSession.run mocklandığında transition çağrılmadığı için
+    servis testlerine kontrollü son coverage sonucu sağlar.
+    """
+    coverage_result = create_function_coverage_result(
+        tmp_path
+    )
+
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "last_coverage_result",
+        property(
+            lambda self: coverage_result
+        ),
     )
 
 
@@ -230,6 +305,15 @@ def test_run_returns_real_rl_training_result(
         result,
         RealRLTrainingResult,
     )
+
+    assert isinstance(
+        result.final_coverage_result,
+        FunctionCoverageResult,
+    )
+    assert result.function_coverage is not None
+    assert result.file_coverage.line_coverage_percent == 100.0
+    assert result.has_full_function_coverage is True
+    assert result.has_full_file_coverage is True
 
 
 @patch.object(
@@ -361,6 +445,19 @@ def test_run_formats_training_report(
     report_formatter = dependencies[5]
 
     report_formatter.format_session.assert_called_once()
+
+    call_kwargs = (
+        report_formatter.format_session
+        .call_args
+        .kwargs
+    )
+
+    assert call_kwargs["result"] is session_result
+    assert call_kwargs["function_name"] == "calculate_score"
+    assert isinstance(
+        call_kwargs["coverage_result"],
+        FunctionCoverageResult,
+    )
 
     assert result.report == "RL EĞİTİM OTURUMU"
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
 from rl.training_session import TrainingSessionResult
 from rl.training_statistics import (
     EpisodeStatistics,
@@ -24,6 +28,10 @@ class TrainingReportFormatter:
     ) -> str:
         """
         Tek bir episode sonucunu okunabilir metne dönüştürür.
+
+        Episode içerisindeki coverage değeri, RL ortamının hedeflediği
+        kapsamı temsil eder. Gerçek RL eğitiminde bu kapsam hedef
+        fonksiyondur.
         """
         self._validate_episode(episode)
 
@@ -36,18 +44,18 @@ class TrainingReportFormatter:
         return "\n".join(
             (
                 f"Episode {episode.episode_number}",
-                f"Adım sayısı       : {episode.step_count}",
-                f"Toplam reward     : {episode.total_reward:.2f}",
+                f"Adım sayısı                 : {episode.step_count}",
+                f"Toplam reward               : {episode.total_reward:.2f}",
                 (
-                    "Final coverage   : "
+                    "Hedef kapsam coverage       : "
                     f"%{episode.final_coverage_percentage:.2f}"
                 ),
                 (
-                    "Tam coverage     : "
+                    "Tam hedef kapsam coverage   : "
                     f"{full_coverage_text}"
                 ),
                 (
-                    "Çalıştırılan test: "
+                    "Çalıştırılan test           : "
                     f"{episode.executed_test_count}"
                 ),
             )
@@ -57,9 +65,18 @@ class TrainingReportFormatter:
         self,
         result: TrainingSessionResult,
         statistics: TrainingStatistics,
+        *,
+        function_name: str | None = None,
+        coverage_result: (
+            CoverageResult | FunctionCoverageResult | None
+        ) = None,
     ) -> str:
         """
         Çok episode içeren eğitim oturumunun ayrıntılı raporunu üretir.
+
+        ``coverage_result`` verilirse hedef fonksiyon ve dosya geneli
+        coverage değerleri ayrı başlıklarla rapora eklenir. Parametre
+        verilmezse eski kullanım korunur.
         """
         self._validate_result(result)
         self._validate_statistics(statistics)
@@ -67,17 +84,19 @@ class TrainingReportFormatter:
             result=result,
             statistics=statistics,
         )
+        self._validate_function_name(function_name)
+        self._validate_coverage_result(coverage_result)
 
         sections: list[str] = [
             "RL EĞİTİM OTURUMU",
-            "=" * 40,
+            "=" * 48,
         ]
 
         for episode in result.episodes:
             sections.extend(
                 (
                     self.format_episode(episode),
-                    "-" * 40,
+                    "-" * 48,
                 )
             )
 
@@ -93,48 +112,139 @@ class TrainingReportFormatter:
         sections.extend(
             (
                 "GENEL ÖZET",
-                f"Talep edilen episode : {result.requested_episode_count}",
-                f"Tamamlanan episode   : {result.completed_episode_count}",
+                f"Talep edilen episode         : {result.requested_episode_count}",
+                f"Tamamlanan episode           : {result.completed_episode_count}",
                 (
-                    "Tam coverage episode: "
+                    "Tam hedef coverage episode   : "
                     f"{result.full_coverage_episode_count}"
                 ),
                 (
-                    "Toplam reward        : "
+                    "Toplam reward                : "
                     f"{statistics.total_reward:.2f}"
                 ),
                 (
-                    "Ortalama reward      : "
+                    "Ortalama reward              : "
                     f"{statistics.average_reward:.2f}"
                 ),
                 (
-                    "En yüksek reward     : "
+                    "En yüksek reward             : "
                     f"{statistics.best_reward:.2f}"
                 ),
                 (
-                    "Ortalama adım sayısı : "
+                    "Ortalama adım sayısı         : "
                     f"{statistics.average_step_count:.2f}"
                 ),
                 (
-                    "En iyi adım sayısı   : "
+                    "En iyi adım sayısı           : "
                     f"{statistics.best_step_count}"
                 ),
                 (
-                    "En yüksek coverage   : "
+                    "En yüksek hedef coverage     : "
                     f"%{statistics.best_coverage_percentage:.2f}"
                 ),
                 (
-                    "En iyi episode       : "
+                    "En iyi episode               : "
                     f"{best_episode_text}"
                 ),
                 (
-                    "Oturum başarılı      : "
+                    "Oturum başarılı              : "
                     f"{'Evet' if result.success else 'Hayır'}"
                 ),
             )
         )
 
+        if coverage_result is not None:
+            sections.extend(
+                (
+                    "-" * 48,
+                    "SON COVERAGE ÖZETİ",
+                    *self._format_coverage_summary(
+                        coverage_result=coverage_result,
+                        function_name=function_name,
+                    ),
+                )
+            )
+
         return "\n".join(sections)
+
+    @staticmethod
+    def _format_coverage_summary(
+        *,
+        coverage_result: CoverageResult | FunctionCoverageResult,
+        function_name: str | None,
+    ) -> tuple[str, ...]:
+        """Fonksiyon ve dosya coverage sonuçlarını ayrı ayrı biçimlendirir."""
+        if isinstance(
+            coverage_result,
+            FunctionCoverageResult,
+        ):
+            normalized_function_name = (
+                function_name
+                or coverage_result.function_name
+            )
+
+            function_full_text = (
+                "Evet"
+                if coverage_result.has_full_coverage
+                else "Hayır"
+            )
+            file_full_text = (
+                "Evet"
+                if coverage_result.file_coverage.has_full_coverage
+                else "Hayır"
+            )
+
+            return (
+                (
+                    f"Hedef fonksiyon              : "
+                    f"{normalized_function_name}"
+                ),
+                (
+                    "Fonksiyon satır coverage      : "
+                    f"%{coverage_result.line_coverage_percent:.2f}"
+                ),
+                (
+                    "Fonksiyon branch coverage     : "
+                    f"%{coverage_result.branch_coverage_percent:.2f}"
+                ),
+                (
+                    "Tam fonksiyon coverage        : "
+                    f"{function_full_text}"
+                ),
+                (
+                    "Dosya geneli satır coverage   : "
+                    f"%{coverage_result.file_line_coverage_percent:.2f}"
+                ),
+                (
+                    "Dosya geneli branch coverage  : "
+                    f"%{coverage_result.file_branch_coverage_percent:.2f}"
+                ),
+                (
+                    "Tam dosya coverage            : "
+                    f"{file_full_text}"
+                ),
+            )
+
+        file_full_text = (
+            "Evet"
+            if coverage_result.has_full_coverage
+            else "Hayır"
+        )
+
+        return (
+            (
+                "Dosya geneli satır coverage   : "
+                f"%{coverage_result.line_coverage_percent:.2f}"
+            ),
+            (
+                "Dosya geneli branch coverage  : "
+                f"%{coverage_result.branch_coverage_percent:.2f}"
+            ),
+            (
+                "Tam dosya coverage            : "
+                f"{file_full_text}"
+            ),
+        )
 
     @staticmethod
     def _validate_episode(
@@ -170,6 +280,44 @@ class TrainingReportFormatter:
         ):
             raise TypeError(
                 "statistics bir TrainingStatistics örneği olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_function_name(
+        function_name: str | None,
+    ) -> None:
+        if function_name is None:
+            return
+
+        if not isinstance(function_name, str):
+            raise TypeError(
+                "function_name string veya None olmalıdır."
+            )
+
+        if not function_name.strip():
+            raise ValueError(
+                "function_name boş olamaz."
+            )
+
+    @staticmethod
+    def _validate_coverage_result(
+        coverage_result: (
+            CoverageResult | FunctionCoverageResult | None
+        ),
+    ) -> None:
+        if coverage_result is None:
+            return
+
+        if not isinstance(
+            coverage_result,
+            (
+                CoverageResult,
+                FunctionCoverageResult,
+            ),
+        ):
+            raise TypeError(
+                "coverage_result bir CoverageResult, "
+                "FunctionCoverageResult veya None olmalıdır."
             )
 
     @staticmethod

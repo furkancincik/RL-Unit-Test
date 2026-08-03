@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from cfg.path_analyzer import ExecutionPath
-from generator.path_input_generator import PathInputGenerator
+from generator.path_input_generator import (
+    PathInputGenerator,
+    UnreachablePathError,
+)
 
 
 def create_execution_path(
@@ -426,13 +429,931 @@ def test_generate_rejects_unsupported_expression() -> None:
         )
 
 
-def test_generate_rejects_dynamic_return_expression() -> None:
+def test_generate_supports_dynamic_return_expression() -> None:
     generator = PathInputGenerator()
 
     path = create_execution_path(
         node_labels=[
             "START",
+            "score >= 5",
             "return score * 2",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+    )
+
+    assert result.keyword_argument_dict["score"] == 5
+    assert result.expected_result == 10
+
+
+def test_generate_rejects_equal_value_below_minimum() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "attendance < 40",
+            "attendance == 0",
+            'return "Başvuruya katılmadı"',
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            "True",
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="Eşitlik değeri minimum kısıtını sağlamıyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("attendance",),
+        )
+
+
+def test_generate_rejects_equal_value_above_maximum() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score <= 50",
+            "score == 75",
+            'return "Ulaşılamaz"',
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "True",
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="Eşitlik değeri maksimum kısıtını sağlamıyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("score",),
+        )
+
+
+def test_generate_rejects_range_added_after_conflicting_equality() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "attendance == 0",
+            "attendance < 40",
+            'return "Ulaşılamaz"',
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "False",
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="Eşitlik değeri minimum kısıtını sağlamıyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("attendance",),
+        )
+
+
+def test_generate_rejects_forbidden_singleton_range() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 50",
+            "score <= 50",
+            "score != 50",
+            'return "Ulaşılamaz"',
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "True",
+            "True",
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="Tek mümkün değer eşitsizlik kısıtıyla yasaklandı",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("score",),
+        )
+
+def test_generate_supports_true_and_condition() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 50 and attendance >= 70",
+            'return "Kabul"',
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "attendance"),
+    )
+    assert result.keyword_argument_dict == {
+        "score": 50,
+        "attendance": 70,
+    }
+
+
+def test_generate_supports_false_and_condition() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 50 and attendance >= 70",
+            'return "Red"',
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "False", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "attendance"),
+    )
+    values = result.keyword_argument_dict
+    assert values["score"] < 50 or values["attendance"] < 70
+
+
+def test_generate_supports_true_or_condition() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score < 40 or project_score < 50",
+            'return "Yetersiz"',
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "project_score"),
+    )
+    values = result.keyword_argument_dict
+    assert values["score"] < 40 or values["project_score"] < 50
+
+
+def test_generate_supports_false_or_condition() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score < 40 or project_score < 50",
+            'return "Yeterli"',
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "False", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "project_score"),
+    )
+    values = result.keyword_argument_dict
+    assert values["score"] >= 40
+    assert values["project_score"] >= 50
+
+
+def test_generate_supports_nested_boolean_condition() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "(score >= 50 and attendance >= 70) or is_admin",
+            'return "Allowed"',
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "attendance", "is_admin"),
+    )
+    values = result.keyword_argument_dict
+    assert (
+        values["score"] >= 50 and values["attendance"] >= 70
+    ) or values["is_admin"] is True
+
+
+def test_generate_supports_not_wrapped_boolean_operation() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "not (score < 50 or attendance < 70)",
+            'return "Kabul"',
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "attendance"),
+    )
+    values = result.keyword_argument_dict
+    assert values["score"] >= 50
+    assert values["attendance"] >= 70
+
+
+def test_generate_selects_non_conflicting_boolean_alternative() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 50",
+            "score < 40 or attendance < 70",
+            'return "Alternatif"',
+            "END",
+        ],
+        node_types=["start", "if", "if", "return", "end"],
+        edge_labels=[None, "True", "True", None],
+    )
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "attendance"),
+    )
+    values = result.keyword_argument_dict
+    assert values["score"] >= 50
+    assert values["attendance"] < 70
+
+
+def test_generate_creates_zero_iteration_while_input() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "value > 0",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("value",),
+    )
+
+    assert result.keyword_argument_dict["value"] <= 0
+
+
+def test_generate_creates_one_iteration_while_input() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "value > 0",
+            "value -= 1",
+            "value > 0",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("value",),
+    )
+
+    assert result.keyword_argument_dict["value"] == 1
+
+
+def test_generate_creates_two_iteration_while_input() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "value > 0",
+            "value -= 1",
+            "value > 0",
+            "value -= 1",
+            "value > 0",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "while",
+            "AugAssign",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "Loop",
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("value",),
+    )
+
+    assert result.keyword_argument_dict["value"] == 2
+
+
+def test_generate_supports_incrementing_while_loop() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "value < 2",
+            "value += 1",
+            "value < 2",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("value",),
+    )
+
+    assert result.keyword_argument_dict["value"] == 1
+
+
+def test_generate_creates_empty_iterable_for_zero_iteration_for_loop() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "item in values",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Complete",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == []
+
+
+def test_generate_creates_iterable_for_one_iteration_for_loop() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "item in values",
+            "total += item",
+            "item in values",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "AugAssign",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == [0]
+
+
+def test_generate_creates_zero_division_exception_path_input() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = a / b",
+            "except ZeroDivisionError",
+            "return None",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("a", "b"),
+    )
+
+    assert result.keyword_argument_dict["b"] == 0
+    assert result.expected_result is None
+    assert result.expected_exception is None
+
+
+def test_generate_creates_index_error_exception_path_input() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = values[0]",
+            "except IndexError",
+            "return None",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == []
+    assert result.expected_result is None
+
+
+def test_generate_creates_index_error_for_larger_index() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = values[2]",
+            "except IndexError",
+            "return None",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+    )
+
+    assert len(result.keyword_argument_dict["values"]) == 2
+
+
+def test_generate_creates_key_error_exception_path_input() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = data['name']",
+            "except KeyError",
+            "return None",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("data",),
+    )
+
+    assert result.keyword_argument_dict["data"] == {}
+    assert result.expected_result is None
+
+
+def test_generate_preserves_uncaught_raise_exception() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "raise ValueError('Geçersiz')",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Raise",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=(),
+    )
+
+    assert result.expected_exception == "ValueError"
+    assert result.expected_result is None
+
+
+def test_generate_supports_direct_parameter_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score == 75",
+            "return score",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+    )
+
+    assert result.expected_result == 75
+
+
+def test_generate_supports_multiple_parameter_arithmetic_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score == 70",
+            "bonus == 5",
+            "return score + bonus",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score", "bonus"),
+    )
+
+    assert result.expected_result == 75
+
+
+def test_generate_supports_assignment_before_dynamic_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score == 10",
+            "total = score + 5",
+            "return total * 2",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "Assign",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+    )
+
+    assert result.expected_result == 30
+
+
+def test_generate_supports_augmented_assignment_before_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "total == 3",
+            "total += 4",
+            "return total",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "AugAssign",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("total",),
+    )
+
+    assert result.expected_result == 7
+
+
+def test_generate_supports_subscript_dynamic_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "values = [10, 20]",
+            "return values[0]",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=(),
+    )
+
+    assert result.expected_result == 10
+
+
+def test_generate_supports_conditional_dynamic_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score == 80",
+            "return score if score >= 50 else 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+    )
+
+    assert result.expected_result == 80
+
+
+def test_generate_rejects_function_call_in_dynamic_return() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "return len(values)",
             "END",
         ],
         node_types=[
@@ -448,9 +1369,86 @@ def test_generate_rejects_dynamic_return_expression() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Dinamik return ifadeleri henüz desteklenmiyor",
+        match="Dinamik return ifadesi güvenli biçimde hesaplanamadı",
     ):
         generator.generate(
             path=path,
-            parameter_names=("score",),
+            parameter_names=("values",),
         )
+
+
+def test_generate_constant_return_skips_unresolved_loop_assignment() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "item in values",
+            "total += item",
+            "item in values",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "AugAssign",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == [0]
+    assert result.expected_result == 0
+
+
+def test_generate_constant_handler_return_skips_raising_assignment() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = a / b",
+            "except ZeroDivisionError",
+            "return None",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("a", "b"),
+    )
+
+    assert result.keyword_argument_dict["b"] == 0
+    assert result.expected_result is None
+    assert result.expected_exception is None

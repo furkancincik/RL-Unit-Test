@@ -4,6 +4,10 @@ import keyword
 from pathlib import Path
 
 from generator.scenario_generator import Scenario
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
 from rl.coverage_state import CoverageState
 from rl.coverage_state_mapper import CoverageStateMapper
 from services.scenario_suite_coverage_service import (
@@ -17,6 +21,11 @@ class ScenarioSuiteCoverageTransition:
     her adımda bütün seçilmiş senaryoların kümülatif coverage
     sonucundan yeni CoverageState oluşturur.
 
+    Fonksiyon başlangıç ve bitiş satırları verilirse coverage
+    yalnızca hedef fonksiyon için hesaplanır. Satır aralığı
+    verilmezse eski davranış korunarak dosya geneli coverage
+    sonucu kullanılır.
+
     Akış:
 
         CoverageState + Yeni Scenario
@@ -25,26 +34,25 @@ class ScenarioSuiteCoverageTransition:
                     ↓
         ScenarioSuiteCoverageService
                     ↓
-        Kümülatif CoverageResult
+        Dosya veya fonksiyon bazlı coverage
                     ↓
         CoverageStateMapper
                     ↓
         Yeni CoverageState
-
-    Bu sınıf aksiyon seçmez ve reward hesaplamaz. Yalnızca
-    episode içerisindeki seçilmiş senaryoları yöneterek gerçek
-    coverage tabanlı durum geçişini gerçekleştirir.
     """
 
     __slots__ = (
         "_source_file",
         "_module_path",
         "_function_name",
+        "_function_start_line",
+        "_function_end_line",
         "_output_directory",
         "_coverage_service",
         "_overwrite",
         "_timeout_seconds",
         "_selected_scenarios",
+        "_last_coverage_result",
     )
 
     def __init__(
@@ -54,6 +62,8 @@ class ScenarioSuiteCoverageTransition:
         module_path: str,
         function_name: str,
         output_directory: str | Path,
+        function_start_line: int | None = None,
+        function_end_line: int | None = None,
         coverage_service: ScenarioSuiteCoverageService | None = None,
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
@@ -62,27 +72,45 @@ class ScenarioSuiteCoverageTransition:
         self._source_file = self._normalize_source_file(
             source_file
         )
+
         self._module_path = self._normalize_module_path(
             module_path
         )
+
         self._function_name = self._normalize_function_name(
             function_name
         )
+
+        (
+            self._function_start_line,
+            self._function_end_line,
+        ) = self._normalize_function_range(
+            function_start_line=function_start_line,
+            function_end_line=function_end_line,
+        )
+
         self._output_directory = (
             self._normalize_output_directory(
                 output_directory
             )
         )
+
         self._coverage_service = self._normalize_service(
             coverage_service
         )
+
         self._overwrite = self._validate_overwrite(
             overwrite
         )
+
         self._timeout_seconds = self._validate_timeout(
             timeout_seconds
         )
+
         self._selected_scenarios: list[Scenario] = []
+        self._last_coverage_result: (
+            CoverageResult | FunctionCoverageResult | None
+        ) = None
 
     @property
     def source_file(self) -> Path:
@@ -98,6 +126,24 @@ class ScenarioSuiteCoverageTransition:
     def function_name(self) -> str:
         """Test edilen fonksiyonun adını döndürür."""
         return self._function_name
+
+    @property
+    def function_start_line(self) -> int | None:
+        """Hedef fonksiyonun başlangıç satırını döndürür."""
+        return self._function_start_line
+
+    @property
+    def function_end_line(self) -> int | None:
+        """Hedef fonksiyonun bitiş satırını döndürür."""
+        return self._function_end_line
+
+    @property
+    def uses_function_coverage(self) -> bool:
+        """Transition fonksiyon bazlı coverage kullanıyorsa True döndürür."""
+        return (
+            self._function_start_line is not None
+            and self._function_end_line is not None
+        )
 
     @property
     def output_directory(self) -> Path:
@@ -117,6 +163,56 @@ class ScenarioSuiteCoverageTransition:
         """Episode içerisinde seçilmiş senaryo sayısını döndürür."""
         return len(self._selected_scenarios)
 
+    @property
+    def last_coverage_result(
+        self,
+    ) -> CoverageResult | FunctionCoverageResult | None:
+        """
+        Son başarılı coverage ölçüm sonucunu döndürür.
+
+        Henüz başarılı bir ölçüm yapılmadıysa None döner.
+        """
+        return self._last_coverage_result
+
+    @property
+    def last_function_coverage(
+        self,
+    ) -> FunctionCoverageResult | None:
+        """
+        Son başarılı sonuç fonksiyon bazlıysa onu döndürür.
+        """
+        if isinstance(
+            self._last_coverage_result,
+            FunctionCoverageResult,
+        ):
+            return self._last_coverage_result
+
+        return None
+
+    @property
+    def last_file_coverage(
+        self,
+    ) -> CoverageResult | None:
+        """
+        Son başarılı ölçüme ait dosya geneli coverage sonucunu döndürür.
+
+        Fonksiyon bazlı ölçümde FunctionCoverageResult içerisindeki
+        file_coverage alanı kullanılır.
+        """
+        if isinstance(
+            self._last_coverage_result,
+            FunctionCoverageResult,
+        ):
+            return self._last_coverage_result.file_coverage
+
+        if isinstance(
+            self._last_coverage_result,
+            CoverageResult,
+        ):
+            return self._last_coverage_result
+
+        return None
+
     def __call__(
         self,
         state: CoverageState,
@@ -126,26 +222,8 @@ class ScenarioSuiteCoverageTransition:
         Yeni senaryoyu episode paketine ekler ve kümülatif
         coverage sonucundan yeni state oluşturur.
 
-        Args:
-            state:
-                Yeni senaryo seçilmeden önceki RL durumu.
-
-            scenario:
-                RL ajanı tarafından seçilmiş test senaryosu.
-
-        Returns:
-            Şimdiye kadar seçilmiş bütün senaryoların gerçek
-            coverage sonucundan oluşturulan yeni CoverageState.
-
-        Raises:
-            TypeError:
-                state veya scenario geçersiz türdeyse.
-
-            ValueError:
-                Aynı senaryo episode içerisinde tekrar seçilirse.
-
-            RuntimeError:
-                Pytest veya coverage işlemi başarısız olursa.
+        Coverage işlemi başarısız olursa eklenen senaryo listeden
+        çıkarılarak transition önceki durumuna geri döndürülür.
         """
         self._validate_state(state)
         self._validate_scenario(scenario)
@@ -168,12 +246,13 @@ class ScenarioSuiteCoverageTransition:
                     function_name=self._function_name,
                     scenarios=self.selected_scenarios,
                     output_directory=self._output_directory,
+                    function_start_line=self._function_start_line,
+                    function_end_line=self._function_end_line,
                     overwrite=self._overwrite,
                     timeout_seconds=self._timeout_seconds,
                 )
             )
         except Exception:
-            # Coverage işlemi tamamlanamazsa seçimi geri alır.
             self._selected_scenarios.pop()
             raise
 
@@ -185,6 +264,8 @@ class ScenarioSuiteCoverageTransition:
                 "başarısız oldu."
             )
 
+        self._last_coverage_result = suite_result.coverage
+
         return CoverageStateMapper.map(
             coverage_result=suite_result.coverage,
             executed_tests=state.executed_tests + 1,
@@ -194,7 +275,9 @@ class ScenarioSuiteCoverageTransition:
         """
         Episode boyunca biriktirilen bütün senaryoları temizler.
 
-        Yeni bir episode başlamadan önce çağrılmalıdır.
+        Q-Table, RL ajanı ve son başarılı coverage sonucu bu işlemden
+        etkilenmez. Yalnızca geçerli episode içerisinde seçilen
+        senaryolar temizlenir.
         """
         self._selected_scenarios.clear()
 
@@ -277,7 +360,9 @@ class ScenarioSuiteCoverageTransition:
                 "function_name string olmalıdır."
             )
 
-        normalized_function_name = function_name.strip()
+        normalized_function_name = (
+            function_name.strip()
+        )
 
         if not normalized_function_name:
             raise ValueError(
@@ -293,6 +378,66 @@ class ScenarioSuiteCoverageTransition:
             )
 
         return normalized_function_name
+
+    @staticmethod
+    def _normalize_function_range(
+        *,
+        function_start_line: int | None,
+        function_end_line: int | None,
+    ) -> tuple[int | None, int | None]:
+        """
+        Fonksiyon başlangıç ve bitiş satırlarını doğrular.
+
+        İki değer de None ise eski dosya bazlı coverage davranışı
+        korunur. Fonksiyon bazlı coverage için iki değer birlikte
+        verilmelidir.
+        """
+        if (
+            function_start_line is None
+            and function_end_line is None
+        ):
+            return None, None
+
+        if (
+            function_start_line is None
+            or function_end_line is None
+        ):
+            raise ValueError(
+                "function_start_line ve function_end_line "
+                "birlikte verilmelidir."
+            )
+
+        if (
+            isinstance(function_start_line, bool)
+            or not isinstance(function_start_line, int)
+        ):
+            raise TypeError(
+                "function_start_line bir tam sayı olmalıdır."
+            )
+
+        if (
+            isinstance(function_end_line, bool)
+            or not isinstance(function_end_line, int)
+        ):
+            raise TypeError(
+                "function_end_line bir tam sayı olmalıdır."
+            )
+
+        if function_start_line < 1:
+            raise ValueError(
+                "function_start_line 1 veya daha büyük olmalıdır."
+            )
+
+        if function_end_line < function_start_line:
+            raise ValueError(
+                "function_end_line, function_start_line "
+                "değerinden küçük olamaz."
+            )
+
+        return (
+            function_start_line,
+            function_end_line,
+        )
 
     @staticmethod
     def _normalize_output_directory(

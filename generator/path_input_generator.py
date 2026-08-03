@@ -7,6 +7,10 @@ from typing import Any
 from cfg.path_analyzer import ExecutionPath, PathStep
 
 
+class UnreachablePathError(ValueError):
+    """Bir yürütme yolundaki kısıtlar çelişkili olduğunda oluşur."""
+
+
 @dataclass(frozen=True, slots=True)
 class GeneratedTestInput:
     """
@@ -70,7 +74,11 @@ class PathInputGenerator:
     - değer < x
     - değer <= x
     - bool parametre kontrolleri
-    - sabit return değerleri
+    - and/or içeren bileşik koşullar
+    - iç içe not ifadeleri
+    - sınırlı while döngüsü girdileri
+    - for döngüleri için iterable girdileri
+    - sabit ve güvenli dinamik return ifadeleri
 
     Bu sınıf pytest kodu üretmez. Yalnızca yürütme yolunu
     çalıştırabilecek girdileri ve beklenen sonucu hesaplar.
@@ -107,8 +115,24 @@ class PathInputGenerator:
         )
 
         constraints: dict[str, _VariableConstraint] = {}
+        direct_values: dict[str, Any] = {}
+
+        handled_loop_node_ids = self._apply_loop_inputs(
+            path=path,
+            parameter_names=parameter_names,
+            direct_values=direct_values,
+        )
+
+        self._apply_caught_exception_inputs(
+            path=path,
+            parameter_names=parameter_names,
+            direct_values=direct_values,
+        )
 
         for condition_step in path.condition_steps:
+            if condition_step.node_id in handled_loop_node_ids:
+                continue
+
             self._apply_condition_step(
                 step=condition_step,
                 constraints=constraints,
@@ -117,9 +141,13 @@ class PathInputGenerator:
         keyword_arguments = tuple(
             (
                 parameter_name,
-                self._create_parameter_value(
-                    parameter_name=parameter_name,
-                    constraint=constraints.get(parameter_name),
+                (
+                    direct_values[parameter_name]
+                    if parameter_name in direct_values
+                    else self._create_parameter_value(
+                        parameter_name=parameter_name,
+                        constraint=constraints.get(parameter_name),
+                    )
                 ),
             )
             for parameter_name in parameter_names
@@ -130,7 +158,10 @@ class PathInputGenerator:
         expected_result = (
             None
             if expected_exception is not None
-            else self._extract_expected_result(path)
+            else self._extract_expected_result(
+                path=path,
+                keyword_arguments=keyword_arguments,
+            )
         )
 
         return GeneratedTestInput(
@@ -175,6 +206,610 @@ class PathInputGenerator:
                 "parameter_names tekrar eden değer içeremez."
             )
 
+    def _apply_caught_exception_inputs(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """
+        Yakalanan exception yolunu çalıştıracak doğrudan girdileri üretir.
+        """
+        steps = path.steps
+
+        for index, step in enumerate(steps):
+            if (
+                step.outgoing_edge_label != "Exception"
+                or index + 1 >= len(steps)
+            ):
+                continue
+
+            except_step = steps[index + 1]
+
+            if except_step.node_type != "except":
+                continue
+
+            exception_name = self._extract_handler_exception_name(
+                except_step
+            )
+
+            self._apply_exception_source_input(
+                source_step=step,
+                exception_name=exception_name,
+                parameter_names=parameter_names,
+                direct_values=direct_values,
+            )
+
+    @staticmethod
+    def _extract_handler_exception_name(
+        except_step: PathStep,
+    ) -> str | None:
+        """Except düğüm etiketinden exception sınıfının adını çıkarır."""
+        normalized_label = except_step.node_label.strip()
+
+        if normalized_label == "except":
+            return None
+
+        prefix = "except "
+
+        if not normalized_label.startswith(prefix):
+            raise ValueError(
+                "Except düğümü geçerli bir exception etiketi "
+                "içermiyor: "
+                f"{except_step.node_label}"
+            )
+
+        expression_text = normalized_label[len(prefix):]
+
+        try:
+            expression = ast.parse(
+                expression_text,
+                mode="eval",
+            ).body
+        except SyntaxError as error:
+            raise ValueError(
+                "Except exception türü çözümlenemedi: "
+                f"{except_step.node_label}"
+            ) from error
+
+        if isinstance(expression, ast.Name):
+            return expression.id
+
+        if isinstance(expression, ast.Attribute):
+            return expression.attr
+
+        raise ValueError(
+            "Desteklenmeyen except exception türü: "
+            f"{except_step.node_label}"
+        )
+
+    def _apply_exception_source_input(
+        self,
+        *,
+        source_step: PathStep,
+        exception_name: str | None,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """Exception türüne göre kaynak ifadeden test girdisi üretir."""
+        if exception_name is None:
+            return
+
+        statement = self._parse_exception_source_statement(
+            source_step
+        )
+        expression = self._extract_statement_expression(
+            statement
+        )
+
+        if exception_name == "ZeroDivisionError":
+            self._apply_zero_division_input(
+                expression=expression,
+                parameter_names=parameter_names,
+                direct_values=direct_values,
+            )
+            return
+
+        if exception_name == "IndexError":
+            self._apply_index_error_input(
+                expression=expression,
+                parameter_names=parameter_names,
+                direct_values=direct_values,
+            )
+            return
+
+        if exception_name == "KeyError":
+            self._apply_key_error_input(
+                expression=expression,
+                parameter_names=parameter_names,
+                direct_values=direct_values,
+            )
+
+    @staticmethod
+    def _parse_exception_source_statement(
+        source_step: PathStep,
+    ) -> ast.stmt:
+        """Exception kaynak düğümündeki Python ifadesini parse eder."""
+        try:
+            module = ast.parse(
+                source_step.node_label
+            )
+        except SyntaxError as error:
+            raise ValueError(
+                "Exception kaynak ifadesi çözümlenemedi: "
+                f"{source_step.node_label}"
+            ) from error
+
+        if len(module.body) != 1:
+            raise ValueError(
+                "Exception kaynak düğümü tek bir ifade "
+                "içermelidir."
+            )
+
+        return module.body[0]
+
+    @staticmethod
+    def _extract_statement_expression(
+        statement: ast.stmt,
+    ) -> ast.expr:
+        """Statement içindeki çalıştırılan temel ifadeyi döndürür."""
+        if isinstance(statement, ast.Assign):
+            return statement.value
+
+        if isinstance(statement, ast.AnnAssign):
+            if statement.value is None:
+                raise ValueError(
+                    "Değersiz AnnAssign exception kaynağı "
+                    "olarak kullanılamaz."
+                )
+            return statement.value
+
+        if isinstance(statement, ast.Expr):
+            return statement.value
+
+        if isinstance(statement, ast.Return):
+            if statement.value is None:
+                raise ValueError(
+                    "Boş return exception kaynağı olarak "
+                    "kullanılamaz."
+                )
+            return statement.value
+
+        if isinstance(statement, ast.Raise):
+            if statement.exc is None:
+                raise ValueError(
+                    "Boş raise exception kaynağı olarak "
+                    "kullanılamaz."
+                )
+            return statement.exc
+
+        raise ValueError(
+            "Desteklenmeyen exception kaynak düğümü: "
+            f"{type(statement).__name__}"
+        )
+
+    @staticmethod
+    def _apply_zero_division_input(
+        *,
+        expression: ast.expr,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """Bölme ifadesindeki parametre böleni sıfır yapar."""
+        division_node = next(
+            (
+                node
+                for node in ast.walk(expression)
+                if isinstance(node, ast.BinOp)
+                and isinstance(
+                    node.op,
+                    (ast.Div, ast.FloorDiv, ast.Mod),
+                )
+            ),
+            None,
+        )
+
+        if division_node is None:
+            raise ValueError(
+                "ZeroDivisionError için bölme ifadesi bulunamadı."
+            )
+
+        denominator = division_node.right
+
+        if (
+            not isinstance(denominator, ast.Name)
+            or denominator.id not in parameter_names
+        ):
+            raise ValueError(
+                "ZeroDivisionError için bölen doğrudan bir "
+                "fonksiyon parametresi olmalıdır."
+            )
+
+        direct_values[denominator.id] = 0
+
+    @staticmethod
+    def _apply_index_error_input(
+        *,
+        expression: ast.expr,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """Sabit indeksli erişim için yetersiz uzunlukta liste üretir."""
+        subscript_node = next(
+            (
+                node
+                for node in ast.walk(expression)
+                if isinstance(node, ast.Subscript)
+            ),
+            None,
+        )
+
+        if subscript_node is None:
+            raise ValueError(
+                "IndexError için indeks erişimi bulunamadı."
+            )
+
+        if (
+            not isinstance(subscript_node.value, ast.Name)
+            or subscript_node.value.id not in parameter_names
+        ):
+            raise ValueError(
+                "IndexError koleksiyonu doğrudan bir "
+                "fonksiyon parametresi olmalıdır."
+            )
+
+        try:
+            index_value = ast.literal_eval(
+                subscript_node.slice
+            )
+        except (ValueError, TypeError) as error:
+            raise ValueError(
+                "IndexError için yalnızca sabit indeksler "
+                "desteklenmektedir."
+            ) from error
+
+        if not isinstance(index_value, int) or isinstance(
+            index_value,
+            bool,
+        ):
+            raise ValueError(
+                "IndexError indeksi bir tam sayı olmalıdır."
+            )
+
+        direct_values[subscript_node.value.id] = (
+            [0 for _ in range(index_value)]
+            if index_value >= 0
+            else []
+        )
+
+    @staticmethod
+    def _apply_key_error_input(
+        *,
+        expression: ast.expr,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """Sözlük erişimi için istenen anahtarı içermeyen sözlük üretir."""
+        subscript_node = next(
+            (
+                node
+                for node in ast.walk(expression)
+                if isinstance(node, ast.Subscript)
+            ),
+            None,
+        )
+
+        if subscript_node is None:
+            raise ValueError(
+                "KeyError için anahtar erişimi bulunamadı."
+            )
+
+        if (
+            not isinstance(subscript_node.value, ast.Name)
+            or subscript_node.value.id not in parameter_names
+        ):
+            raise ValueError(
+                "KeyError sözlüğü doğrudan bir fonksiyon "
+                "parametresi olmalıdır."
+            )
+
+        try:
+            ast.literal_eval(subscript_node.slice)
+        except (ValueError, TypeError) as error:
+            raise ValueError(
+                "KeyError için yalnızca sabit anahtarlar "
+                "desteklenmektedir."
+            ) from error
+
+        direct_values[subscript_node.value.id] = {}
+
+    def _apply_loop_inputs(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> set[int]:
+        """
+        Döngü yolları için doğrudan başlangıç girdileri üretir.
+
+        Returns:
+            Genel koşul çözümlemesinde tekrar işlenmemesi gereken
+            ``while`` düğüm kimlikleri.
+        """
+        handled_while_node_ids: set[int] = set()
+
+        unique_loop_steps: dict[int, PathStep] = {}
+
+        for loop_step in path.loop_steps:
+            unique_loop_steps.setdefault(
+                loop_step.node_id,
+                loop_step,
+            )
+
+        for loop_step in unique_loop_steps.values():
+            if loop_step.node_type == "for":
+                self._apply_for_loop_input(
+                    step=loop_step,
+                    iteration_count=path.loop_iteration_count,
+                    parameter_names=parameter_names,
+                    direct_values=direct_values,
+                )
+                continue
+
+            if loop_step.node_type == "while":
+                self._apply_while_loop_input(
+                    path=path,
+                    step=loop_step,
+                    iteration_count=path.loop_iteration_count,
+                    parameter_names=parameter_names,
+                    direct_values=direct_values,
+                )
+                handled_while_node_ids.add(
+                    loop_step.node_id
+                )
+
+        return handled_while_node_ids
+
+    @staticmethod
+    def _apply_for_loop_input(
+        *,
+        step: PathStep,
+        iteration_count: int,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """
+        ``for item in values`` biçimindeki döngüler için iterable üretir.
+        """
+        try:
+            _, iterable_text = step.node_label.split(
+                " in ",
+                maxsplit=1,
+            )
+            iterable_expression = ast.parse(
+                iterable_text,
+                mode="eval",
+            ).body
+        except (ValueError, SyntaxError) as error:
+            raise ValueError(
+                "For döngüsü ifadesi çözümlenemedi: "
+                f"{step.node_label}"
+            ) from error
+
+        if not isinstance(iterable_expression, ast.Name):
+            raise ValueError(
+                "For döngüsü iterable değeri doğrudan bir "
+                "fonksiyon parametresi olmalıdır: "
+                f"{step.node_label}"
+            )
+
+        iterable_name = iterable_expression.id
+
+        if iterable_name not in parameter_names:
+            return
+
+        direct_values[iterable_name] = [
+            0
+            for _ in range(iteration_count)
+        ]
+
+    def _apply_while_loop_input(
+        self,
+        *,
+        path: ExecutionPath,
+        step: PathStep,
+        iteration_count: int,
+        parameter_names: tuple[str, ...],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """
+        Basit sayısal while döngüsü için başlangıç değeri üretir.
+
+        Desteklenen güncellemeler:
+            ``x += sabit`` ve ``x -= sabit``.
+        """
+        try:
+            condition_expression = ast.parse(
+                step.node_label,
+                mode="eval",
+            ).body
+        except SyntaxError as error:
+            raise ValueError(
+                "While koşulu çözümlenemedi: "
+                f"{step.node_label}"
+            ) from error
+
+        variable_names = {
+            node.id
+            for node in ast.walk(condition_expression)
+            if isinstance(node, ast.Name)
+            and node.id in parameter_names
+        }
+
+        if len(variable_names) != 1:
+            raise ValueError(
+                "While koşulu tam olarak bir sayısal parametre "
+                "üzerinden tanımlanmalıdır: "
+                f"{step.node_label}"
+            )
+
+        variable_name = next(iter(variable_names))
+
+        update_delta = self._extract_loop_update_delta(
+            path=path,
+            variable_name=variable_name,
+        )
+
+        if iteration_count > 0 and update_delta is None:
+            raise ValueError(
+                "While döngüsü için desteklenen bir parametre "
+                "güncellemesi bulunamadı."
+            )
+
+        candidate = self._find_while_initial_value(
+            expression=condition_expression,
+            variable_name=variable_name,
+            iteration_count=iteration_count,
+            update_delta=update_delta or 0,
+        )
+
+        direct_values[variable_name] = candidate
+
+    @staticmethod
+    def _extract_loop_update_delta(
+        *,
+        path: ExecutionPath,
+        variable_name: str,
+    ) -> int | float | None:
+        """
+        Yol üzerindeki ilk desteklenen ``AugAssign`` güncellemesini çıkarır.
+        """
+        for path_step in path.steps:
+            if path_step.node_type != "AugAssign":
+                continue
+
+            try:
+                statement = ast.parse(
+                    path_step.node_label
+                ).body[0]
+            except SyntaxError:
+                continue
+
+            if not isinstance(statement, ast.AugAssign):
+                continue
+
+            if (
+                not isinstance(statement.target, ast.Name)
+                or statement.target.id != variable_name
+            ):
+                continue
+
+            try:
+                value = ast.literal_eval(statement.value)
+            except (ValueError, TypeError):
+                continue
+
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+            ):
+                continue
+
+            if isinstance(statement.op, ast.Add):
+                return value
+
+            if isinstance(statement.op, ast.Sub):
+                return -value
+
+        return None
+
+    @staticmethod
+    def _find_while_initial_value(
+        *,
+        expression: ast.expr,
+        variable_name: str,
+        iteration_count: int,
+        update_delta: int | float,
+    ) -> int | float:
+        """
+        Koşulu belirtilen sayıda True, ardından False yapan değeri arar.
+        """
+        literal_values = [
+            node.value
+            for node in ast.walk(expression)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, (int, float))
+            and not isinstance(node.value, bool)
+        ]
+
+        center = (
+            literal_values[0]
+            if literal_values
+            else 0
+        )
+
+        radius = max(
+            20,
+            int(abs(update_delta) * (iteration_count + 2)) + 5,
+        )
+
+        integer_candidates = range(
+            int(center) - radius,
+            int(center) + radius + 1,
+        )
+
+        ordered_candidates = sorted(
+            integer_candidates,
+            key=lambda value: (
+                abs(value - center),
+                value,
+            ),
+        )
+
+        compiled_expression = compile(
+            ast.Expression(body=expression),
+            filename="<while-condition>",
+            mode="eval",
+        )
+
+        for candidate in ordered_candidates:
+            current_value: int | float = candidate
+            valid = True
+
+            for _ in range(iteration_count):
+                if not bool(
+                    eval(
+                        compiled_expression,
+                        {"__builtins__": {}},
+                        {variable_name: current_value},
+                    )
+                ):
+                    valid = False
+                    break
+
+                current_value += update_delta
+
+            if not valid:
+                continue
+
+            if bool(
+                eval(
+                    compiled_expression,
+                    {"__builtins__": {}},
+                    {variable_name: current_value},
+                )
+            ):
+                continue
+
+            return candidate
+
+        raise UnreachablePathError(
+            "While döngüsü için istenen iterasyon sayısını "
+            "sağlayan başlangıç değeri üretilemedi."
+        )
+
     def _apply_condition_step(
         self,
         step: PathStep,
@@ -197,10 +832,26 @@ class PathInputGenerator:
                 f"{step.node_label}"
             ) from error
 
-        desired_result = (
-            step.outgoing_edge_label == "True"
+        self._apply_expression(
+            expression=expression,
+            desired_result=(
+                step.outgoing_edge_label == "True"
+            ),
+            constraints=constraints,
+            original_expression=step.node_label,
         )
 
+    def _apply_expression(
+        self,
+        *,
+        expression: ast.expr,
+        desired_result: bool,
+        constraints: dict[str, _VariableConstraint],
+        original_expression: str,
+    ) -> None:
+        """
+        Bir koşul AST ifadesini istenen Boolean sonuca göre uygular.
+        """
         if isinstance(expression, ast.Name):
             self._apply_boolean_constraint(
                 variable_name=expression.id,
@@ -212,39 +863,107 @@ class PathInputGenerator:
         if (
             isinstance(expression, ast.UnaryOp)
             and isinstance(expression.op, ast.Not)
-            and isinstance(expression.operand, ast.Name)
         ):
-            self._apply_boolean_constraint(
-                variable_name=expression.operand.id,
-                desired_value=not desired_result,
+            self._apply_expression(
+                expression=expression.operand,
+                desired_result=not desired_result,
                 constraints=constraints,
+                original_expression=original_expression,
             )
             return
 
-        if not isinstance(expression, ast.Compare):
-            raise ValueError(
-                "Desteklenmeyen koşul ifadesi: "
-                f"{step.node_label}"
+        if isinstance(expression, ast.BoolOp):
+            self._apply_boolean_operation(
+                expression=expression,
+                desired_result=desired_result,
+                constraints=constraints,
+                original_expression=original_expression,
             )
+            return
 
-        if (
-            len(expression.ops) != 1
-            or len(expression.comparators) != 1
-        ):
-            raise ValueError(
-                "Zincirleme karşılaştırmalar henüz "
-                "desteklenmiyor: "
-                f"{step.node_label}"
+        if isinstance(expression, ast.Compare):
+            if (
+                len(expression.ops) != 1
+                or len(expression.comparators) != 1
+            ):
+                raise ValueError(
+                    "Zincirleme karşılaştırmalar henüz "
+                    "desteklenmiyor: "
+                    f"{original_expression}"
+                )
+
+            self._apply_comparison(
+                left=expression.left,
+                operator=expression.ops[0],
+                right=expression.comparators[0],
+                desired_result=desired_result,
+                constraints=constraints,
+                original_expression=original_expression,
             )
+            return
 
-        self._apply_comparison(
-            left=expression.left,
-            operator=expression.ops[0],
-            right=expression.comparators[0],
-            desired_result=desired_result,
-            constraints=constraints,
-            original_expression=step.node_label,
+        raise ValueError(
+            "Desteklenmeyen koşul ifadesi: "
+            f"{original_expression}"
         )
+
+    def _apply_boolean_operation(
+        self,
+        *,
+        expression: ast.BoolOp,
+        desired_result: bool,
+        constraints: dict[str, _VariableConstraint],
+        original_expression: str,
+    ) -> None:
+        """
+        ``and`` ve ``or`` ifadelerini kısıtlara dönüştürür.
+
+        Bütün alt ifadelerin gerekli olduğu durumda hepsi uygulanır.
+        Tek bir alt ifadenin yeterli olduğu durumda mevcut kısıtlarla
+        çelişmeyen ilk deterministik alternatif seçilir.
+        """
+        all_operands_required = (
+            isinstance(expression.op, ast.And)
+            and desired_result
+        ) or (
+            isinstance(expression.op, ast.Or)
+            and not desired_result
+        )
+
+        if all_operands_required:
+            for child_expression in expression.values:
+                self._apply_expression(
+                    expression=child_expression,
+                    desired_result=desired_result,
+                    constraints=constraints,
+                    original_expression=original_expression,
+                )
+            return
+
+        last_error: UnreachablePathError | None = None
+
+        for child_expression in expression.values:
+            candidate_constraints = dict(constraints)
+
+            try:
+                self._apply_expression(
+                    expression=child_expression,
+                    desired_result=desired_result,
+                    constraints=candidate_constraints,
+                    original_expression=original_expression,
+                )
+            except UnreachablePathError as error:
+                last_error = error
+                continue
+
+            constraints.clear()
+            constraints.update(candidate_constraints)
+            return
+
+        raise UnreachablePathError(
+            "Bileşik koşul için geçerli bir alternatif "
+            f"bulunamadı: {original_expression}"
+        ) from last_error
 
     def _apply_comparison(
         self,
@@ -310,7 +1029,7 @@ class PathInputGenerator:
             current.has_equal_value
             and current.equal_value is not desired_value
         ):
-            raise ValueError(
+            raise UnreachablePathError(
                 f"{variable_name} için çelişkili bool "
                 "kısıtları bulundu."
             )
@@ -348,38 +1067,50 @@ class PathInputGenerator:
                 current.has_equal_value
                 and current.equal_value != value
             ):
-                raise ValueError(
+                raise UnreachablePathError(
                     "Aynı değişken için çelişkili eşitlik "
                     "kısıtları bulundu."
                 )
 
             if value in current.forbidden_values:
-                raise ValueError(
+                raise UnreachablePathError(
                     "Eşitlik ve eşitsizlik kısıtları çelişiyor."
                 )
 
-            return replace(
+            result = replace(
                 current,
                 equal_value=value,
                 has_equal_value=True,
             )
+
+            self._validate_constraint_consistency(result)
+
+            return result
 
         if isinstance(operator, ast.NotEq):
             if (
                 current.has_equal_value
                 and current.equal_value == value
             ):
-                raise ValueError(
+                raise UnreachablePathError(
                     "Eşitlik ve eşitsizlik kısıtları çelişiyor."
                 )
 
-            return replace(
+            result = replace(
                 current,
-                forbidden_values=(
-                    *current.forbidden_values,
-                    value,
+                forbidden_values=tuple(
+                    dict.fromkeys(
+                        (
+                            *current.forbidden_values,
+                            value,
+                        )
+                    )
                 ),
             )
+
+            self._validate_constraint_consistency(result)
+
+            return result
 
         if not isinstance(value, (int, float)) or isinstance(
             value,
@@ -445,7 +1176,7 @@ class PathInputGenerator:
             minimum_inclusive=minimum_inclusive,
         )
 
-        PathInputGenerator._validate_range(result)
+        PathInputGenerator._validate_constraint_consistency(result)
 
         return result
 
@@ -472,9 +1203,81 @@ class PathInputGenerator:
             maximum_inclusive=maximum_inclusive,
         )
 
-        PathInputGenerator._validate_range(result)
+        PathInputGenerator._validate_constraint_consistency(result)
 
         return result
+
+    @staticmethod
+    def _validate_constraint_consistency(
+        constraint: _VariableConstraint,
+    ) -> None:
+        """
+        Bir değişken için biriktirilen bütün kısıtların birlikte
+        sağlanabilir olup olmadığını doğrular.
+        """
+        PathInputGenerator._validate_range(
+            constraint
+        )
+
+        if constraint.has_equal_value:
+            equal_value = constraint.equal_value
+
+            if equal_value in constraint.forbidden_values:
+                raise UnreachablePathError(
+                    "Eşitlik ve eşitsizlik kısıtları çelişiyor."
+                )
+
+            if isinstance(equal_value, bool):
+                if (
+                    constraint.minimum is not None
+                    or constraint.maximum is not None
+                ):
+                    raise UnreachablePathError(
+                        "Bool eşitlik kısıtı sayısal aralıkla "
+                        "birlikte kullanılamaz."
+                    )
+
+                return
+
+            if (
+                constraint.minimum is not None
+                or constraint.maximum is not None
+            ) and (
+                not isinstance(equal_value, (int, float))
+                or isinstance(equal_value, bool)
+            ):
+                raise UnreachablePathError(
+                    "Sayısal aralık ile sayısal olmayan eşitlik "
+                    "kısıtı birlikte sağlanamaz."
+                )
+
+            if not PathInputGenerator._satisfies_minimum(
+                value=equal_value,
+                constraint=constraint,
+            ):
+                raise UnreachablePathError(
+                    "Eşitlik değeri minimum kısıtını sağlamıyor."
+                )
+
+            if not PathInputGenerator._satisfies_maximum(
+                value=equal_value,
+                constraint=constraint,
+            ):
+                raise UnreachablePathError(
+                    "Eşitlik değeri maksimum kısıtını sağlamıyor."
+                )
+
+        if (
+            constraint.minimum is not None
+            and constraint.maximum is not None
+            and constraint.minimum == constraint.maximum
+            and constraint.minimum_inclusive
+            and constraint.maximum_inclusive
+            and constraint.minimum in constraint.forbidden_values
+        ):
+            raise UnreachablePathError(
+                "Tek mümkün değer eşitsizlik kısıtıyla yasaklandı."
+            )
 
     @staticmethod
     def _validate_range(
@@ -487,7 +1290,7 @@ class PathInputGenerator:
             return
 
         if constraint.minimum > constraint.maximum:
-            raise ValueError(
+            raise UnreachablePathError(
                 "Minimum ve maksimum kısıtları çelişiyor."
             )
 
@@ -498,7 +1301,7 @@ class PathInputGenerator:
                 or not constraint.maximum_inclusive
             )
         ):
-            raise ValueError(
+            raise UnreachablePathError(
                 "Belirlenen aralık geçerli bir değer içermiyor."
             )
 
@@ -514,15 +1317,11 @@ class PathInputGenerator:
             return 0
 
         if constraint.has_equal_value:
-            value = constraint.equal_value
+            self._validate_constraint_consistency(
+                constraint
+            )
 
-            if value in constraint.forbidden_values:
-                raise ValueError(
-                    f"{parameter_name} için geçerli değer "
-                    "üretilemedi."
-                )
-
-            return value
+            return constraint.equal_value
 
         value = self._select_numeric_value(constraint)
 
@@ -582,6 +1381,20 @@ class PathInputGenerator:
         return value
 
     @staticmethod
+    def _satisfies_minimum(
+        value: int | float,
+        constraint: _VariableConstraint,
+    ) -> bool:
+        """Değerin minimum kısıtını sağlayıp sağlamadığını kontrol eder."""
+        if constraint.minimum is None:
+            return True
+
+        if constraint.minimum_inclusive:
+            return value >= constraint.minimum
+
+        return value > constraint.minimum
+
+    @staticmethod
     def _satisfies_maximum(
         value: int | float,
         constraint: _VariableConstraint,
@@ -594,12 +1407,19 @@ class PathInputGenerator:
 
         return value < constraint.maximum
 
-    @staticmethod
+    @classmethod
     def _extract_expected_result(
+        cls,
+        *,
         path: ExecutionPath,
+        keyword_arguments: tuple[tuple[str, Any], ...],
     ) -> Any:
         """
         Yürütme yolundaki return ifadesinden beklenen sonucu çıkarır.
+
+        Sabit return değerlerinin yanında, üretilen parametreler ve yol
+        üzerindeki basit atamalar kullanılarak güvenli biçimde
+        hesaplanabilen dinamik ifadeleri de destekler.
         """
         return_step = path.return_step
 
@@ -625,14 +1445,431 @@ class PathInputGenerator:
         if statement.value is None:
             return None
 
+        # Sabit dönüşlerde önceki atamaları çalıştırmak gereksizdir.
+        # Bu erken dönüş; exception yolundaki hatalı ifadelerin ve
+        # döngü gövdesindeki henüz çözülemeyen yerel atamaların
+        # beklenen sonuç hesaplanırken yeniden çalıştırılmasını engeller.
         try:
             return ast.literal_eval(statement.value)
-        except (ValueError, TypeError) as error:
+        except (ValueError, TypeError):
+            pass
+
+        environment: dict[str, Any] = dict(
+            keyword_arguments
+        )
+
+        cls._apply_path_assignments(
+            path=path,
+            return_node_id=return_step.node_id,
+            environment=environment,
+        )
+
+        try:
+            return cls._evaluate_safe_expression(
+                expression=statement.value,
+                environment=environment,
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
             raise ValueError(
-                "Dinamik return ifadeleri henüz "
-                "desteklenmiyor: "
+                "Dinamik return ifadesi güvenli biçimde "
+                "hesaplanamadı: "
                 f"{return_step.node_label}"
             ) from error
+
+    @classmethod
+    def _apply_path_assignments(
+        cls,
+        *,
+        path: ExecutionPath,
+        return_node_id: int,
+        environment: dict[str, Any],
+    ) -> None:
+        """
+        Return düğümünden önceki basit atamaları değerlendirme ortamına
+        uygular.
+        """
+        for step in path.steps:
+            if step.node_id == return_node_id:
+                break
+
+            if step.node_type not in {
+                "Assign",
+                "AnnAssign",
+                "AugAssign",
+            }:
+                continue
+
+            try:
+                statement = ast.parse(
+                    step.node_label
+                ).body[0]
+            except SyntaxError as error:
+                raise ValueError(
+                    "Atama ifadesi çözümlenemedi: "
+                    f"{step.node_label}"
+                ) from error
+
+            cls._apply_assignment_statement(
+                statement=statement,
+                environment=environment,
+            )
+
+    @classmethod
+    def _apply_assignment_statement(
+        cls,
+        *,
+        statement: ast.stmt,
+        environment: dict[str, Any],
+    ) -> None:
+        """Desteklenen atama ifadesini değerlendirme ortamına uygular."""
+        if isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1:
+                raise ValueError(
+                    "Çoklu atama hedefleri desteklenmiyor."
+                )
+
+            target = statement.targets[0]
+
+            if not isinstance(target, ast.Name):
+                raise ValueError(
+                    "Yalnızca isim tabanlı atamalar "
+                    "desteklenmektedir."
+                )
+
+            environment[target.id] = cls._evaluate_safe_expression(
+                expression=statement.value,
+                environment=environment,
+            )
+            return
+
+        if isinstance(statement, ast.AnnAssign):
+            if (
+                not isinstance(statement.target, ast.Name)
+                or statement.value is None
+            ):
+                raise ValueError(
+                    "Desteklenmeyen açıklamalı atama."
+                )
+
+            environment[statement.target.id] = (
+                cls._evaluate_safe_expression(
+                    expression=statement.value,
+                    environment=environment,
+                )
+            )
+            return
+
+        if isinstance(statement, ast.AugAssign):
+            if not isinstance(statement.target, ast.Name):
+                raise ValueError(
+                    "Yalnızca isim tabanlı artırımlı atamalar "
+                    "desteklenmektedir."
+                )
+
+            variable_name = statement.target.id
+
+            if variable_name not in environment:
+                raise ValueError(
+                    f"Atama değişkeni tanımlı değil: {variable_name}"
+                )
+
+            right_value = cls._evaluate_safe_expression(
+                expression=statement.value,
+                environment=environment,
+            )
+
+            environment[variable_name] = cls._apply_binary_operator(
+                operator=statement.op,
+                left_value=environment[variable_name],
+                right_value=right_value,
+            )
+            return
+
+        raise ValueError(
+            "Desteklenmeyen atama ifadesi."
+        )
+
+    @classmethod
+    def _evaluate_safe_expression(
+        cls,
+        *,
+        expression: ast.expr,
+        environment: dict[str, Any],
+    ) -> Any:
+        """
+        Yan etkisiz ve izin verilen AST düğümlerini güvenli biçimde
+        değerlendirir.
+        """
+        if isinstance(expression, ast.Constant):
+            return expression.value
+
+        if isinstance(expression, ast.Name):
+            try:
+                return environment[expression.id]
+            except KeyError as error:
+                raise ValueError(
+                    f"Tanımsız değişken: {expression.id}"
+                ) from error
+
+        if isinstance(expression, ast.List):
+            return [
+                cls._evaluate_safe_expression(
+                    expression=element,
+                    environment=environment,
+                )
+                for element in expression.elts
+            ]
+
+        if isinstance(expression, ast.Tuple):
+            return tuple(
+                cls._evaluate_safe_expression(
+                    expression=element,
+                    environment=environment,
+                )
+                for element in expression.elts
+            )
+
+        if isinstance(expression, ast.Set):
+            return {
+                cls._evaluate_safe_expression(
+                    expression=element,
+                    environment=environment,
+                )
+                for element in expression.elts
+            }
+
+        if isinstance(expression, ast.Dict):
+            return {
+                cls._evaluate_safe_expression(
+                    expression=key,
+                    environment=environment,
+                ): cls._evaluate_safe_expression(
+                    expression=value,
+                    environment=environment,
+                )
+                for key, value in zip(
+                    expression.keys,
+                    expression.values,
+                    strict=True,
+                )
+                if key is not None
+            }
+
+        if isinstance(expression, ast.UnaryOp):
+            operand = cls._evaluate_safe_expression(
+                expression=expression.operand,
+                environment=environment,
+            )
+
+            if isinstance(expression.op, ast.UAdd):
+                return +operand
+
+            if isinstance(expression.op, ast.USub):
+                return -operand
+
+            if isinstance(expression.op, ast.Not):
+                return not operand
+
+            raise ValueError(
+                "Desteklenmeyen unary operatör."
+            )
+
+        if isinstance(expression, ast.BinOp):
+            left_value = cls._evaluate_safe_expression(
+                expression=expression.left,
+                environment=environment,
+            )
+            right_value = cls._evaluate_safe_expression(
+                expression=expression.right,
+                environment=environment,
+            )
+
+            return cls._apply_binary_operator(
+                operator=expression.op,
+                left_value=left_value,
+                right_value=right_value,
+            )
+
+        if isinstance(expression, ast.BoolOp):
+            values = [
+                cls._evaluate_safe_expression(
+                    expression=value,
+                    environment=environment,
+                )
+                for value in expression.values
+            ]
+
+            if isinstance(expression.op, ast.And):
+                result: Any = values[0]
+
+                for value in values[1:]:
+                    if not result:
+                        return result
+                    result = value
+
+                return result
+
+            if isinstance(expression.op, ast.Or):
+                result = values[0]
+
+                for value in values[1:]:
+                    if result:
+                        return result
+                    result = value
+
+                return result
+
+            raise ValueError(
+                "Desteklenmeyen Boolean operatörü."
+            )
+
+        if isinstance(expression, ast.Compare):
+            return cls._evaluate_comparison_chain(
+                expression=expression,
+                environment=environment,
+            )
+
+        if isinstance(expression, ast.IfExp):
+            condition = cls._evaluate_safe_expression(
+                expression=expression.test,
+                environment=environment,
+            )
+
+            selected_expression = (
+                expression.body
+                if condition
+                else expression.orelse
+            )
+
+            return cls._evaluate_safe_expression(
+                expression=selected_expression,
+                environment=environment,
+            )
+
+        if isinstance(expression, ast.Subscript):
+            collection = cls._evaluate_safe_expression(
+                expression=expression.value,
+                environment=environment,
+            )
+            key = cls._evaluate_safe_expression(
+                expression=expression.slice,
+                environment=environment,
+            )
+            return collection[key]
+
+        raise ValueError(
+            "Desteklenmeyen dinamik expression türü: "
+            f"{type(expression).__name__}"
+        )
+
+    @staticmethod
+    def _apply_binary_operator(
+        *,
+        operator: ast.operator,
+        left_value: Any,
+        right_value: Any,
+    ) -> Any:
+        """İzin verilen yan etkisiz ikili operatörü uygular."""
+        if isinstance(operator, ast.Add):
+            return left_value + right_value
+
+        if isinstance(operator, ast.Sub):
+            return left_value - right_value
+
+        if isinstance(operator, ast.Mult):
+            return left_value * right_value
+
+        if isinstance(operator, ast.Div):
+            return left_value / right_value
+
+        if isinstance(operator, ast.FloorDiv):
+            return left_value // right_value
+
+        if isinstance(operator, ast.Mod):
+            return left_value % right_value
+
+        if isinstance(operator, ast.Pow):
+            return left_value ** right_value
+
+        raise ValueError(
+            "Desteklenmeyen ikili operatör."
+        )
+
+    @classmethod
+    def _evaluate_comparison_chain(
+        cls,
+        *,
+        expression: ast.Compare,
+        environment: dict[str, Any],
+    ) -> bool:
+        """Karşılaştırma zincirini soldan sağa değerlendirir."""
+        left_value = cls._evaluate_safe_expression(
+            expression=expression.left,
+            environment=environment,
+        )
+
+        for operator, comparator in zip(
+            expression.ops,
+            expression.comparators,
+            strict=True,
+        ):
+            right_value = cls._evaluate_safe_expression(
+                expression=comparator,
+                environment=environment,
+            )
+
+            if not cls._compare_values(
+                operator=operator,
+                left_value=left_value,
+                right_value=right_value,
+            ):
+                return False
+
+            left_value = right_value
+
+        return True
+
+    @staticmethod
+    def _compare_values(
+        *,
+        operator: ast.cmpop,
+        left_value: Any,
+        right_value: Any,
+    ) -> bool:
+        """İzin verilen karşılaştırma operatörünü uygular."""
+        if isinstance(operator, ast.Eq):
+            return left_value == right_value
+
+        if isinstance(operator, ast.NotEq):
+            return left_value != right_value
+
+        if isinstance(operator, ast.Lt):
+            return left_value < right_value
+
+        if isinstance(operator, ast.LtE):
+            return left_value <= right_value
+
+        if isinstance(operator, ast.Gt):
+            return left_value > right_value
+
+        if isinstance(operator, ast.GtE):
+            return left_value >= right_value
+
+        if isinstance(operator, ast.In):
+            return left_value in right_value
+
+        if isinstance(operator, ast.NotIn):
+            return left_value not in right_value
+
+        if isinstance(operator, ast.Is):
+            return left_value is right_value
+
+        if isinstance(operator, ast.IsNot):
+            return left_value is not right_value
+
+        raise ValueError(
+            "Desteklenmeyen karşılaştırma operatörü."
+        )
 
     @staticmethod
     def _extract_expected_exception(

@@ -1,27 +1,35 @@
 from __future__ import annotations
 
-from models.coverage_result import CoverageResult
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
 from rl.coverage_state import CoverageState
+
+
+CoverageInput = CoverageResult | FunctionCoverageResult
 
 
 class CoverageStateMapper:
     """
-    CoverageResult nesnesini RL tarafından kullanılabilecek
+    Coverage sonucunu RL tarafından kullanılabilecek
     CoverageState modeline dönüştürür.
 
-    CoverageResult eksik satırların yalnızca sayısını taşıdığı için,
-    gerçek satır numaraları verilmediğinde eksik satır sayısını
-    koruyacak temsili değerler oluşturulur.
+    CoverageResult yalnızca eksik satır sayısını tuttuğundan,
+    gerçek satır numaraları bilinmiyorsa temsili satırlar üretilir.
+
+    FunctionCoverageResult kullanıldığında ise gerçek eksik
+    satır numaraları doğrudan kullanılır.
     """
 
     @staticmethod
     def map(
-        coverage_result: CoverageResult,
+        coverage_result: CoverageInput,
         executed_tests: int,
         missing_lines: tuple[int, ...] | None = None,
     ) -> CoverageState:
         """
-        CoverageResult nesnesinden CoverageState oluşturur.
+        Coverage sonucundan CoverageState oluşturur.
 
         Args:
             coverage_result:
@@ -31,26 +39,17 @@ class CoverageStateMapper:
                 Şu ana kadar çalıştırılan test sayısı.
 
             missing_lines:
-                Biliniyorsa gerçek eksik satır numaraları.
-                None verilirse CoverageResult içerisindeki
-                missing_line_count değeri kadar temsili satır
-                oluşturulur.
+                Gerçek eksik satır numaraları.
+                None verilirse;
 
-        Returns:
-            RL katmanında kullanılacak CoverageState nesnesi.
-
-        Raises:
-            TypeError:
-                coverage_result, executed_tests veya missing_lines
-                geçersiz türdeyse.
-
-            ValueError:
-                executed_tests negatifse ya da verilen eksik satır
-                sayısı CoverageResult ile uyuşmuyorsa.
+                - CoverageResult için temsili satırlar oluşturulur.
+                - FunctionCoverageResult için gerçek eksik satırlar
+                  kullanılır.
         """
         CoverageStateMapper._validate_coverage_result(
             coverage_result
         )
+
         CoverageStateMapper._validate_executed_tests(
             executed_tests
         )
@@ -75,13 +74,21 @@ class CoverageStateMapper:
 
     @staticmethod
     def _normalize_missing_lines(
-        coverage_result: CoverageResult,
+        coverage_result: CoverageInput,
         missing_lines: tuple[int, ...] | None,
     ) -> tuple[int, ...]:
         """
-        Eksik satır bilgisini doğrular veya temsili değer üretir.
+        Eksik satır bilgisini doğrular veya oluşturur.
         """
+
         if missing_lines is None:
+
+            if isinstance(
+                coverage_result,
+                FunctionCoverageResult,
+            ):
+                return coverage_result.missing_lines
+
             return tuple(
                 range(
                     1,
@@ -128,15 +135,18 @@ class CoverageStateMapper:
                 "uyuşmuyor."
             )
 
-        return missing_lines
+        return tuple(sorted(missing_lines))
 
     @staticmethod
     def _validate_coverage_result(
-        coverage_result: CoverageResult,
+        coverage_result: CoverageInput,
     ) -> None:
         if not isinstance(
             coverage_result,
-            CoverageResult,
+            (
+                CoverageResult,
+                FunctionCoverageResult,
+            ),
         ):
             raise TypeError(
                 "coverage_result bir CoverageResult "

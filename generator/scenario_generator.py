@@ -8,6 +8,7 @@ from evaluator.dqm import DQMScore
 from generator.path_input_generator import (
     GeneratedTestInput,
     PathInputGenerator,
+    UnreachablePathError,
 )
 
 
@@ -28,7 +29,7 @@ class Scenario:
             Senaryonun ilişkili olduğu yürütme yolu numarası.
 
         priority_rank:
-            DQM sıralamasındaki öncelik sırası.
+            Ulaşılabilir senaryolar arasındaki öncelik sırası.
 
         priority_level:
             Senaryonun High, Medium veya Low öncelik seviyesi.
@@ -98,6 +99,9 @@ class ScenarioGenerator:
     """
     DQM sonuçlarından önceliklendirilmiş ve çalıştırılabilir
     test senaryoları üretir.
+
+    Mantıksal olarak çelişkili kısıtlar içeren yürütme yolları
+    ulaşılamaz kabul edilir ve senaryo listesine eklenmez.
     """
 
     def __init__(
@@ -113,8 +117,24 @@ class ScenarioGenerator:
                 Verilmezse varsayılan PathInputGenerator oluşturulur.
         """
         self._path_input_generator = (
-            path_input_generator or PathInputGenerator()
+            path_input_generator
+            if path_input_generator is not None
+            else PathInputGenerator()
         )
+        self._skipped_path_indices: tuple[int, ...] = ()
+
+    @property
+    def skipped_path_indices(self) -> tuple[int, ...]:
+        """
+        Son generate çağrısında ulaşılamaz olduğu için atlanan
+        bir tabanlı yürütme yolu numaralarını döndürür.
+        """
+        return self._skipped_path_indices
+
+    @property
+    def skipped_path_count(self) -> int:
+        """Son generate çağrısında atlanan yol sayısını döndürür."""
+        return len(self._skipped_path_indices)
 
     def generate(
         self,
@@ -126,6 +146,11 @@ class ScenarioGenerator:
         """
         Bir fonksiyona ait yürütme yollarını test senaryolarına
         dönüştürür.
+
+        Ulaşılamaz yolların kısıtları PathInputGenerator tarafından
+        UnreachablePathError ile bildirilir. Bu yollar atlanır ve
+        kalan senaryoların priority_rank değerleri kesintisiz biçimde
+        yeniden numaralandırılır.
 
         Args:
             function_name:
@@ -141,42 +166,48 @@ class ScenarioGenerator:
                 Test edilen fonksiyonun parametre adları.
 
         Returns:
-            DQM önceliğine göre sıralanmış test senaryoları.
+            DQM önceliğine göre sıralanmış, yalnızca ulaşılabilir
+            test senaryoları.
 
         Raises:
             TypeError:
-                Parametre adları tuple değilse.
+                Fonksiyon adı string değilse, yollar veya skorlar liste
+                değilse ya da parametre adları tuple değilse.
 
             ValueError:
                 Fonksiyon adı boşsa, parametre adı geçersizse veya
                 DQM sonucu geçersiz bir yürütme yolunu gösteriyorsa.
         """
-        normalized_function_name = function_name.strip()
-
-        if not normalized_function_name:
-            raise ValueError(
-                "Fonksiyon adı boş olamaz."
-            )
-
+        normalized_function_name = self._normalize_function_name(
+            function_name
+        )
+        self._validate_paths(paths)
+        self._validate_scores(scores)
         self._validate_parameter_names(parameter_names)
 
         scenarios: list[Scenario] = []
+        skipped_path_indices: list[int] = []
 
-        for priority_rank, score in enumerate(
-            scores,
-            start=1,
-        ):
+        for score in scores:
             path = self._get_path(
                 paths=paths,
                 path_index=score.path_index,
             )
 
-            generated_input = (
-                self._path_input_generator.generate(
-                    path=path,
-                    parameter_names=parameter_names,
+            try:
+                generated_input = (
+                    self._path_input_generator.generate(
+                        path=path,
+                        parameter_names=parameter_names,
+                    )
                 )
-            )
+            except UnreachablePathError:
+                skipped_path_indices.append(
+                    score.path_index
+                )
+                continue
+
+            priority_rank = len(scenarios) + 1
 
             scenario = self._create_scenario(
                 function_name=normalized_function_name,
@@ -187,6 +218,10 @@ class ScenarioGenerator:
             )
 
             scenarios.append(scenario)
+
+        self._skipped_path_indices = tuple(
+            skipped_path_indices
+        )
 
         return scenarios
 
@@ -235,12 +270,67 @@ class ScenarioGenerator:
         )
 
     @staticmethod
+    def _normalize_function_name(
+        function_name: str,
+    ) -> str:
+        """Fonksiyon adını doğrular ve normalize eder."""
+        if not isinstance(function_name, str):
+            raise TypeError(
+                "function_name string olmalıdır."
+            )
+
+        normalized_function_name = function_name.strip()
+
+        if not normalized_function_name:
+            raise ValueError(
+                "Fonksiyon adı boş olamaz."
+            )
+
+        return normalized_function_name
+
+    @staticmethod
+    def _validate_paths(
+        paths: list[ExecutionPath],
+    ) -> None:
+        """Yürütme yolu listesini doğrular."""
+        if not isinstance(paths, list):
+            raise TypeError(
+                "paths bir liste olmalıdır."
+            )
+
+        if any(
+            not isinstance(path, ExecutionPath)
+            for path in paths
+        ):
+            raise TypeError(
+                "paths yalnızca ExecutionPath "
+                "nesneleri içermelidir."
+            )
+
+    @staticmethod
+    def _validate_scores(
+        scores: list[DQMScore],
+    ) -> None:
+        """DQM skoru listesini doğrular."""
+        if not isinstance(scores, list):
+            raise TypeError(
+                "scores bir liste olmalıdır."
+            )
+
+        if any(
+            not isinstance(score, DQMScore)
+            for score in scores
+        ):
+            raise TypeError(
+                "scores yalnızca DQMScore "
+                "nesneleri içermelidir."
+            )
+
+    @staticmethod
     def _validate_parameter_names(
         parameter_names: tuple[str, ...],
     ) -> None:
-        """
-        Fonksiyon parametre adlarını doğrular.
-        """
+        """Fonksiyon parametre adlarını doğrular."""
         if not isinstance(parameter_names, tuple):
             raise TypeError(
                 "parameter_names bir tuple olmalıdır."
@@ -286,9 +376,7 @@ class ScenarioGenerator:
         function_name: str,
         priority_rank: int,
     ) -> str:
-        """
-        Senaryo için kararlı bir kimlik oluşturur.
-        """
+        """Senaryo için kararlı bir kimlik oluşturur."""
         return (
             f"{function_name.lower()}_"
             f"scenario_{priority_rank:03d}"
@@ -299,9 +387,7 @@ class ScenarioGenerator:
         function_name: str,
         path_index: int,
     ) -> str:
-        """
-        Okunabilir test senaryosu adı oluşturur.
-        """
+        """Okunabilir test senaryosu adı oluşturur."""
         return (
             f"{function_name} fonksiyonu "
             f"yürütme yolu {path_index}"

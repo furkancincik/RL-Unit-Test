@@ -337,7 +337,14 @@ class ControlFlowGraphBuilder:
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
     ) -> list[tuple[int, str | None]]:
-        """Try/except yapÄ±sÄ±nÄ±n kontrol akÄ±ÅŸÄ±nÄ± oluÅŸturur."""
+        """
+        Try/except yapısının kontrol akışını oluşturur.
+
+        Exception kenarları doğrudan ``try`` düğümünden değil,
+        try gövdesinde hatayı oluşturabilecek kaynak düğümlerden
+        except düğümlerine bağlanır. Böylece yürütme yolu metadata'sı
+        exception'a neden olan ifadeyi de taşır.
+        """
         try_node = self._create_node(
             label="try",
             node_type="try",
@@ -349,6 +356,8 @@ class ControlFlowGraphBuilder:
             target_id=try_node.node_id,
         )
 
+        body_start_node_id = self._node_counter + 1
+
         normal_paths = self._build_block(
             statements=statement.body,
             incoming_paths=[
@@ -356,6 +365,16 @@ class ControlFlowGraphBuilder:
             ],
             end_node_id=end_node_id,
         )
+
+        body_end_node_id = self._node_counter
+
+        exception_source_ids = self._find_exception_source_ids(
+            start_node_id=body_start_node_id,
+            end_node_id=body_end_node_id,
+        )
+
+        if not exception_source_ids:
+            exception_source_ids = [try_node.node_id]
 
         exception_paths: list[tuple[int, str | None]] = []
 
@@ -373,11 +392,12 @@ class ControlFlowGraphBuilder:
                 line_number=handler.lineno,
             )
 
-            self._add_edge(
-                source_id=try_node.node_id,
-                target_id=handler_node.node_id,
-                label="Exception",
-            )
+            for source_id in exception_source_ids:
+                self._add_edge(
+                    source_id=source_id,
+                    target_id=handler_node.node_id,
+                    label="Exception",
+                )
 
             handler_paths = self._build_block(
                 statements=handler.body,
@@ -406,6 +426,47 @@ class ControlFlowGraphBuilder:
             )
 
         return combined_paths
+
+    def _find_exception_source_ids(
+        self,
+        *,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> list[int]:
+        """
+        Try gövdesinde exception üretebilecek CFG düğümlerini döndürür.
+        """
+        if self._graph is None:
+            raise RuntimeError(
+                "CFG henüz başlatılmadı."
+            )
+
+        return [
+            node.node_id
+            for node in self._graph.nodes
+            if (
+                start_node_id <= node.node_id <= end_node_id
+                and self._node_may_raise(node)
+            )
+        ]
+
+    @staticmethod
+    def _node_may_raise(
+        node: CFGNode,
+    ) -> bool:
+        """
+        Bir CFG düğümünün çalışma sırasında exception üretme
+        potansiyeli taşıyıp taşımadığını belirler.
+        """
+        non_raising_node_types = {
+            "start",
+            "end",
+            "try",
+            "except",
+            "Pass",
+        }
+
+        return node.node_type not in non_raising_node_types
 
     def _create_node(
         self,
@@ -483,4 +544,3 @@ class ControlFlowGraphBuilder:
             raise ValueError(
                 "YalnÄ±zca Python dosyalarÄ± analiz edilebilir."
             )
-

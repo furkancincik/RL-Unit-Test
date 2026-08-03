@@ -160,6 +160,47 @@ class ExecutionPath:
         )
 
     @property
+    def loop_steps(self) -> tuple[PathStep, ...]:
+        """
+        Yol üzerinde bulunan ``while`` ve ``for`` döngü düğümlerini
+        ziyaret sırasıyla döndürür.
+        """
+        return tuple(
+            step
+            for step in self.steps
+            if step.node_type in {"while", "for"}
+        )
+
+    @property
+    def contains_loop(self) -> bool:
+        """Yürütme yolu en az bir döngü düğümü içeriyorsa True döndürür."""
+        return bool(self.loop_steps)
+
+    @property
+    def loop_iteration_count(self) -> int:
+        """
+        Yol üzerinde tamamlanan sınırlı döngü tekrar sayısını döndürür.
+
+        ``while`` döngülerinde ``Loop``, ``for`` döngülerinde ``Next``
+        etiketli geri dönüş kenarları bir tamamlanmış iterasyonu temsil
+        eder.
+        """
+        return sum(
+            edge_label in {"Loop", "Next"}
+            for edge_label in self.edge_labels
+        )
+
+    @property
+    def is_zero_iteration_loop_path(self) -> bool:
+        """
+        Döngü düğümü içerip gövdesini hiç çalıştırmayan yolu belirtir.
+        """
+        return (
+            self.contains_loop
+            and self.loop_iteration_count == 0
+        )
+
+    @property
     def return_step(self) -> PathStep | None:
         """Yol üzerindeki son return düğümünü döndürür."""
         for step in reversed(self.steps):
@@ -198,7 +239,10 @@ class CFGPathAnalyzer:
         START düğümünden END düğümüne giden yürütme yollarını çıkarır.
 
         Döngülerin sonsuz sayıda yol üretmesini önlemek için aynı
-        düğümün ziyaret edilme sayısı sınırlandırılır.
+        düğümün ziyaret edilme sayısı sınırlandırılır. Varsayılan
+        ``max_visits_per_node=2`` değeri döngüler için sıfır ve bir
+        iterasyonlu yolların çıkarılmasını sağlar. Daha yüksek değerler
+        kontrollü biçimde ek iterasyon yolları üretir.
 
         Args:
             graph:

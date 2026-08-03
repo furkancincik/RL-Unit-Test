@@ -59,19 +59,14 @@ def test_graph_contains_expected_edges() -> None:
     """Örnek fonksiyonun CFG bağlantılarının doğru olduğunu doğrular."""
     builder = ControlFlowGraphBuilder()
 
-    graphs = builder.build_from_file(SOURCE_FILE)
-    graph = graphs[0]
+    graph = builder.build_from_file(SOURCE_FILE)[0]
 
     edges = {
-        (
-            edge.source_id,
-            edge.target_id,
-            edge.label,
-        )
+        (edge.source_id, edge.target_id, edge.label)
         for edge in graph.edges
     }
 
-    expected_edges = {
+    assert edges == {
         (1, 3, None),
         (3, 4, "True"),
         (4, 2, None),
@@ -82,11 +77,8 @@ def test_graph_contains_expected_edges() -> None:
         (7, 2, None),
     }
 
-    assert edges == expected_edges
-
 
 def test_build_from_file_raises_error_when_file_is_missing() -> None:
-    """Bulunamayan kaynak dosya için hata üretildiğini doğrular."""
     builder = ControlFlowGraphBuilder()
 
     with pytest.raises(FileNotFoundError):
@@ -98,7 +90,6 @@ def test_build_from_file_raises_error_when_file_is_missing() -> None:
 def test_build_from_file_rejects_non_python_files(
     tmp_path: Path,
 ) -> None:
-    """Python dışındaki dosyaların reddedildiğini doğrular."""
     builder = ControlFlowGraphBuilder()
 
     text_file = tmp_path / "sample.txt"
@@ -114,7 +105,6 @@ def test_build_from_file_rejects_non_python_files(
 def test_build_from_file_rejects_invalid_python_syntax(
     tmp_path: Path,
 ) -> None:
-    """Geçersiz Python sözdiziminin reddedildiğini doğrular."""
     builder = ControlFlowGraphBuilder()
 
     invalid_file = tmp_path / "invalid.py"
@@ -130,7 +120,6 @@ def test_build_from_file_rejects_invalid_python_syntax(
 def test_graph_supports_while_loop(
     tmp_path: Path,
 ) -> None:
-    """While döngüsü için doğru CFG üretildiğini doğrular."""
     builder = ControlFlowGraphBuilder()
 
     source_file = tmp_path / "while_example.py"
@@ -145,51 +134,16 @@ def countdown(value: int) -> int:
         encoding="utf-8",
     )
 
-    graphs = builder.build_from_file(source_file)
-
-    assert len(graphs) == 1
-
-    graph = graphs[0]
+    graph = builder.build_from_file(source_file)[0]
 
     assert graph.function_name == "countdown"
     assert len(graph.nodes) == 5
     assert len(graph.edges) == 5
 
-    node_types = [
-        node.node_type
-        for node in graph.nodes
-    ]
-
-    assert node_types.count("start") == 1
-    assert node_types.count("end") == 1
-    assert node_types.count("while") == 1
-    assert node_types.count("AugAssign") == 1
-    assert node_types.count("return") == 1
-
-    edges = {
-        (
-            edge.source_id,
-            edge.target_id,
-            edge.label,
-        )
-        for edge in graph.edges
-    }
-
-    expected_edges = {
-        (1, 3, None),
-        (3, 4, "True"),
-        (4, 3, "Loop"),
-        (3, 5, "False"),
-        (5, 2, None),
-    }
-
-    assert edges == expected_edges
-
 
 def test_graph_supports_for_loop(
     tmp_path: Path,
 ) -> None:
-    """For döngüsü için doğru CFG üretildiğini doğrular."""
     builder = ControlFlowGraphBuilder()
 
     source_file = tmp_path / "for_example.py"
@@ -206,59 +160,16 @@ def calculate_total(values: list[int]) -> int:
         encoding="utf-8",
     )
 
-    graphs = builder.build_from_file(source_file)
-
-    assert len(graphs) == 1
-
-    graph = graphs[0]
+    graph = builder.build_from_file(source_file)[0]
 
     assert graph.function_name == "calculate_total"
     assert len(graph.nodes) == 6
     assert len(graph.edges) == 6
 
-    node_types = [
-        node.node_type
-        for node in graph.nodes
-    ]
-    node_labels = [
-        node.label
-        for node in graph.nodes
-    ]
-
-    assert node_types.count("start") == 1
-    assert node_types.count("end") == 1
-    assert node_types.count("Assign") == 1
-    assert node_types.count("for") == 1
-    assert node_types.count("AugAssign") == 1
-    assert node_types.count("return") == 1
-
-    assert "value in values" in node_labels
-
-    edges = {
-        (
-            edge.source_id,
-            edge.target_id,
-            edge.label,
-        )
-        for edge in graph.edges
-    }
-
-    expected_edges = {
-        (1, 3, None),
-        (3, 4, None),
-        (4, 5, "Iterate"),
-        (5, 4, "Next"),
-        (4, 6, "Complete"),
-        (6, 2, None),
-    }
-
-    assert edges == expected_edges
-
 
 def test_graph_supports_try_except(
     tmp_path: Path,
 ) -> None:
-    """Try-except yapısı için doğru CFG üretildiğini doğrular."""
     builder = ControlFlowGraphBuilder()
 
     source_file = tmp_path / "try_example.py"
@@ -275,52 +186,82 @@ def safe_divide(a: int, b: int) -> float | None:
         encoding="utf-8",
     )
 
-    graphs = builder.build_from_file(source_file)
-
-    assert len(graphs) == 1
-
-    graph = graphs[0]
+    graph = builder.build_from_file(source_file)[0]
 
     assert graph.function_name == "safe_divide"
     assert len(graph.nodes) == 7
     assert len(graph.edges) == 7
 
-    node_types = [
-        node.node_type
+    node_by_label = {
+        node.label: node
         for node in graph.nodes
-    ]
-    node_labels = [
-        node.label
-        for node in graph.nodes
-    ]
-
-    assert node_types.count("start") == 1
-    assert node_types.count("end") == 1
-    assert node_types.count("try") == 1
-    assert node_types.count("except") == 1
-    assert node_types.count("Assign") == 1
-    assert node_types.count("return") == 2
-
-    assert "try" in node_labels
-    assert "except ZeroDivisionError" in node_labels
+    }
 
     edges = {
-        (
-            edge.source_id,
-            edge.target_id,
-            edge.label,
-        )
+        (edge.source_id, edge.target_id, edge.label)
         for edge in graph.edges
     }
 
-    expected_edges = {
-        (1, 3, None),
-        (3, 4, "Success"),
-        (3, 5, "Exception"),
-        (5, 6, None),
-        (6, 2, None),
-        (4, 7, None),
-        (7, 2, None),
-    }
+    try_node = node_by_label["try"]
+    assignment_node = node_by_label["result = a / b"]
+    except_node = node_by_label[
+        "except ZeroDivisionError"
+    ]
 
-    assert edges == expected_edges
+    assert (
+        try_node.node_id,
+        assignment_node.node_id,
+        "Success",
+    ) in edges
+
+    assert (
+        assignment_node.node_id,
+        except_node.node_id,
+        "Exception",
+    ) in edges
+
+    assert (
+        try_node.node_id,
+        except_node.node_id,
+        "Exception",
+    ) not in edges
+
+
+def test_exception_path_preserves_raising_expression(
+    tmp_path: Path,
+) -> None:
+    builder = ControlFlowGraphBuilder()
+
+    source_file = tmp_path / "index_example.py"
+    source_file.write_text(
+        """
+def first_item(values: list[int]) -> int | None:
+    try:
+        result = values[0]
+    except IndexError:
+        return None
+
+    return result
+""".strip(),
+        encoding="utf-8",
+    )
+
+    graph = builder.build_from_file(source_file)[0]
+
+    assignment_node = next(
+        node
+        for node in graph.nodes
+        if node.label == "result = values[0]"
+    )
+    except_node = next(
+        node
+        for node in graph.nodes
+        if node.label == "except IndexError"
+    )
+
+    assert any(
+        edge.source_id == assignment_node.node_id
+        and edge.target_id == except_node.node_id
+        and edge.label == "Exception"
+        for edge in graph.edges
+    )

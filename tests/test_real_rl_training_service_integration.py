@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from models.coverage_result import FunctionCoverageResult
 from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
@@ -64,7 +65,6 @@ def test_real_rl_training_service_runs_end_to_end(
     )
 
     assert result.q_table_state_count > 0
-
     assert result.session_result.best_episode is not None
 
     assert all(
@@ -76,6 +76,15 @@ def test_real_rl_training_service_runs_end_to_end(
         episode.final_coverage_percentage == 100.0
         for episode in result.session_result.episodes
     )
+
+    assert isinstance(
+        result.final_coverage_result,
+        FunctionCoverageResult,
+    )
+    assert result.function_coverage is not None
+    assert result.has_full_function_coverage is True
+    assert result.has_full_file_coverage is True
+    assert result.file_coverage.success is True
 
 
 def test_real_rl_training_service_generates_cumulative_test_file(
@@ -126,8 +135,8 @@ def test_real_rl_training_service_produces_readable_report(
     tmp_path: Path,
 ) -> None:
     """
-    Eğitim oturumu sonunda okunabilir terminal raporunun
-    üretildiğini doğrular.
+    Eğitim oturumu sonunda fonksiyon ve dosya coverage değerlerini
+    ayıran okunabilir terminal raporunun üretildiğini doğrular.
     """
     result = RealRLTrainingService().run(
         source_file=SOURCE_FILE,
@@ -151,7 +160,16 @@ def test_real_rl_training_service_produces_readable_report(
     assert "Episode 2" in report
     assert "GENEL ÖZET" in report
 
-    assert "Final coverage" in report
+    assert "Hedef kapsam coverage" in report
+    assert "SON COVERAGE ÖZETİ" in report
+    assert "Hedef fonksiyon" in report
+    assert "Fonksiyon satır coverage" in report
+    assert "Fonksiyon branch coverage" in report
+    assert "Tam fonksiyon coverage" in report
+    assert "Dosya geneli satır coverage" in report
+    assert "Dosya geneli branch coverage" in report
+    assert "Tam dosya coverage" in report
+
     assert "Toplam reward" in report
     assert "En iyi episode" in report
     assert "Oturum başarılı" in report

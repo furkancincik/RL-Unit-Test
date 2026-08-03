@@ -6,7 +6,10 @@ from unittest.mock import Mock
 import pytest
 
 from generator.scenario_generator import Scenario
-from models.coverage_result import CoverageResult
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
 from rl.coverage_state import CoverageState
 from rl.scenario_suite_coverage_transition import (
     ScenarioSuiteCoverageTransition,
@@ -134,6 +137,53 @@ def create_coverage_result(
         total_branch_count=total_branch_count,
         test_exit_code=test_exit_code,
         duration_seconds=0.10,
+    )
+
+
+def create_function_coverage_result(
+    *,
+    function_line_coverage_percent: float = 100.0,
+    function_branch_coverage_percent: float = 100.0,
+    file_line_coverage_percent: float = 32.0,
+    file_branch_coverage_percent: float = 25.0,
+    test_exit_code: int = 0,
+) -> FunctionCoverageResult:
+    """Kontrollü FunctionCoverageResult oluşturur."""
+    source_file = Path("sample_code.py")
+    test_file = Path(
+        "test_calculate_score_scenario_suite.py"
+    )
+
+    file_coverage = CoverageResult(
+        source_file=source_file,
+        test_file=test_file,
+        line_coverage_percent=file_line_coverage_percent,
+        branch_coverage_percent=file_branch_coverage_percent,
+        covered_line_count=8,
+        missing_line_count=17,
+        total_line_count=25,
+        covered_branch_count=2,
+        missing_branch_count=6,
+        total_branch_count=8,
+        test_exit_code=test_exit_code,
+        duration_seconds=0.10,
+    )
+
+    return FunctionCoverageResult(
+        source_file=source_file,
+        test_file=test_file,
+        function_name="calculate_score",
+        start_line=1,
+        end_line=6,
+        line_coverage_percent=function_line_coverage_percent,
+        branch_coverage_percent=function_branch_coverage_percent,
+        covered_lines=(1, 2, 3, 4, 5, 6),
+        missing_lines=(),
+        covered_branch_count=4,
+        missing_branch_count=0,
+        test_exit_code=test_exit_code,
+        duration_seconds=0.10,
+        file_coverage=file_coverage,
     )
 
 
@@ -740,3 +790,193 @@ def test_transition_rejects_invalid_coverage_service(
             output_directory=tmp_path,
             coverage_service="invalid",  # type: ignore[arg-type]
         )
+
+
+def test_transition_starts_without_last_coverage_result(
+    tmp_path: Path,
+) -> None:
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+
+    assert transition.last_coverage_result is None
+    assert transition.last_function_coverage is None
+    assert transition.last_file_coverage is None
+
+
+def test_transition_stores_last_file_coverage_result(
+    tmp_path: Path,
+) -> None:
+    scenario = create_scenarios()[0]
+    coverage_result = create_coverage_result(
+        line_coverage_percent=50.0,
+        branch_coverage_percent=50.0,
+        covered_line_count=3,
+        missing_line_count=3,
+        total_line_count=6,
+        covered_branch_count=2,
+        missing_branch_count=2,
+        total_branch_count=4,
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=(scenario,),
+                coverage_result=coverage_result,
+            )
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    transition(create_state(), scenario)
+
+    assert transition.last_coverage_result is coverage_result
+    assert transition.last_function_coverage is None
+    assert transition.last_file_coverage is coverage_result
+
+
+def test_transition_exposes_function_and_file_coverage(
+    tmp_path: Path,
+) -> None:
+    scenario = create_scenarios()[0]
+    function_coverage = create_function_coverage_result()
+
+    service = create_mock_service(
+        [
+            ScenarioSuiteCoverageResult(
+                scenarios=(scenario,),
+                test_file=Path(
+                    "test_calculate_score_scenario_suite.py"
+                ),
+                coverage=function_coverage,
+            )
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        function_start_line=1,
+        function_end_line=6,
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    result = transition(create_state(), scenario)
+
+    assert result.coverage_percentage == 100.0
+    assert transition.last_coverage_result is function_coverage
+    assert transition.last_function_coverage is function_coverage
+    assert (
+        transition.last_file_coverage
+        is function_coverage.file_coverage
+    )
+    assert (
+        transition.last_file_coverage.line_coverage_percent
+        == 32.0
+    )
+
+
+def test_transition_preserves_previous_coverage_when_service_raises(
+    tmp_path: Path,
+) -> None:
+    first_scenario, second_scenario, _ = create_scenarios()
+    first_coverage = create_coverage_result(
+        line_coverage_percent=50.0,
+        branch_coverage_percent=50.0,
+        covered_line_count=3,
+        missing_line_count=3,
+        total_line_count=6,
+        covered_branch_count=2,
+        missing_branch_count=2,
+        total_branch_count=4,
+    )
+
+    service = Mock(
+        spec=ScenarioSuiteCoverageService,
+    )
+    service.measure_scenarios.side_effect = [
+        create_suite_result(
+            scenarios=(first_scenario,),
+            coverage_result=first_coverage,
+        ),
+        RuntimeError("Coverage hatası"),
+    ]
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    first_state = transition(
+        create_state(),
+        first_scenario,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Coverage hatası",
+    ):
+        transition(
+            first_state,
+            second_scenario,
+        )
+
+    assert transition.last_coverage_result is first_coverage
+    assert transition.selected_scenarios == (
+        first_scenario,
+    )
+
+
+def test_transition_reset_preserves_last_coverage_result(
+    tmp_path: Path,
+) -> None:
+    scenario = create_scenarios()[0]
+    coverage_result = create_coverage_result(
+        line_coverage_percent=50.0,
+        branch_coverage_percent=50.0,
+        covered_line_count=3,
+        missing_line_count=3,
+        total_line_count=6,
+        covered_branch_count=2,
+        missing_branch_count=2,
+        total_branch_count=4,
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=(scenario,),
+                coverage_result=coverage_result,
+            )
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    transition(create_state(), scenario)
+    transition.reset()
+
+    assert transition.selected_scenarios == ()
+    assert transition.last_coverage_result is coverage_result

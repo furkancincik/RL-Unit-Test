@@ -8,7 +8,10 @@ import pytest
 from generator.file_writer import GeneratedTestFileWriter
 from generator.pytest_generator import PytestGenerator
 from generator.scenario_generator import Scenario
-from models.coverage_result import CoverageResult
+from models.coverage_result import (
+    CoverageResult,
+    FunctionCoverageResult,
+)
 from services.coverage_service import CoverageService
 from services.scenario_suite_coverage_service import (
     ScenarioSuiteCoverageResult,
@@ -497,4 +500,211 @@ def test_measure_scenarios_rejects_invalid_function_name(
             function_name="calculate-score",
             scenarios=create_scenarios(),
             output_directory=tmp_path,
+        )
+
+
+def create_function_coverage_result(
+    *,
+    source_file: Path,
+    test_file: Path,
+) -> FunctionCoverageResult:
+    """Kontrollü fonksiyon bazlı coverage sonucu oluşturur."""
+    file_coverage = CoverageResult(
+        source_file=source_file.resolve(),
+        test_file=test_file,
+        line_coverage_percent=33.33,
+        branch_coverage_percent=40.0,
+        covered_line_count=25,
+        missing_line_count=50,
+        total_line_count=75,
+        covered_branch_count=8,
+        missing_branch_count=12,
+        total_branch_count=20,
+        test_exit_code=0,
+        duration_seconds=0.25,
+    )
+
+    return FunctionCoverageResult(
+        source_file=source_file.resolve(),
+        test_file=test_file,
+        function_name="calculate_score",
+        start_line=1,
+        end_line=2,
+        line_coverage_percent=100.0,
+        branch_coverage_percent=100.0,
+        covered_lines=(1, 2),
+        missing_lines=(),
+        covered_branch_count=2,
+        missing_branch_count=0,
+        test_exit_code=0,
+        duration_seconds=0.25,
+        file_coverage=file_coverage,
+    )
+
+
+def test_measure_scenarios_uses_function_coverage_when_range_given(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+    scenarios = create_scenarios()
+
+    (
+        pytest_generator,
+        file_writer,
+        coverage_service,
+        _,
+    ) = create_dependencies(tmp_path)
+
+    written_file = file_writer.write.return_value
+
+    function_coverage = create_function_coverage_result(
+        source_file=source_file,
+        test_file=written_file,
+    )
+
+    coverage_service.measure_function.return_value = (
+        function_coverage
+    )
+
+    service = ScenarioSuiteCoverageService(
+        pytest_generator=pytest_generator,
+        file_writer=file_writer,
+        coverage_service=coverage_service,
+    )
+
+    result = service.measure_scenarios(
+        source_file=source_file,
+        module_path="datasets.sample_code",
+        function_name="calculate_score",
+        scenarios=scenarios,
+        output_directory=tmp_path,
+        function_start_line=1,
+        function_end_line=2,
+        timeout_seconds=15.0,
+    )
+
+    coverage_service.measure_function.assert_called_once_with(
+        source_file=source_file.resolve(),
+        test_file=written_file,
+        function_name="calculate_score",
+        start_line=1,
+        end_line=2,
+        timeout_seconds=15.0,
+    )
+
+    coverage_service.measure.assert_not_called()
+
+    assert result.coverage is function_coverage
+    assert result.is_function_coverage is True
+    assert result.has_full_coverage is True
+
+
+def test_measure_scenarios_uses_file_coverage_without_range(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+    scenarios = create_scenarios()
+
+    (
+        pytest_generator,
+        file_writer,
+        coverage_service,
+        coverage_result,
+    ) = create_dependencies(tmp_path)
+
+    service = ScenarioSuiteCoverageService(
+        pytest_generator=pytest_generator,
+        file_writer=file_writer,
+        coverage_service=coverage_service,
+    )
+
+    result = service.measure_scenarios(
+        source_file=source_file,
+        module_path="datasets.sample_code",
+        function_name="calculate_score",
+        scenarios=scenarios,
+        output_directory=tmp_path,
+    )
+
+    coverage_service.measure.assert_called_once_with(
+        source_file=source_file.resolve(),
+        test_file=file_writer.write.return_value,
+        timeout_seconds=30.0,
+    )
+    coverage_service.measure_function.assert_not_called()
+
+    assert result.coverage is coverage_result
+    assert result.is_function_coverage is False
+
+
+def test_measure_scenarios_rejects_only_function_start_line(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+
+    service = ScenarioSuiteCoverageService()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "function_start_line ve function_end_line "
+            "birlikte verilmelidir"
+        ),
+    ):
+        service.measure_scenarios(
+            source_file=source_file,
+            module_path="datasets.sample_code",
+            function_name="calculate_score",
+            scenarios=create_scenarios(),
+            output_directory=tmp_path,
+            function_start_line=1,
+        )
+
+
+def test_measure_scenarios_rejects_only_function_end_line(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+
+    service = ScenarioSuiteCoverageService()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "function_start_line ve function_end_line "
+            "birlikte verilmelidir"
+        ),
+    ):
+        service.measure_scenarios(
+            source_file=source_file,
+            module_path="datasets.sample_code",
+            function_name="calculate_score",
+            scenarios=create_scenarios(),
+            output_directory=tmp_path,
+            function_end_line=2,
+        )
+
+
+def test_measure_scenarios_rejects_invalid_function_range(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+
+    service = ScenarioSuiteCoverageService()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "function_end_line, function_start_line "
+            "değerinden küçük olamaz"
+        ),
+    ):
+        service.measure_scenarios(
+            source_file=source_file,
+            module_path="datasets.sample_code",
+            function_name="calculate_score",
+            scenarios=create_scenarios(),
+            output_directory=tmp_path,
+            function_start_line=5,
+            function_end_line=2,
         )

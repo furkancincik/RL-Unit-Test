@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass
 class FunctionInfo:
-    """Bir Python fonksiyonuna ait analiz sonuÃ§larÄ±nÄ± temsil eder."""
+    """Bir Python fonksiyonuna ait analiz sonuçlarını temsil eder."""
 
     name: str
     parameters: list[str]
@@ -20,11 +20,12 @@ class FunctionInfo:
     has_docstring: bool
     has_return_type_hint: bool
     typed_parameter_count: int
+    end_line_number: int = 0
 
 
 @dataclass
 class AnalysisResult:
-    """Bir Python dosyasÄ±na ait genel analiz sonuÃ§larÄ±nÄ± temsil eder."""
+    """Bir Python dosyasına ait genel analiz sonuçlarını temsil eder."""
 
     file_name: str
     function_count: int
@@ -38,68 +39,114 @@ class AnalysisResult:
 
 
 class PythonAnalyzer:
-    """Python kaynak dosyalarÄ±nÄ± AST kullanarak analiz eder."""
+    """Python kaynak dosyalarını AST kullanarak analiz eder."""
 
-    def analyze_file(self, file_path: str | Path) -> AnalysisResult:
+    def analyze_file(
+        self,
+        file_path: str | Path,
+    ) -> AnalysisResult:
         """
-        Verilen Python dosyasÄ±nÄ± analiz eder.
+        Verilen Python dosyasını analiz eder.
 
         Args:
-            file_path: Analiz edilecek Python dosyasÄ±nÄ±n yolu.
+            file_path:
+                Analiz edilecek Python dosyasının yolu.
 
         Returns:
-            Dosyaya ait analiz sonuÃ§larÄ±.
+            Dosyaya ait analiz sonuçları.
 
         Raises:
-            FileNotFoundError: Dosya bulunamazsa.
-            ValueError: Dosya Python dosyasÄ± deÄŸilse.
-            SyntaxError: Dosyada geÃ§ersiz Python sÃ¶zdizimi varsa.
+            FileNotFoundError:
+                Dosya bulunamazsa.
+
+            ValueError:
+                Verilen yol bir dosya değilse veya dosya
+                Python uzantısına sahip değilse.
+
+            SyntaxError:
+                Dosyada geçersiz Python sözdizimi varsa.
         """
         path = Path(file_path)
 
         self._validate_file(path)
 
-        source_code = path.read_text(encoding="utf-8")
-        tree = ast.parse(source_code)
+        source_code = path.read_text(
+            encoding="utf-8",
+        )
 
-        functions = self._extract_functions(tree)
+        tree = ast.parse(
+            source_code,
+        )
+
+        functions = self._extract_functions(
+            tree,
+        )
 
         return AnalysisResult(
             file_name=path.name,
             function_count=len(functions),
-            class_count=self._count_nodes(tree, ast.ClassDef),
-            if_count=self._count_nodes(tree, ast.If),
+            class_count=self._count_nodes(
+                tree,
+                ast.ClassDef,
+            ),
+            if_count=self._count_nodes(
+                tree,
+                ast.If,
+            ),
             for_count=self._count_nodes(
                 tree,
-                (ast.For, ast.AsyncFor),
+                (
+                    ast.For,
+                    ast.AsyncFor,
+                ),
             ),
-            while_count=self._count_nodes(tree, ast.While),
-            try_count=self._count_nodes(tree, ast.Try),
-            return_count=self._count_nodes(tree, ast.Return),
+            while_count=self._count_nodes(
+                tree,
+                ast.While,
+            ),
+            try_count=self._count_nodes(
+                tree,
+                ast.Try,
+            ),
+            return_count=self._count_nodes(
+                tree,
+                ast.Return,
+            ),
             functions=functions,
         )
 
     @staticmethod
-    def _validate_file(path: Path) -> None:
+    def _validate_file(
+        path: Path,
+    ) -> None:
         """
-        DosyanÄ±n varlÄ±ÄŸÄ±nÄ± ve uzantÄ±sÄ±nÄ± kontrol eder.
+        Dosyanın varlığını ve uzantısını kontrol eder.
 
         Args:
-            path: Kontrol edilecek dosya yolu.
+            path:
+                Kontrol edilecek dosya yolu.
 
         Raises:
-            FileNotFoundError: Dosya bulunamazsa.
-            ValueError: Dosya Python dosyasÄ± deÄŸilse.
+            FileNotFoundError:
+                Dosya bulunamazsa.
+
+            ValueError:
+                Belirtilen yol bir dosya değilse veya dosyanın
+                uzantısı ``.py`` değilse.
         """
         if not path.exists():
-            raise FileNotFoundError(f"Dosya bulunamadÄ±: {path}")
+            raise FileNotFoundError(
+                f"Dosya bulunamadı: {path}"
+            )
 
         if not path.is_file():
-            raise ValueError(f"Belirtilen yol bir dosya deÄŸil: {path}")
+            raise ValueError(
+                f"Belirtilen yol bir dosya değil: {path}"
+            )
 
         if path.suffix.lower() != ".py":
             raise ValueError(
-                "YalnÄ±zca Python dosyalarÄ± analiz edilebilir."
+                "Yalnızca Python dosyaları analiz edilebilir."
             )
 
     def _extract_functions(
@@ -107,10 +154,11 @@ class PythonAnalyzer:
         tree: ast.AST,
     ) -> list[FunctionInfo]:
         """
-        AST iÃ§erisindeki fonksiyonlarÄ± ve Ã¶zelliklerini Ã§Ä±karÄ±r.
+        AST içerisindeki fonksiyonları ve özelliklerini çıkarır.
 
         Args:
-            tree: Analiz edilecek AST aÄŸacÄ±.
+            tree:
+                Analiz edilecek AST ağacı.
 
         Returns:
             Fonksiyon analiz bilgilerinin listesi.
@@ -120,30 +168,52 @@ class PythonAnalyzer:
         for node in ast.walk(tree):
             if not isinstance(
                 node,
-                (ast.FunctionDef, ast.AsyncFunctionDef),
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                ),
             ):
                 continue
 
-            parameters = self._extract_parameters(node)
+            parameters = self._extract_parameters(
+                node,
+            )
 
             return_count = self._count_nodes(
                 node,
                 ast.Return,
             )
 
-            branch_count = self._calculate_branch_count(node)
-
-            cyclomatic_complexity = 1 + branch_count
-
-            risk_level = self._determine_risk_level(
-                cyclomatic_complexity
+            branch_count = self._calculate_branch_count(
+                node,
             )
 
-            has_docstring = ast.get_docstring(node) is not None
-            has_return_type_hint = node.returns is not None
+            cyclomatic_complexity = (
+                1 + branch_count
+            )
 
-            typed_parameter_count = self._count_typed_parameters(
-                node
+            risk_level = self._determine_risk_level(
+                cyclomatic_complexity,
+            )
+
+            has_docstring = (
+                ast.get_docstring(node) is not None
+            )
+
+            has_return_type_hint = (
+                node.returns is not None
+            )
+
+            typed_parameter_count = (
+                self._count_typed_parameters(
+                    node,
+                )
+            )
+
+            end_line_number = (
+                node.end_lineno
+                if node.end_lineno is not None
+                else node.lineno
             )
 
             functions.append(
@@ -157,11 +227,18 @@ class PythonAnalyzer:
                     ),
                     return_count=return_count,
                     branch_count=branch_count,
-                    cyclomatic_complexity=cyclomatic_complexity,
+                    cyclomatic_complexity=(
+                        cyclomatic_complexity
+                    ),
                     risk_level=risk_level,
                     has_docstring=has_docstring,
-                    has_return_type_hint=has_return_type_hint,
-                    typed_parameter_count=typed_parameter_count,
+                    has_return_type_hint=(
+                        has_return_type_hint
+                    ),
+                    typed_parameter_count=(
+                        typed_parameter_count
+                    ),
+                    end_line_number=end_line_number,
                 )
             )
 
@@ -172,10 +249,11 @@ class PythonAnalyzer:
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> list[str]:
         """
-        Fonksiyonun normal parametre isimlerini Ã§Ä±karÄ±r.
+        Fonksiyonun normal parametre isimlerini çıkarır.
 
         Args:
-            node: Fonksiyon AST dÃ¼ÄŸÃ¼mÃ¼.
+            node:
+                Fonksiyon AST düğümü.
 
         Returns:
             Parametre isimlerinin listesi.
@@ -190,13 +268,14 @@ class PythonAnalyzer:
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> int:
         """
-        Type hint bulunan parametre sayÄ±sÄ±nÄ± hesaplar.
+        Type hint bulunan parametre sayısını hesaplar.
 
         Args:
-            node: Fonksiyon AST dÃ¼ÄŸÃ¼mÃ¼.
+            node:
+                Fonksiyon AST düğümü.
 
         Returns:
-            Type hint verilmiÅŸ parametre sayÄ±sÄ±.
+            Type hint verilmiş parametre sayısı.
         """
         return sum(
             argument.annotation is not None
@@ -208,13 +287,14 @@ class PythonAnalyzer:
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> int:
         """
-        Fonksiyon iÃ§erisindeki karar noktalarÄ±nÄ± hesaplar.
+        Fonksiyon içerisindeki karar noktalarını hesaplar.
 
         Args:
-            node: Fonksiyon AST dÃ¼ÄŸÃ¼mÃ¼.
+            node:
+                Fonksiyon AST düğümü.
 
         Returns:
-            Karar noktasÄ± sayÄ±sÄ±.
+            Karar noktası sayısı.
         """
         branch_types = (
             ast.If,
@@ -226,27 +306,39 @@ class PythonAnalyzer:
         )
 
         return sum(
-            isinstance(child, branch_types)
+            isinstance(
+                child,
+                branch_types,
+            )
             for child in ast.walk(node)
         )
 
     @staticmethod
     def _count_nodes(
         tree: ast.AST,
-        node_types: type[ast.AST] | tuple[type[ast.AST], ...],
+        node_types: (
+            type[ast.AST]
+            | tuple[type[ast.AST], ...]
+        ),
     ) -> int:
         """
-        AST iÃ§erisinde belirtilen dÃ¼ÄŸÃ¼m tÃ¼rlerini sayar.
+        AST içerisinde belirtilen düğüm türlerini sayar.
 
         Args:
-            tree: Analiz edilecek AST aÄŸacÄ±.
-            node_types: SayÄ±lacak AST dÃ¼ÄŸÃ¼m tÃ¼rleri.
+            tree:
+                Analiz edilecek AST ağacı.
+
+            node_types:
+                Sayılacak AST düğüm türleri.
 
         Returns:
-            Bulunan dÃ¼ÄŸÃ¼m sayÄ±sÄ±.
+            Bulunan düğüm sayısı.
         """
         return sum(
-            isinstance(node, node_types)
+            isinstance(
+                node,
+                node_types,
+            )
             for node in ast.walk(tree)
         )
 
@@ -255,10 +347,11 @@ class PythonAnalyzer:
         cyclomatic_complexity: int,
     ) -> str:
         """
-        Cyclomatic Complexity deÄŸerine gÃ¶re risk seviyesini belirler.
+        Cyclomatic Complexity değerine göre risk seviyesini belirler.
 
         Args:
-            cyclomatic_complexity: Fonksiyonun karmaÅŸÄ±klÄ±k deÄŸeri.
+            cyclomatic_complexity:
+                Fonksiyonun karmaşıklık değeri.
 
         Returns:
             Low, Medium veya High risk seviyesi.
@@ -270,4 +363,3 @@ class PythonAnalyzer:
             return "Medium"
 
         return "High"
-
