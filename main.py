@@ -14,10 +14,15 @@ from services.coverage_workflow_service import (
     CoverageWorkflowSummary,
 )
 from services.rl_demo_service import RLDemoService
+from services.real_rl_training_service import (
+    RealRLTrainingResult,
+    RealRLTrainingService,
+)
 
 
 SOURCE_FILE = "datasets/sample_code.py"
 MODULE_PATH = "datasets.sample_code"
+FUNCTION_NAME = "calculate_score"
 GENERATED_TEST_DIRECTORY = Path("output/generated_tests")
 
 
@@ -466,6 +471,77 @@ def run_coverage_pipeline(
     return summary
 
 
+def run_real_rl_training(
+    source_file: str | Path = SOURCE_FILE,
+    module_path: str = MODULE_PATH,
+    function_name: str = FUNCTION_NAME,
+    output_directory: str | Path = GENERATED_TEST_DIRECTORY,
+    *,
+    episode_count: int = 3,
+    epsilon: float = 0.0,
+    learning_rate: float = 0.5,
+    discount_factor: float = 0.9,
+    random_seed: int | None = 42,
+    overwrite: bool = True,
+    timeout_seconds: float = 30.0,
+) -> RealRLTrainingResult:
+    """
+    Kaynak dosya üzerinde gerçek coverage tabanlı RL eğitimi çalıştırır.
+
+    Kaynak kod analizinden başlayarak CFG, yürütme yolları,
+    DQM, test senaryosu üretimi, gerçek pytest ve coverage
+    ölçümü, reward hesaplama ve Q-Table güncellemesine kadar
+    bütün akışı çalıştırır.
+    """
+    service = RealRLTrainingService()
+
+    print("=" * 65)
+    print("GERÇEK RL COVERAGE EĞİTİMİ")
+    print("=" * 65)
+    print(f"Kaynak dosya       : {source_file}")
+    print(f"Modül yolu         : {module_path}")
+    print(f"Fonksiyon          : {function_name}")
+    print(f"Episode sayısı     : {episode_count}")
+    print("\nEğitim başlatılıyor...\n")
+
+    result = service.run(
+        source_file=source_file,
+        module_path=module_path,
+        function_name=function_name,
+        output_directory=output_directory,
+        episode_count=episode_count,
+        epsilon=epsilon,
+        learning_rate=learning_rate,
+        discount_factor=discount_factor,
+        random_seed=random_seed,
+        overwrite=overwrite,
+        timeout_seconds=timeout_seconds,
+    )
+
+    print(result.report)
+
+    print("\n" + "=" * 65)
+    print("GERÇEK RL EĞİTİM SONUCU")
+    print("=" * 65)
+    print(
+        f"Üretilen senaryo sayısı : "
+        f"{result.scenario_count}"
+    )
+    print(
+        f"Tamamlanan episode      : "
+        f"{result.completed_episode_count}"
+    )
+    print(
+        f"Q-Table state sayısı    : "
+        f"{result.q_table_state_count}"
+    )
+    print(
+        f"Eğitim başarılı mı?     : "
+        f"{result.success}"
+    )
+
+    return result
+
 def print_menu() -> None:
     """Uygulama ana menüsünü ekrana yazdırır."""
     print("\n" + "=" * 55)
@@ -477,7 +553,8 @@ def print_menu() -> None:
     print("4 - DQM JSON raporu oluştur")
     print("5 - Otomatik test üret ve çalıştır")
     print("6 - Otomatik test üret ve coverage ölç")
-    print("7 - Q-Learning eğitim demosu")
+    print("7 - Q-Learning simülasyon demosu")
+    print("8 - Gerçek RL coverage eğitimi")
     print("0 - Çıkış")
 
 
@@ -565,13 +642,33 @@ def main() -> None:
 
             continue
 
+        if choice == "8":
+            print()
+
+            try:
+                run_real_rl_training()
+            except (
+                FileNotFoundError,
+                TypeError,
+                ValueError,
+                TimeoutError,
+                RuntimeError,
+                OSError,
+            ) as error:
+                print(
+                    "Gerçek RL eğitimi tamamlanamadı: "
+                    f"{error}"
+                )
+
+            continue
+
         if choice == "0":
             print("\nProgram sonlandırıldı.")
             break
 
         print(
             "\nGeçersiz seçim. "
-            "Lütfen 0, 1, 2, 3, 4, 5, 6 veya 7 girin."
+            "Lütfen 0, 1, 2, 3, 4, 5, 6, 7 veya 8 girin."
         )
 
 

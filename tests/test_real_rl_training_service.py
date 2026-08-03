@@ -1,0 +1,638 @@
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import pytest
+
+from analyzer.python_analyzer import PythonAnalyzer
+from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
+from evaluator.dqm import DQMScore, DecisionQualityMatrix
+from generator.scenario_generator import (
+    Scenario,
+    ScenarioGenerator,
+)
+from rl.training_report_formatter import TrainingReportFormatter
+from rl.training_session import (
+    TrainingSession,
+    TrainingSessionResult,
+)
+from rl.training_statistics import (
+    EpisodeStatistics,
+    TrainingStatistics,
+)
+from services.real_rl_training_service import (
+    RealRLTrainingResult,
+    RealRLTrainingService,
+)
+
+
+def create_source_file(
+    tmp_path: Path,
+) -> Path:
+    """Testlerde kullanılacak örnek Python dosyasını oluşturur."""
+    source_file = tmp_path / "sample_code.py"
+
+    source_file.write_text(
+        "def calculate_score(score):\n"
+        "    if score >= 50:\n"
+        "        return 'Başarılı'\n"
+        "    return 'Başarısız'\n",
+        encoding="utf-8",
+    )
+
+    return source_file
+
+
+def create_function_analysis() -> Mock:
+    """PythonAnalyzer fonksiyon sonucunu temsil eden mock oluşturur."""
+    function = Mock()
+
+    function.name = "calculate_score"
+    function.parameters = ["score"]
+    function.branch_count = 1
+
+    return function
+
+
+def create_graph() -> Mock:
+    """CFG sonucunu temsil eden mock oluşturur."""
+    graph = Mock()
+
+    graph.function_name = "calculate_score"
+    graph.nodes = (
+        Mock(node_id=1),
+        Mock(node_id=2),
+        Mock(node_id=3),
+        Mock(node_id=4),
+    )
+
+    return graph
+
+
+def create_path() -> ExecutionPath:
+    """Örnek yürütme yolu oluşturur."""
+    return ExecutionPath(
+        node_ids=[1, 2, 3, 4],
+        edge_labels=[None, "True", None],
+    )
+
+
+def create_score() -> DQMScore:
+    """Örnek DQM sonucu oluşturur."""
+    return DQMScore(
+        path_index=1,
+        path_length=4,
+        decision_edge_count=1,
+        contains_loop=False,
+        contains_exception=False,
+        raw_score=10.0,
+        normalized_score=100.0,
+        priority_level="High",
+    )
+
+
+def create_scenario() -> Scenario:
+    """Gerçek RL servis testinde kullanılacak senaryoyu oluşturur."""
+    return Scenario(
+        scenario_id="calculate_score_scenario_001",
+        name="calculate_score yürütme yolu 1",
+        path_index=1,
+        priority_rank=1,
+        priority_level="High",
+        dqm_score=100.0,
+        node_ids=(1, 2, 3, 4),
+        edge_labels=(None, "True", None),
+        contains_loop=False,
+        contains_exception=False,
+        description="Gerçek RL eğitim servisi testi.",
+        keyword_arguments=(("score", 50),),
+        expected_result="Başarılı",
+        expected_exception=None,
+    )
+
+
+def create_session_result() -> TrainingSessionResult:
+    """Tamamlanmış eğitim oturumu sonucu oluşturur."""
+    episode = EpisodeStatistics(
+        episode_number=1,
+        step_count=1,
+        total_reward=109.9,
+        final_coverage_percentage=100.0,
+        full_coverage=True,
+        executed_test_count=1,
+    )
+
+    return TrainingSessionResult(
+        episodes=(episode,),
+        requested_episode_count=1,
+        completed_episode_count=1,
+    )
+
+
+def create_dependencies() -> tuple[
+    Mock,
+    Mock,
+    Mock,
+    Mock,
+    Mock,
+    Mock,
+]:
+    """RealRLTrainingService için mock bağımlılıklar oluşturur."""
+    analyzer = Mock(
+        spec=PythonAnalyzer,
+    )
+    cfg_builder = Mock(
+        spec=ControlFlowGraphBuilder,
+    )
+    path_analyzer = Mock(
+        spec=CFGPathAnalyzer,
+    )
+    dqm = Mock(
+        spec=DecisionQualityMatrix,
+    )
+    scenario_generator = Mock(
+        spec=ScenarioGenerator,
+    )
+    report_formatter = Mock(
+        spec=TrainingReportFormatter,
+    )
+
+    function = create_function_analysis()
+    graph = create_graph()
+    path = create_path()
+    score = create_score()
+    scenario = create_scenario()
+
+    analysis_result = Mock()
+    analysis_result.functions = [function]
+
+    analyzer.analyze_file.return_value = analysis_result
+    cfg_builder.build_from_file.return_value = [graph]
+    path_analyzer.find_paths.return_value = [path]
+    dqm.evaluate_paths.return_value = [score]
+    scenario_generator.generate.return_value = [scenario]
+    report_formatter.format_session.return_value = (
+        "RL EĞİTİM OTURUMU"
+    )
+
+    return (
+        analyzer,
+        cfg_builder,
+        path_analyzer,
+        dqm,
+        scenario_generator,
+        report_formatter,
+    )
+
+
+def create_service() -> tuple[
+    RealRLTrainingService,
+    tuple[Mock, ...],
+]:
+    """Mock bağımlılıklarla servis oluşturur."""
+    dependencies = create_dependencies()
+
+    service = RealRLTrainingService(
+        analyzer=dependencies[0],
+        cfg_builder=dependencies[1],
+        path_analyzer=dependencies[2],
+        dqm=dependencies[3],
+        scenario_generator=dependencies[4],
+        report_formatter=dependencies[5],
+    )
+
+    return service, dependencies
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_returns_real_rl_training_result(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert isinstance(
+        result,
+        RealRLTrainingResult,
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_executes_analysis_pipeline(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, dependencies = create_service()
+
+    source_file = create_source_file(
+        tmp_path
+    )
+
+    service.run(
+        source_file=source_file,
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    analyzer = dependencies[0]
+    cfg_builder = dependencies[1]
+    path_analyzer = dependencies[2]
+    dqm = dependencies[3]
+
+    analyzer.analyze_file.assert_called_once_with(
+        source_file.resolve()
+    )
+
+    cfg_builder.build_from_file.assert_called_once_with(
+        source_file.resolve()
+    )
+
+    path_analyzer.find_paths.assert_called_once()
+
+    dqm.evaluate_paths.assert_called_once()
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_generates_scenarios_with_parameters(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, dependencies = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    scenario_generator = dependencies[4]
+
+    call_arguments = (
+        scenario_generator.generate
+        .call_args
+        .kwargs
+    )
+
+    assert (
+        call_arguments["function_name"]
+        == "calculate_score"
+    )
+    assert call_arguments["parameter_names"] == (
+        "score",
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_executes_requested_episode_count(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=3,
+    )
+
+    assert (
+        mock_run.call_args.kwargs["episode_count"]
+        == 3
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_formats_training_report(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    session_result = create_session_result()
+    mock_run.return_value = session_result
+
+    service, dependencies = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    report_formatter = dependencies[5]
+
+    report_formatter.format_session.assert_called_once()
+
+    assert result.report == "RL EĞİTİM OTURUMU"
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_result_contains_generated_scenarios(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert result.scenario_count == 1
+    assert result.scenarios[0].scenario_id == (
+        "calculate_score_scenario_001"
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_result_exposes_session_information(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert result.success is True
+    assert result.completed_episode_count == 1
+    assert result.function_name == "calculate_score"
+    assert result.module_path == "sample_code"
+
+
+def test_run_rejects_missing_function(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    analysis_result = Mock()
+    analysis_result.functions = []
+
+    dependencies[0].analyze_file.return_value = (
+        analysis_result
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Kaynak dosyada belirtilen "
+            "fonksiyon bulunamadı"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_run_rejects_missing_graph(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    dependencies[1].build_from_file.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Fonksiyon için Control Flow Graph "
+            "bulunamadı"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_run_rejects_empty_paths(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    dependencies[2].find_paths.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match="Fonksiyon için yürütme yolu bulunamadı",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_run_rejects_empty_dqm_scores(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    dependencies[3].evaluate_paths.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match="Fonksiyon için DQM sonucu üretilemedi",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_run_rejects_empty_scenarios(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    dependencies[4].generate.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Fonksiyon için test senaryosu "
+            "üretilemedi"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_run_rejects_invalid_episode_count(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "episode_count 1 veya "
+            "daha büyük olmalıdır"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            episode_count=0,
+        )
+
+
+def test_run_rejects_invalid_epsilon(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match="epsilon 0 ile 1 arasında olmalıdır",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            epsilon=1.5,
+        )
+
+
+def test_run_rejects_invalid_learning_rate(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        TypeError,
+        match="learning_rate sayısal olmalıdır",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            learning_rate=True,
+        )
+
+
+def test_run_rejects_invalid_timeout(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "timeout_seconds sonlu ve "
+            "sıfırdan büyük olmalıdır"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            timeout_seconds=0.0,
+        )
+
+
+def test_run_rejects_invalid_module_path(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match="Geçersiz Python modül yolu",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample/code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_run_rejects_invalid_function_name(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match="Geçersiz Python fonksiyon adı",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate-score",
+            output_directory=tmp_path,
+        )
