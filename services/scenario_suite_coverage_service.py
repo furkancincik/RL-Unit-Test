@@ -472,9 +472,14 @@ class ScenarioSuiteCoverageService:
                 "içermelidir."
             )
 
-        if len(set(scenarios)) != len(scenarios):
+        scenario_ids = tuple(
+            scenario.scenario_id
+            for scenario in scenarios
+        )
+
+        if len(set(scenario_ids)) != len(scenario_ids):
             raise ValueError(
-                "scenarios tekrar eden Scenario içeremez."
+                "scenarios tekrar eden scenario_id içeremez."
             )
 
         return scenarios

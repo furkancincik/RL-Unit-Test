@@ -1452,3 +1452,662 @@ def test_generate_constant_handler_return_skips_raising_assignment() -> None:
     assert result.keyword_argument_dict["b"] == 0
     assert result.expected_result is None
     assert result.expected_exception is None
+
+
+def test_generate_supports_constant_local_while_variable() -> None:
+    generator = PathInputGenerator()
+
+    path = ExecutionPath(
+        node_ids=[
+            1,
+            3,
+            4,
+            5,
+            4,
+            5,
+            4,
+            6,
+            2,
+        ],
+        edge_labels=[
+            None,
+            None,
+            "True",
+            "Loop",
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "remaining_checks = 2",
+            "remaining_checks > 0",
+            "remaining_checks -= 1",
+            "remaining_checks > 0",
+            "remaining_checks -= 1",
+            "remaining_checks > 0",
+            "return 'Tamamlandı'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "while",
+            "AugAssign",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        line_numbers=[
+            1,
+            2,
+            3,
+            4,
+            3,
+            4,
+            3,
+            5,
+            6,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+    )
+
+    assert result.keyword_argument_dict["score"] == 0
+    assert result.expected_result == "Tamamlandı"
+
+
+def test_generate_supports_zero_iteration_local_while() -> None:
+    generator = PathInputGenerator()
+
+    path = ExecutionPath(
+        node_ids=[1, 3, 4, 6, 2],
+        edge_labels=[
+            None,
+            None,
+            "False",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "remaining_checks = 0",
+            "remaining_checks > 0",
+            "return 'Tamamlandı'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "while",
+            "return",
+            "end",
+        ],
+        line_numbers=[1, 2, 3, 5, 6],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=(),
+    )
+
+    assert result.keyword_arguments == ()
+    assert result.expected_result == "Tamamlandı"
+
+
+def test_generate_rejects_infeasible_local_while_path() -> None:
+    generator = PathInputGenerator()
+
+    path = ExecutionPath(
+        node_ids=[
+            1,
+            3,
+            4,
+            5,
+            4,
+            6,
+            2,
+        ],
+        edge_labels=[
+            None,
+            None,
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "remaining_checks = 2",
+            "remaining_checks > 0",
+            "remaining_checks -= 1",
+            "remaining_checks > 0",
+            "return 'Tamamlandı'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        line_numbers=[1, 2, 3, 4, 3, 5, 6],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="iterasyon sayısıyla uyuşmuyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=(),
+        )
+
+
+def test_generate_counts_for_and_while_iterations_separately() -> None:
+    generator = PathInputGenerator()
+
+    path = ExecutionPath(
+        node_ids=[
+            1,
+            3,
+            4,
+            5,
+            4,
+            6,
+            7,
+            8,
+            7,
+            8,
+            7,
+            9,
+            2,
+        ],
+        edge_labels=[
+            None,
+            None,
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+            "True",
+            "Loop",
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "total = 0",
+            "item in values",
+            "total += item",
+            "item in values",
+            "remaining_checks = 2",
+            "remaining_checks > 0",
+            "remaining_checks -= 1",
+            "remaining_checks > 0",
+            "remaining_checks -= 1",
+            "remaining_checks > 0",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "for",
+            "AugAssign",
+            "for",
+            "Assign",
+            "while",
+            "AugAssign",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        line_numbers=[
+            1,
+            2,
+            3,
+            4,
+            3,
+            5,
+            6,
+            7,
+            6,
+            7,
+            6,
+            8,
+            9,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == [0]
+    assert result.expected_result == 0
+
+
+def test_count_loop_iterations_supports_distinct_visit_node_ids() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "value > 0",
+            "value -= 1",
+            "value > 0",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+    )
+
+    loop_step = path.loop_steps[0]
+
+    assert (
+        PathInputGenerator._count_loop_iterations(
+            path=path,
+            loop_step=loop_step,
+        )
+        == 1
+    )
+
+
+def test_generate_supports_true_in_condition_with_strings() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "coupon in ('SAVE10', 'SAVE5')",
+            "return 'Geçerli'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("coupon",),
+    )
+
+    assert result.keyword_argument_dict["coupon"] in {
+        "SAVE10",
+        "SAVE5",
+    }
+    assert result.expected_result == "Geçerli"
+
+
+def test_generate_supports_false_in_condition_with_strings() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "coupon in ('SAVE10', 'SAVE5')",
+            "return 'Geçersiz'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("coupon",),
+    )
+
+    assert result.keyword_argument_dict["coupon"] not in {
+        "SAVE10",
+        "SAVE5",
+    }
+    assert result.expected_result == "Geçersiz"
+
+
+def test_generate_supports_true_not_in_condition() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "coupon not in ('NONE', '')",
+            "return 'Geçersiz kupon'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("coupon",),
+    )
+
+    assert result.keyword_argument_dict["coupon"] not in {
+        "NONE",
+        "",
+    }
+
+
+def test_generate_supports_false_not_in_condition() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "coupon not in ('NONE', '')",
+            "return 'Kupon yok'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("coupon",),
+    )
+
+    assert result.keyword_argument_dict["coupon"] in {
+        "NONE",
+        "",
+    }
+
+
+def test_generate_combines_string_equality_and_membership() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "coupon != 'SAVE10'",
+            "coupon in ('SAVE10', 'SAVE5')",
+            "return 'SAVE5'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("coupon",),
+    )
+
+    assert result.keyword_argument_dict["coupon"] == "SAVE5"
+
+
+def test_generate_skips_zero_division_path_with_local_denominator() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "valid_count = 1",
+            "try",
+            "average = total / valid_count",
+            "except ZeroDivisionError",
+            "return 'Hata'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="yerel bir böleni sıfır yapmayı gerektiriyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("total",),
+        )
+
+
+def test_generate_still_supports_zero_division_parameter() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = total / divisor",
+            "except ZeroDivisionError",
+            "return 'Hata'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("total", "divisor"),
+    )
+
+    assert result.keyword_argument_dict["divisor"] == 0
+    assert result.expected_result == "Hata"
+
+
+def test_generate_rejects_empty_for_input_when_path_requires_truthy_list(
+) -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "not items",
+            "item in items",
+            "return 'Geçersiz kupon'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            "Complete",
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="Boolean yol kısıtıyla çelişiyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("items",),
+        )
+
+
+def test_generate_accepts_non_empty_for_input_when_path_requires_truthy_list(
+) -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "not items",
+            "item in items",
+            "total += item",
+            "item in items",
+            "return 'Tamamlandı'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "for",
+            "AugAssign",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("items",),
+    )
+
+    assert result.keyword_argument_dict["items"] == [0]
+    assert result.expected_result == "Tamamlandı"
+
+
+def test_generate_rejects_non_empty_for_input_when_path_requires_falsy_list(
+) -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "not items",
+            "item in items",
+            "total += item",
+            "item in items",
+            "return 'Ulaşılamaz'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "for",
+            "AugAssign",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="Boolean yol kısıtıyla çelişiyor",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("items",),
+        )

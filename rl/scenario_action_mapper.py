@@ -13,12 +13,17 @@ class ScenarioActionMapper:
 
     Her senaryo, iterable içindeki sırasına göre sıfır tabanlı
     bir Action.scenario_index değeriyle eşleştirilir.
+
+    Scenario nesneleri liste, sözlük veya başka hashlenemeyen
+    değerler içerebildiği için eşleştirme doğrudan Scenario
+    nesnesinin hash değerine değil, benzersiz scenario_id alanına
+    göre yapılır.
     """
 
     __slots__ = (
         "_scenarios",
         "_actions",
-        "_scenario_to_action",
+        "_scenario_id_to_action",
     )
 
     def __init__(
@@ -36,13 +41,14 @@ class ScenarioActionMapper:
 
         self._scenarios = scenario_tuple
         self._actions = actions
-        self._scenario_to_action = dict(
-            zip(
+        self._scenario_id_to_action = {
+            scenario.scenario_id: action
+            for scenario, action in zip(
                 scenario_tuple,
                 actions,
                 strict=True,
             )
-        )
+        }
 
     @property
     def scenarios(self) -> tuple[Scenario, ...]:
@@ -79,6 +85,9 @@ class ScenarioActionMapper:
     ) -> Action:
         """
         Verilen test senaryosuna karşılık gelen aksiyonu döndürür.
+
+        Eşleştirme Scenario nesnesinin hash değerine göre değil,
+        benzersiz scenario_id alanına göre yapılır.
         """
         if not isinstance(scenario, Scenario):
             raise TypeError(
@@ -86,7 +95,9 @@ class ScenarioActionMapper:
             )
 
         try:
-            return self._scenario_to_action[scenario]
+            return self._scenario_id_to_action[
+                scenario.scenario_id
+            ]
         except KeyError as error:
             raise ValueError(
                 "scenario is not registered in this mapper."
@@ -101,7 +112,11 @@ class ScenarioActionMapper:
         scenario: object,
     ) -> bool:
         """Senaryonun mapper içinde bulunup bulunmadığını belirtir."""
-        return scenario in self._scenario_to_action
+        return (
+            isinstance(scenario, Scenario)
+            and scenario.scenario_id
+            in self._scenario_id_to_action
+        )
 
     @staticmethod
     def _prepare_scenarios(
@@ -124,9 +139,15 @@ class ScenarioActionMapper:
                 "Scenario instances."
             )
 
-        if len(set(scenario_tuple)) != len(scenario_tuple):
+        scenario_ids = tuple(
+            scenario.scenario_id
+            for scenario in scenario_tuple
+        )
+
+        if len(set(scenario_ids)) != len(scenario_ids):
             raise ValueError(
-                "scenarios cannot contain duplicates."
+                "scenarios cannot contain duplicate "
+                "scenario_id values."
             )
 
         return scenario_tuple

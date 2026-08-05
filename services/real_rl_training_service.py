@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from typing import Any, Callable
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
@@ -366,6 +370,7 @@ class RealRLTrainingService:
             paths=paths,
             scores=scores,
             parameter_names=parameter_names,
+            parameter_types=function.parameter_types,
         )
 
         if not scenarios:
@@ -374,9 +379,18 @@ class RealRLTrainingService:
                 f"{normalized_function_name}"
             )
 
-        scenario_tuple = tuple(
-            scenarios
+        scenario_tuple = self._filter_executable_scenarios(
+            source_file=normalized_source_file,
+            function_name=normalized_function_name,
+            scenarios=tuple(scenarios),
         )
+
+        if not scenario_tuple:
+            raise ValueError(
+                "Üretilen senaryoların hiçbiri hedef fonksiyonda "
+                "beklenen sonucu üretmedi: "
+                f"{normalized_function_name}"
+            )
 
         mapper = ScenarioActionMapper(
             scenarios=scenario_tuple,
@@ -476,6 +490,158 @@ class RealRLTrainingService:
             q_table_state_count=len(q_table),
             final_coverage_result=final_coverage_result,
             report=report,
+        )
+
+    def _filter_executable_scenarios(
+        self,
+        *,
+        source_file: Path,
+        function_name: str,
+        scenarios: tuple[Scenario, ...],
+    ) -> tuple[Scenario, ...]:
+        """
+        Senaryoları hedef fonksiyonda somut olarak çalıştırır.
+
+        Üretilen girdinin gerçek sonucu, senaryoda beklenen sonuçla
+        uyuşmuyorsa senaryo ulaşılamaz veya yanlış modellenmiş kabul
+        edilir ve RL aksiyon kümesine eklenmez.
+        """
+        target_function = self._load_target_function(
+            source_file=source_file,
+            function_name=function_name,
+        )
+
+        executable_scenarios: list[Scenario] = []
+
+        for scenario in scenarios:
+            if self._scenario_matches_execution(
+                target_function=target_function,
+                scenario=scenario,
+            ):
+                executable_scenarios.append(scenario)
+
+        return tuple(executable_scenarios)
+
+    @staticmethod
+    def _load_target_function(
+        *,
+        source_file: Path,
+        function_name: str,
+    ) -> Callable[..., Any]:
+        """
+        Kaynak dosyayı izole bir modül adıyla yükler ve hedef
+        fonksiyonu döndürür.
+        """
+        module_name = (
+            "_rl_unit_test_validation_"
+            f"{abs(hash(source_file.resolve()))}"
+        )
+
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            source_file,
+        )
+
+        if spec is None or spec.loader is None:
+            raise RuntimeError(
+                "Somut senaryo doğrulaması için kaynak modül "
+                "yüklenemedi: "
+                f"{source_file}"
+            )
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        target_function = getattr(
+            module,
+            function_name,
+            None,
+        )
+
+        if target_function is None:
+            raise ValueError(
+                "Somut doğrulama için hedef fonksiyon "
+                "kaynak modülde bulunamadı: "
+                f"{function_name}"
+            )
+
+        if not callable(target_function):
+            raise TypeError(
+                "Somut doğrulama hedefi çağrılabilir olmalıdır: "
+                f"{function_name}"
+            )
+
+        return target_function
+
+    @classmethod
+    def _scenario_matches_execution(
+        cls,
+        *,
+        target_function: Callable[..., Any],
+        scenario: Scenario,
+    ) -> bool:
+        """
+        Tek bir senaryonun gerçek çalışma sonucu ile beklenen
+        davranışının uyuşup uyuşmadığını döndürür.
+        """
+        keyword_arguments = copy.deepcopy(
+            scenario.keyword_argument_dict
+        )
+
+        try:
+            actual_result = target_function(
+                **keyword_arguments
+            )
+        except Exception as error:
+            if scenario.expected_exception is None:
+                return False
+
+            return any(
+                exception_type.__name__
+                == scenario.expected_exception
+                for exception_type in type(error).mro()
+            )
+
+        if scenario.expected_exception is not None:
+            return False
+
+        return cls._values_match(
+            actual=actual_result,
+            expected=scenario.expected_result,
+        )
+
+    @staticmethod
+    def _values_match(
+        *,
+        actual: Any,
+        expected: Any,
+    ) -> bool:
+        """
+        Gerçek ve beklenen değerleri güvenli biçimde karşılaştırır.
+        """
+        if (
+            isinstance(actual, float)
+            and isinstance(expected, float)
+        ):
+            if math.isnan(actual) and math.isnan(expected):
+                return True
+
+            return math.isclose(
+                actual,
+                expected,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+
+        try:
+            comparison = actual == expected
+        except Exception:
+            return False
+
+        return (
+            comparison
+            if isinstance(comparison, bool)
+            else False
         )
 
     @staticmethod

@@ -17,6 +17,9 @@ def create_scenario(
     contains_loop: bool = False,
     contains_exception: bool = False,
     description: str = "Sample scenario description.",
+    keyword_arguments: tuple[tuple[str, object], ...] = (),
+    expected_result: object = None,
+    expected_exception: str | None = None,
 ) -> Scenario:
     return Scenario(
         scenario_id=scenario_id,
@@ -30,6 +33,9 @@ def create_scenario(
         contains_loop=contains_loop,
         contains_exception=contains_exception,
         description=description,
+        keyword_arguments=keyword_arguments,
+        expected_result=expected_result,
+        expected_exception=expected_exception,
     )
 
 
@@ -351,12 +357,12 @@ def test_mapper_rejects_invalid_scenario_items(
         )
 
 
-def test_mapper_rejects_duplicate_scenarios() -> None:
+def test_mapper_rejects_duplicate_scenario_ids() -> None:
     scenario = create_scenario()
 
     with pytest.raises(
         ValueError,
-        match="scenarios cannot contain duplicates.",
+        match="scenarios cannot contain duplicate scenario_id values.",
     ):
         ScenarioActionMapper(
             scenarios=(
@@ -366,7 +372,7 @@ def test_mapper_rejects_duplicate_scenarios() -> None:
         )
 
 
-def test_mapper_rejects_equal_duplicate_scenarios() -> None:
+def test_mapper_rejects_equal_scenarios_with_duplicate_ids() -> None:
     first_scenario = create_scenario()
     second_scenario = create_scenario()
 
@@ -375,7 +381,7 @@ def test_mapper_rejects_equal_duplicate_scenarios() -> None:
 
     with pytest.raises(
         ValueError,
-        match="scenarios cannot contain duplicates.",
+        match="scenarios cannot contain duplicate scenario_id values.",
     ):
         ScenarioActionMapper(
             scenarios=(
@@ -524,3 +530,106 @@ def test_mapper_is_not_affected_by_original_list_changes() -> None:
     assert len(mapper) == 3
     assert len(mapper.scenarios) == 3
     assert len(mapper.actions) == 3
+
+
+def test_mapper_accepts_scenario_with_list_argument() -> None:
+    scenario = create_scenario(
+        scenario_id="list_scenario_001",
+        keyword_arguments=(
+            ("items", [10, 20, 30]),
+        ),
+        expected_result="Başarılı",
+    )
+
+    mapper = ScenarioActionMapper(
+        scenarios=(scenario,),
+    )
+
+    assert len(mapper) == 1
+    assert mapper.get_action(scenario) == Action(
+        scenario_index=0
+    )
+    assert mapper.get_scenario(
+        Action(scenario_index=0)
+    ) is scenario
+    assert scenario in mapper
+
+
+def test_mapper_accepts_scenario_with_dictionary_result() -> None:
+    scenario = create_scenario(
+        scenario_id="dictionary_scenario_001",
+        keyword_arguments=(
+            ("payload", {"score": 85}),
+        ),
+        expected_result={
+            "status": "accepted",
+            "details": ["high", "priority"],
+        },
+    )
+
+    mapper = ScenarioActionMapper(
+        scenarios=(scenario,),
+    )
+
+    assert mapper.get_action(scenario) == Action(
+        scenario_index=0
+    )
+    assert scenario in mapper
+
+
+def test_mapper_uses_scenario_id_for_equivalent_lookup() -> None:
+    registered_scenario = create_scenario(
+        scenario_id="shared_scenario_001",
+        keyword_arguments=(
+            ("items", [1, 2]),
+        ),
+    )
+    equivalent_reference = create_scenario(
+        scenario_id="shared_scenario_001",
+        name="Different display name",
+        path_index=99,
+        keyword_arguments=(
+            ("items", [999]),
+        ),
+    )
+
+    mapper = ScenarioActionMapper(
+        scenarios=(registered_scenario,),
+    )
+
+    assert mapper.get_action(
+        equivalent_reference
+    ) == Action(scenario_index=0)
+    assert equivalent_reference in mapper
+
+
+def test_mapper_rejects_different_scenarios_with_same_id() -> None:
+    first_scenario = create_scenario(
+        scenario_id="duplicate_id",
+        name="First",
+        keyword_arguments=(
+            ("items", [1]),
+        ),
+    )
+    second_scenario = create_scenario(
+        scenario_id="duplicate_id",
+        name="Second",
+        path_index=2,
+        keyword_arguments=(
+            ("items", [2]),
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "scenarios cannot contain duplicate "
+            "scenario_id values."
+        ),
+    ):
+        ScenarioActionMapper(
+            scenarios=(
+                first_scenario,
+                second_scenario,
+            ),
+        )

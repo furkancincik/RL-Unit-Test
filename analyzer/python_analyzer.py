@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -21,6 +21,9 @@ class FunctionInfo:
     has_return_type_hint: bool
     typed_parameter_count: int
     end_line_number: int = 0
+    parameter_types: dict[str, str] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -45,42 +48,14 @@ class PythonAnalyzer:
         self,
         file_path: str | Path,
     ) -> AnalysisResult:
-        """
-        Verilen Python dosyasını analiz eder.
-
-        Args:
-            file_path:
-                Analiz edilecek Python dosyasının yolu.
-
-        Returns:
-            Dosyaya ait analiz sonuçları.
-
-        Raises:
-            FileNotFoundError:
-                Dosya bulunamazsa.
-
-            ValueError:
-                Verilen yol bir dosya değilse veya dosya
-                Python uzantısına sahip değilse.
-
-            SyntaxError:
-                Dosyada geçersiz Python sözdizimi varsa.
-        """
         path = Path(file_path)
-
         self._validate_file(path)
 
         source_code = path.read_text(
             encoding="utf-8",
         )
-
-        tree = ast.parse(
-            source_code,
-        )
-
-        functions = self._extract_functions(
-            tree,
-        )
+        tree = ast.parse(source_code)
+        functions = self._extract_functions(tree)
 
         return AnalysisResult(
             file_name=path.name,
@@ -116,24 +91,7 @@ class PythonAnalyzer:
         )
 
     @staticmethod
-    def _validate_file(
-        path: Path,
-    ) -> None:
-        """
-        Dosyanın varlığını ve uzantısını kontrol eder.
-
-        Args:
-            path:
-                Kontrol edilecek dosya yolu.
-
-        Raises:
-            FileNotFoundError:
-                Dosya bulunamazsa.
-
-            ValueError:
-                Belirtilen yol bir dosya değilse veya dosyanın
-                uzantısı ``.py`` değilse.
-        """
+    def _validate_file(path: Path) -> None:
         if not path.exists():
             raise FileNotFoundError(
                 f"Dosya bulunamadı: {path}"
@@ -153,16 +111,6 @@ class PythonAnalyzer:
         self,
         tree: ast.AST,
     ) -> list[FunctionInfo]:
-        """
-        AST içerisindeki fonksiyonları ve özelliklerini çıkarır.
-
-        Args:
-            tree:
-                Analiz edilecek AST ağacı.
-
-        Returns:
-            Fonksiyon analiz bilgilerinin listesi.
-        """
         functions: list[FunctionInfo] = []
 
         for node in ast.walk(tree):
@@ -175,46 +123,18 @@ class PythonAnalyzer:
             ):
                 continue
 
-            parameters = self._extract_parameters(
-                node,
+            parameters = self._extract_parameters(node)
+            parameter_types = self._extract_parameter_types(
+                node
             )
-
             return_count = self._count_nodes(
                 node,
                 ast.Return,
             )
-
             branch_count = self._calculate_branch_count(
-                node,
+                node
             )
-
-            cyclomatic_complexity = (
-                1 + branch_count
-            )
-
-            risk_level = self._determine_risk_level(
-                cyclomatic_complexity,
-            )
-
-            has_docstring = (
-                ast.get_docstring(node) is not None
-            )
-
-            has_return_type_hint = (
-                node.returns is not None
-            )
-
-            typed_parameter_count = (
-                self._count_typed_parameters(
-                    node,
-                )
-            )
-
-            end_line_number = (
-                node.end_lineno
-                if node.end_lineno is not None
-                else node.lineno
-            )
+            cyclomatic_complexity = 1 + branch_count
 
             functions.append(
                 FunctionInfo(
@@ -230,15 +150,24 @@ class PythonAnalyzer:
                     cyclomatic_complexity=(
                         cyclomatic_complexity
                     ),
-                    risk_level=risk_level,
-                    has_docstring=has_docstring,
+                    risk_level=self._determine_risk_level(
+                        cyclomatic_complexity
+                    ),
+                    has_docstring=(
+                        ast.get_docstring(node) is not None
+                    ),
                     has_return_type_hint=(
-                        has_return_type_hint
+                        node.returns is not None
                     ),
                     typed_parameter_count=(
-                        typed_parameter_count
+                        self._count_typed_parameters(node)
                     ),
-                    end_line_number=end_line_number,
+                    end_line_number=(
+                        node.end_lineno
+                        if node.end_lineno is not None
+                        else node.lineno
+                    ),
+                    parameter_types=parameter_types,
                 )
             )
 
@@ -248,35 +177,38 @@ class PythonAnalyzer:
     def _extract_parameters(
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> list[str]:
-        """
-        Fonksiyonun normal parametre isimlerini çıkarır.
-
-        Args:
-            node:
-                Fonksiyon AST düğümü.
-
-        Returns:
-            Parametre isimlerinin listesi.
-        """
         return [
             argument.arg
             for argument in node.args.args
         ]
 
     @staticmethod
+    def _extract_parameter_types(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> dict[str, str]:
+        """
+        Fonksiyon parametrelerinin type hint ifadelerini metin
+        biçiminde döndürür.
+
+        Örnekler:
+            ``int``, ``str``, ``list[int]``, ``dict[str, int]``.
+        """
+        parameter_types: dict[str, str] = {}
+
+        for argument in node.args.args:
+            if argument.annotation is None:
+                continue
+
+            parameter_types[argument.arg] = ast.unparse(
+                argument.annotation
+            )
+
+        return parameter_types
+
+    @staticmethod
     def _count_typed_parameters(
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> int:
-        """
-        Type hint bulunan parametre sayısını hesaplar.
-
-        Args:
-            node:
-                Fonksiyon AST düğümü.
-
-        Returns:
-            Type hint verilmiş parametre sayısı.
-        """
         return sum(
             argument.annotation is not None
             for argument in node.args.args
@@ -286,16 +218,6 @@ class PythonAnalyzer:
     def _calculate_branch_count(
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> int:
-        """
-        Fonksiyon içerisindeki karar noktalarını hesaplar.
-
-        Args:
-            node:
-                Fonksiyon AST düğümü.
-
-        Returns:
-            Karar noktası sayısı.
-        """
         branch_types = (
             ast.If,
             ast.For,
@@ -306,10 +228,7 @@ class PythonAnalyzer:
         )
 
         return sum(
-            isinstance(
-                child,
-                branch_types,
-            )
+            isinstance(child, branch_types)
             for child in ast.walk(node)
         )
 
@@ -321,24 +240,8 @@ class PythonAnalyzer:
             | tuple[type[ast.AST], ...]
         ),
     ) -> int:
-        """
-        AST içerisinde belirtilen düğüm türlerini sayar.
-
-        Args:
-            tree:
-                Analiz edilecek AST ağacı.
-
-            node_types:
-                Sayılacak AST düğüm türleri.
-
-        Returns:
-            Bulunan düğüm sayısı.
-        """
         return sum(
-            isinstance(
-                node,
-                node_types,
-            )
+            isinstance(node, node_types)
             for node in ast.walk(tree)
         )
 
@@ -346,16 +249,6 @@ class PythonAnalyzer:
     def _determine_risk_level(
         cyclomatic_complexity: int,
     ) -> str:
-        """
-        Cyclomatic Complexity değerine göre risk seviyesini belirler.
-
-        Args:
-            cyclomatic_complexity:
-                Fonksiyonun karmaşıklık değeri.
-
-        Returns:
-            Low, Medium veya High risk seviyesi.
-        """
         if cyclomatic_complexity <= 5:
             return "Low"
 

@@ -626,15 +626,27 @@ def test_transition_rolls_back_failed_suite_result(
 
     with pytest.raises(
         RuntimeError,
-        match=(
-            "Seçilen senaryo paketinin "
-            "coverage işlemi başarısız oldu"
-        ),
-    ):
+    ) as error_info:
         transition(
             create_state(),
             scenario,
         )
+
+    error_message = str(error_info.value)
+
+    assert (
+        "Seçilen senaryo paketinin coverage işlemi "
+        "başarısız oldu."
+        in error_message
+    )
+    assert "Pytest çıkış kodu: 1." in error_message
+    assert (
+        "test_calculate_score_scenario_suite.py"
+        in error_message
+    )
+    assert scenario.scenario_id in error_message
+    assert "pytest " in error_message
+    assert "-x -vv" in error_message
 
     assert transition.selected_scenarios == ()
 

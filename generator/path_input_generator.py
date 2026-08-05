@@ -57,6 +57,7 @@ class _VariableConstraint:
     has_equal_value: bool = False
 
     forbidden_values: tuple[Any, ...] = ()
+    allowed_values: tuple[Any, ...] | None = None
 
 
 class PathInputGenerator:
@@ -71,6 +72,8 @@ class PathInputGenerator:
     - x <= değer
     - x == değer
     - x != değer
+    - x in (değerler)
+    - x not in (değerler)
     - değer < x
     - değer <= x
     - bool parametre kontrolleri
@@ -88,6 +91,7 @@ class PathInputGenerator:
         self,
         path: ExecutionPath,
         parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str] | None = None,
     ) -> GeneratedTestInput:
         """
         Yürütme yolundan test girdisi ve beklenen sonuç üretir.
@@ -114,6 +118,13 @@ class PathInputGenerator:
             parameter_names=parameter_names,
         )
 
+        normalized_parameter_types = (
+            self._normalize_parameter_types(
+                parameter_types=parameter_types,
+                parameter_names=parameter_names,
+            )
+        )
+
         constraints: dict[str, _VariableConstraint] = {}
         direct_values: dict[str, Any] = {}
 
@@ -138,16 +149,58 @@ class PathInputGenerator:
                 constraints=constraints,
             )
 
+        self._apply_local_alias_constraints(
+            path=path,
+            parameter_names=parameter_names,
+            parameter_types=normalized_parameter_types,
+            constraints=constraints,
+            direct_values=direct_values,
+        )
+
+        self._apply_loop_variable_constraints(
+            path=path,
+            parameter_names=parameter_names,
+            parameter_types=normalized_parameter_types,
+            constraints=constraints,
+            direct_values=direct_values,
+        )
+
+        self._validate_collection_alias_constraints(
+            path=path,
+            parameter_names=parameter_names,
+            constraints=constraints,
+            direct_values=direct_values,
+        )
+
+        self._validate_direct_values_against_constraints(
+            direct_values=direct_values,
+            constraints=constraints,
+        )
+
         keyword_arguments = tuple(
             (
                 parameter_name,
-                (
-                    direct_values[parameter_name]
-                    if parameter_name in direct_values
-                    else self._create_parameter_value(
-                        parameter_name=parameter_name,
-                        constraint=constraints.get(parameter_name),
-                    )
+                self._coerce_value_to_parameter_type(
+                    value=(
+                        direct_values[parameter_name]
+                        if parameter_name in direct_values
+                        else self._create_parameter_value(
+                            parameter_name=parameter_name,
+                            constraint=constraints.get(
+                                parameter_name
+                            ),
+                            parameter_type=(
+                                normalized_parameter_types.get(
+                                    parameter_name
+                                )
+                            ),
+                        )
+                    ),
+                    parameter_type=(
+                        normalized_parameter_types.get(
+                            parameter_name
+                        )
+                    ),
                 ),
             )
             for parameter_name in parameter_names
@@ -205,6 +258,45 @@ class PathInputGenerator:
             raise ValueError(
                 "parameter_names tekrar eden değer içeremez."
             )
+
+    @staticmethod
+    def _normalize_parameter_types(
+        *,
+        parameter_types: dict[str, str] | None,
+        parameter_names: tuple[str, ...],
+    ) -> dict[str, str]:
+        """Type hint eşlemesini doğrular ve normalize eder."""
+        if parameter_types is None:
+            return {}
+
+        if not isinstance(parameter_types, dict):
+            raise TypeError(
+                "parameter_types bir dict veya None olmalıdır."
+            )
+
+        normalized: dict[str, str] = {}
+
+        for parameter_name, type_name in parameter_types.items():
+            if parameter_name not in parameter_names:
+                raise ValueError(
+                    "parameter_types bilinmeyen parametre içeriyor: "
+                    f"{parameter_name}"
+                )
+
+            if (
+                not isinstance(type_name, str)
+                or not type_name.strip()
+            ):
+                raise ValueError(
+                    "parameter_types değerleri boş olmayan "
+                    "string değerler olmalıdır."
+                )
+
+            normalized[parameter_name] = (
+                type_name.strip().replace(" ", "")
+            )
+
+        return normalized
 
     def _apply_caught_exception_inputs(
         self,
@@ -417,13 +509,18 @@ class PathInputGenerator:
 
         denominator = division_node.right
 
-        if (
-            not isinstance(denominator, ast.Name)
-            or denominator.id not in parameter_names
-        ):
-            raise ValueError(
-                "ZeroDivisionError için bölen doğrudan bir "
-                "fonksiyon parametresi olmalıdır."
+        if not isinstance(denominator, ast.Name):
+            raise UnreachablePathError(
+                "ZeroDivisionError yolu için bölen doğrudan "
+                "kontrol edilebilir bir değişken değildir."
+            )
+
+        if denominator.id not in parameter_names:
+            raise UnreachablePathError(
+                "ZeroDivisionError yolu yerel bir böleni sıfır "
+                "yapmayı gerektiriyor ve dış girdilerle doğrudan "
+                "kontrol edilemiyor: "
+                f"{denominator.id}"
             )
 
         direct_values[denominator.id] = 0
@@ -549,10 +646,15 @@ class PathInputGenerator:
             )
 
         for loop_step in unique_loop_steps.values():
+            iteration_count = self._count_loop_iterations(
+                path=path,
+                loop_step=loop_step,
+            )
+
             if loop_step.node_type == "for":
                 self._apply_for_loop_input(
                     step=loop_step,
-                    iteration_count=path.loop_iteration_count,
+                    iteration_count=iteration_count,
                     parameter_names=parameter_names,
                     direct_values=direct_values,
                 )
@@ -562,7 +664,7 @@ class PathInputGenerator:
                 self._apply_while_loop_input(
                     path=path,
                     step=loop_step,
-                    iteration_count=path.loop_iteration_count,
+                    iteration_count=iteration_count,
                     parameter_names=parameter_names,
                     direct_values=direct_values,
                 )
@@ -571,6 +673,45 @@ class PathInputGenerator:
                 )
 
         return handled_while_node_ids
+
+    @staticmethod
+    def _count_loop_iterations(
+        *,
+        path: ExecutionPath,
+        loop_step: PathStep,
+    ) -> int:
+        """
+        Belirli bir döngü düğümünün yol üzerindeki iterasyon sayısını
+        hesaplar.
+
+        Gerçek CFG yollarında aynı döngünün tekrarları aynı ``node_id``
+        değerini taşır. Bazı birim test yardımcıları ise her ziyaret için
+        yeni kimlik ürettiğinden, kimlik eşleşmesi bulunamazsa düğüm türü
+        ve etiketi üzerinden geriye uyumlu bir eşleşme uygulanır.
+        """
+        body_edge_labels = (
+            {"Iterate"}
+            if loop_step.node_type == "for"
+            else {"True"}
+        )
+
+        iteration_count = sum(
+            path_step.node_id == loop_step.node_id
+            and path_step.outgoing_edge_label
+            in body_edge_labels
+            for path_step in path.steps
+        )
+
+        if iteration_count > 0:
+            return iteration_count
+
+        return sum(
+            path_step.node_type == loop_step.node_type
+            and path_step.node_label == loop_step.node_label
+            and path_step.outgoing_edge_label
+            in body_edge_labels
+            for path_step in path.steps
+        )
 
     @staticmethod
     def _apply_for_loop_input(
@@ -625,7 +766,11 @@ class PathInputGenerator:
         direct_values: dict[str, Any],
     ) -> None:
         """
-        Basit sayısal while döngüsü için başlangıç değeri üretir.
+        Basit sayısal while döngüsü için başlangıç durumunu çözümler.
+
+        Döngü değişkeni bir fonksiyon parametresi ise uygun test girdisi
+        üretilir. Yerel değişkense, döngüden önceki sabit Assign veya
+        AnnAssign ifadesi izlenerek yolun uygulanabilirliği doğrulanır.
 
         Desteklenen güncellemeler:
             ``x += sabit`` ve ``x -= sabit``.
@@ -645,12 +790,11 @@ class PathInputGenerator:
             node.id
             for node in ast.walk(condition_expression)
             if isinstance(node, ast.Name)
-            and node.id in parameter_names
         }
 
         if len(variable_names) != 1:
             raise ValueError(
-                "While koşulu tam olarak bir sayısal parametre "
+                "While koşulu tam olarak bir sayısal değişken "
                 "üzerinden tanımlanmalıdır: "
                 f"{step.node_label}"
             )
@@ -664,18 +808,159 @@ class PathInputGenerator:
 
         if iteration_count > 0 and update_delta is None:
             raise ValueError(
-                "While döngüsü için desteklenen bir parametre "
+                "While döngüsü için desteklenen bir değişken "
                 "güncellemesi bulunamadı."
             )
 
-        candidate = self._find_while_initial_value(
-            expression=condition_expression,
-            variable_name=variable_name,
-            iteration_count=iteration_count,
-            update_delta=update_delta or 0,
+        if variable_name in parameter_names:
+            candidate = self._find_while_initial_value(
+                expression=condition_expression,
+                variable_name=variable_name,
+                iteration_count=iteration_count,
+                update_delta=update_delta or 0,
+            )
+
+            direct_values[variable_name] = candidate
+            return
+
+        local_initial_value = (
+            self._extract_local_loop_initial_value(
+                path=path,
+                loop_step=step,
+                variable_name=variable_name,
+            )
         )
 
-        direct_values[variable_name] = candidate
+        if local_initial_value is None:
+            raise ValueError(
+                "While koşulundaki yerel değişken için döngüden "
+                "önce desteklenen bir başlangıç ataması bulunamadı: "
+                f"{variable_name}"
+            )
+
+        if not self._matches_while_iteration_count(
+            expression=condition_expression,
+            variable_name=variable_name,
+            initial_value=local_initial_value,
+            iteration_count=iteration_count,
+            update_delta=update_delta or 0,
+        ):
+            raise UnreachablePathError(
+                "Yerel while değişkeninin başlangıç değeri, CFG "
+                "yolundaki iterasyon sayısıyla uyuşmuyor: "
+                f"{variable_name}={local_initial_value!r}"
+            )
+
+    @staticmethod
+    def _extract_local_loop_initial_value(
+        *,
+        path: ExecutionPath,
+        loop_step: PathStep,
+        variable_name: str,
+    ) -> int | float | None:
+        """
+        Döngüden önceki son sabit yerel değişken atamasını döndürür.
+        """
+        initial_value: int | float | None = None
+
+        for path_step in path.steps:
+            if path_step.node_id == loop_step.node_id:
+                break
+
+            if path_step.node_type not in {
+                "Assign",
+                "AnnAssign",
+            }:
+                continue
+
+            try:
+                statement = ast.parse(
+                    path_step.node_label
+                ).body[0]
+            except SyntaxError:
+                continue
+
+            target: ast.expr
+            value_expression: ast.expr | None
+
+            if isinstance(statement, ast.Assign):
+                if len(statement.targets) != 1:
+                    continue
+
+                target = statement.targets[0]
+                value_expression = statement.value
+            elif isinstance(statement, ast.AnnAssign):
+                target = statement.target
+                value_expression = statement.value
+            else:
+                continue
+
+            if (
+                not isinstance(target, ast.Name)
+                or target.id != variable_name
+                or value_expression is None
+            ):
+                continue
+
+            try:
+                value = ast.literal_eval(
+                    value_expression
+                )
+            except (ValueError, TypeError):
+                continue
+
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+            ):
+                continue
+
+            initial_value = value
+
+        return initial_value
+
+    @staticmethod
+    def _matches_while_iteration_count(
+        *,
+        expression: ast.expr,
+        variable_name: str,
+        initial_value: int | float,
+        iteration_count: int,
+        update_delta: int | float,
+    ) -> bool:
+        """
+        Yerel başlangıç değerinin koşulu beklenen sayıda True ve
+        ardından False yapıp yapmadığını doğrular.
+        """
+        compiled_expression = compile(
+            ast.Expression(body=expression),
+            filename="<while-condition>",
+            mode="eval",
+        )
+
+        current_value: int | float = initial_value
+
+        for _ in range(iteration_count):
+            condition_result = bool(
+                eval(
+                    compiled_expression,
+                    {"__builtins__": {}},
+                    {variable_name: current_value},
+                )
+            )
+
+            if not condition_result:
+                return False
+
+            current_value += update_delta
+
+        return not bool(
+            eval(
+                compiled_expression,
+                {"__builtins__": {}},
+                {variable_name: current_value},
+            )
+        )
 
     @staticmethod
     def _extract_loop_update_delta(
@@ -983,6 +1268,13 @@ class PathInputGenerator:
             normalized_operator = operator
 
         elif isinstance(right, ast.Name):
+            if isinstance(operator, (ast.In, ast.NotIn)):
+                raise ValueError(
+                    "Üyelik karşılaştırmasında değişken sol tarafta "
+                    "olmalıdır: "
+                    f"{original_expression}"
+                )
+
             variable_name = right.id
             value = self._extract_literal(left)
             normalized_operator = self._reverse_operator(operator)
@@ -1112,6 +1404,59 @@ class PathInputGenerator:
 
             return result
 
+        if isinstance(operator, ast.In):
+            allowed_values = self._normalize_membership_values(
+                value
+            )
+
+            if current.allowed_values is None:
+                merged_allowed_values = allowed_values
+            else:
+                merged_allowed_values = tuple(
+                    candidate
+                    for candidate in current.allowed_values
+                    if candidate in allowed_values
+                )
+
+            merged_allowed_values = tuple(
+                candidate
+                for candidate in merged_allowed_values
+                if candidate not in current.forbidden_values
+            )
+
+            if not merged_allowed_values:
+                raise UnreachablePathError(
+                    "Üyelik kısıtları ortak bir değer içermiyor."
+                )
+
+            result = replace(
+                current,
+                allowed_values=merged_allowed_values,
+            )
+
+            self._validate_constraint_consistency(result)
+            return result
+
+        if isinstance(operator, ast.NotIn):
+            forbidden_members = self._normalize_membership_values(
+                value
+            )
+
+            result = replace(
+                current,
+                forbidden_values=tuple(
+                    dict.fromkeys(
+                        (
+                            *current.forbidden_values,
+                            *forbidden_members,
+                        )
+                    )
+                ),
+            )
+
+            self._validate_constraint_consistency(result)
+            return result
+
         if not isinstance(value, (int, float)) or isinstance(
             value,
             bool,
@@ -1152,6 +1497,29 @@ class PathInputGenerator:
         raise ValueError(
             "Desteklenmeyen karşılaştırma operatörü."
         )
+
+    @staticmethod
+    def _normalize_membership_values(
+        value: Any,
+    ) -> tuple[Any, ...]:
+        """
+        ``in`` ve ``not in`` karşılaştırmalarındaki sabit koleksiyonu
+        kararlı bir tuple biçimine dönüştürür.
+        """
+        if isinstance(value, (tuple, list, set, frozenset)):
+            normalized = tuple(value)
+        else:
+            raise ValueError(
+                "Üyelik karşılaştırmasının sağ tarafı sabit bir "
+                "koleksiyon olmalıdır."
+            )
+
+        if not normalized:
+            raise UnreachablePathError(
+                "Boş koleksiyon için üyelik kısıtı sağlanamaz."
+            )
+
+        return normalized
 
     @staticmethod
     def _merge_minimum(
@@ -1227,6 +1595,14 @@ class PathInputGenerator:
                     "Eşitlik ve eşitsizlik kısıtları çelişiyor."
                 )
 
+            if (
+                constraint.allowed_values is not None
+                and equal_value not in constraint.allowed_values
+            ):
+                raise UnreachablePathError(
+                    "Eşitlik değeri üyelik kısıtını sağlamıyor."
+                )
+
             if isinstance(equal_value, bool):
                 if (
                     constraint.minimum is not None
@@ -1267,6 +1643,37 @@ class PathInputGenerator:
                     "Eşitlik değeri maksimum kısıtını sağlamıyor."
                 )
 
+        if constraint.allowed_values is not None:
+            valid_allowed_values = tuple(
+                value
+                for value in constraint.allowed_values
+                if (
+                    value not in constraint.forbidden_values
+                    and (
+                        not isinstance(value, bool)
+                        and isinstance(value, (int, float))
+                        and PathInputGenerator._satisfies_minimum(
+                            value=value,
+                            constraint=constraint,
+                        )
+                        and PathInputGenerator._satisfies_maximum(
+                            value=value,
+                            constraint=constraint,
+                        )
+                        or (
+                            constraint.minimum is None
+                            and constraint.maximum is None
+                        )
+                    )
+                )
+            )
+
+            if not valid_allowed_values:
+                raise UnreachablePathError(
+                    "Üyelik kısıtındaki hiçbir değer diğer "
+                    "kısıtları sağlamıyor."
+                )
+
         if (
             constraint.minimum is not None
             and constraint.maximum is not None
@@ -1305,23 +1712,617 @@ class PathInputGenerator:
                 "Belirlenen aralık geçerli bir değer içermiyor."
             )
 
+    def _apply_loop_variable_constraints(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str],
+        constraints: dict[str, _VariableConstraint],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """
+        ``for item in items`` yapısındaki yerel döngü değişkeni
+        üzerinde çıkarılan kısıtları iterable parametresinin
+        elemanlarına geri yansıtır.
+        """
+        processed_loop_nodes: set[int] = set()
+
+        for step in path.loop_steps:
+            if (
+                step.node_type != "for"
+                or step.node_id in processed_loop_nodes
+            ):
+                continue
+
+            processed_loop_nodes.add(step.node_id)
+
+            binding = self._extract_for_loop_binding(
+                step=step,
+                parameter_names=parameter_names,
+            )
+
+            if binding is None:
+                continue
+
+            loop_variable, iterable_name = binding
+            loop_constraint = constraints.get(loop_variable)
+
+            if loop_constraint is None:
+                continue
+
+            existing_value = direct_values.get(iterable_name)
+
+            if existing_value is None:
+                continue
+
+            if isinstance(existing_value, list):
+                iterable_values = list(existing_value)
+                restore_as_tuple = False
+            elif isinstance(existing_value, tuple):
+                iterable_values = list(existing_value)
+                restore_as_tuple = True
+            else:
+                raise UnreachablePathError(
+                    "For döngüsü iterable değeri indekslenebilir "
+                    "bir koleksiyon olmalıdır: "
+                    f"{iterable_name}={existing_value!r}"
+                )
+
+            element_type = self._extract_element_type(
+                parameter_types.get(iterable_name)
+            )
+
+            element_value = self._create_parameter_value(
+                parameter_name=loop_variable,
+                constraint=loop_constraint,
+                parameter_type=element_type,
+            )
+
+            iterable_values = [
+                element_value
+                for _ in iterable_values
+            ]
+
+            direct_values[iterable_name] = (
+                tuple(iterable_values)
+                if restore_as_tuple
+                else iterable_values
+            )
+
+    @staticmethod
+    def _extract_for_loop_binding(
+        *,
+        step: PathStep,
+        parameter_names: tuple[str, ...],
+    ) -> tuple[str, str] | None:
+        """
+        ``item in items`` biçimindeki CFG etiketinden döngü
+        değişkeni ve iterable parametresini çıkarır.
+        """
+        try:
+            target_text, iterable_text = step.node_label.split(
+                " in ",
+                maxsplit=1,
+            )
+            target_expression = ast.parse(
+                target_text,
+                mode="eval",
+            ).body
+            iterable_expression = ast.parse(
+                iterable_text,
+                mode="eval",
+            ).body
+        except (ValueError, SyntaxError):
+            return None
+
+        if (
+            not isinstance(target_expression, ast.Name)
+            or not isinstance(iterable_expression, ast.Name)
+            or iterable_expression.id not in parameter_names
+        ):
+            return None
+
+        return (
+            target_expression.id,
+            iterable_expression.id,
+        )
+
+    def _apply_local_alias_constraints(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str],
+        constraints: dict[str, _VariableConstraint],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """
+        Yerel değişkene atanmış parametre alt elemanı üzerindeki
+        kısıtları asıl fonksiyon parametresine geri yansıtır.
+
+        Desteklenen temel biçim:
+
+            local_value = parameter[index]
+
+        Örneğin ``first_item = items[0]`` sonrasında
+        ``first_item < 0`` koşulu varsa ``items[0]`` için negatif
+        bir değer üretilir. Böylece dışarıdan gelen kaynak kodda
+        yerel takma adlar kullanılsa dahi hedef yürütme yoluna
+        ulaşılabilir.
+        """
+        for step in path.steps:
+            if step.node_type not in {
+                "Assign",
+                "AnnAssign",
+            }:
+                continue
+
+            binding = self._extract_subscript_alias_binding(
+                step=step,
+                parameter_names=parameter_names,
+            )
+
+            if binding is None:
+                continue
+
+            (
+                local_name,
+                parameter_name,
+                index_value,
+            ) = binding
+
+            local_constraint = constraints.get(local_name)
+
+            if local_constraint is None:
+                continue
+
+            parameter_type = parameter_types.get(
+                parameter_name
+            )
+            element_type = self._extract_element_type(
+                parameter_type
+            )
+
+            element_value = self._create_parameter_value(
+                parameter_name=local_name,
+                constraint=local_constraint,
+                parameter_type=element_type,
+            )
+
+            existing_value = direct_values.get(
+                parameter_name
+            )
+
+            if existing_value is None:
+                collection_values: list[Any] = []
+                restore_as_tuple = self._is_tuple_type(
+                    parameter_type
+                )
+            elif isinstance(existing_value, list):
+                collection_values = list(existing_value)
+                restore_as_tuple = False
+            elif isinstance(existing_value, tuple):
+                collection_values = list(existing_value)
+                restore_as_tuple = True
+            else:
+                raise UnreachablePathError(
+                    "Yerel alt eleman kısıtı, indekslenebilir "
+                    "olmayan doğrudan parametre değeriyle "
+                    "çelişiyor: "
+                    f"{parameter_name}={existing_value!r}"
+                )
+
+            default_element = self._create_default_typed_value(
+                element_type
+            )
+
+            while len(collection_values) <= index_value:
+                collection_values.append(default_element)
+
+            collection_values[index_value] = element_value
+
+            direct_values[parameter_name] = (
+                tuple(collection_values)
+                if restore_as_tuple
+                else collection_values
+            )
+
+    @staticmethod
+    def _extract_subscript_alias_binding(
+        *,
+        step: PathStep,
+        parameter_names: tuple[str, ...],
+    ) -> tuple[str, str, int] | None:
+        """
+        ``local = parameter[index]`` atamasını çözümler.
+        """
+        try:
+            statement = ast.parse(
+                step.node_label
+            ).body[0]
+        except (SyntaxError, IndexError):
+            return None
+
+        target: ast.expr
+        value: ast.expr | None
+
+        if isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1:
+                return None
+
+            target = statement.targets[0]
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target = statement.target
+            value = statement.value
+        else:
+            return None
+
+        if (
+            not isinstance(target, ast.Name)
+            or not isinstance(value, ast.Subscript)
+            or not isinstance(value.value, ast.Name)
+            or value.value.id not in parameter_names
+        ):
+            return None
+
+        try:
+            index_value = ast.literal_eval(value.slice)
+        except (ValueError, TypeError):
+            return None
+
+        if (
+            not isinstance(index_value, int)
+            or isinstance(index_value, bool)
+            or index_value < 0
+        ):
+            return None
+
+        return (
+            target.id,
+            value.value.id,
+            index_value,
+        )
+
+    @staticmethod
+    def _extract_element_type(
+        parameter_type: str | None,
+    ) -> str | None:
+        """
+        ``list[int]`` veya ``tuple[str, ...]`` benzeri bir
+        anotasyondan eleman tipini çıkarır.
+        """
+        if parameter_type is None:
+            return None
+
+        normalized = parameter_type.strip().replace(
+            " ",
+            "",
+        )
+
+        prefixes = (
+            "list[",
+            "typing.List[",
+            "tuple[",
+            "typing.Tuple[",
+        )
+
+        for prefix in prefixes:
+            if not normalized.startswith(prefix):
+                continue
+
+            inner = normalized[
+                len(prefix):-1
+            ]
+
+            return inner.split(",", maxsplit=1)[0]
+
+        return None
+
+    @staticmethod
+    def _is_tuple_type(
+        parameter_type: str | None,
+    ) -> bool:
+        if parameter_type is None:
+            return False
+
+        normalized = parameter_type.strip().replace(
+            " ",
+            "",
+        )
+
+        return (
+            normalized == "tuple"
+            or normalized.startswith("tuple[")
+            or normalized.startswith("typing.Tuple[")
+        )
+
+    def _validate_collection_alias_constraints(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        constraints: dict[str, _VariableConstraint],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """
+        ``local = parameter[index]`` ilişkilerinin nihai koleksiyon
+        değeriyle hâlâ uyumlu olduğunu doğrular.
+
+        Yerel alias kısıtı uygulandıktan sonra for-döngüsü eleman
+        üretimi aynı koleksiyon değerini değiştirebilir. Bu kontrol,
+        aynı elemanın birbiriyle çelişen iki koşulu sağlamaya
+        zorlandığı yolları ulaşılamaz olarak işaretler.
+        """
+        for step in path.steps:
+            binding = self._extract_subscript_alias_binding(
+                step=step,
+                parameter_names=parameter_names,
+            )
+
+            if binding is None:
+                continue
+
+            (
+                local_name,
+                parameter_name,
+                index_value,
+            ) = binding
+
+            local_constraint = constraints.get(local_name)
+
+            if local_constraint is None:
+                continue
+
+            collection_value = direct_values.get(
+                parameter_name
+            )
+
+            if not isinstance(
+                collection_value,
+                (list, tuple),
+            ):
+                raise UnreachablePathError(
+                    "Yerel alt eleman kısıtı için indekslenebilir "
+                    "bir koleksiyon üretilemedi: "
+                    f"{parameter_name}={collection_value!r}"
+                )
+
+            if index_value >= len(collection_value):
+                raise UnreachablePathError(
+                    "Yerel alt eleman kısıtının gerektirdiği indeks "
+                    "üretilen koleksiyonda bulunmuyor: "
+                    f"{parameter_name}[{index_value}]"
+                )
+
+            element_value = collection_value[index_value]
+
+            if not self._value_satisfies_constraint(
+                value=element_value,
+                constraint=local_constraint,
+            ):
+                raise UnreachablePathError(
+                    "Aynı koleksiyon elemanı için çıkarılan alias "
+                    "ve döngü kısıtları çelişiyor: "
+                    f"{parameter_name}[{index_value}]="
+                    f"{element_value!r}"
+                )
+
+    @classmethod
+    def _value_satisfies_constraint(
+        cls,
+        *,
+        value: Any,
+        constraint: _VariableConstraint,
+    ) -> bool:
+        """Somut bir değerin tüm değişken kısıtlarını sağlayıp sağlamadığını döndürür."""
+        if constraint.has_equal_value:
+            expected_value = constraint.equal_value
+
+            if isinstance(expected_value, bool):
+                if bool(value) is not expected_value:
+                    return False
+            elif value != expected_value:
+                return False
+
+        if value in constraint.forbidden_values:
+            return False
+
+        if (
+            constraint.allowed_values is not None
+            and value not in constraint.allowed_values
+        ):
+            return False
+
+        if (
+            constraint.minimum is not None
+            or constraint.maximum is not None
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+            ):
+                return False
+
+            if not cls._satisfies_minimum(
+                value=value,
+                constraint=constraint,
+            ):
+                return False
+
+            if not cls._satisfies_maximum(
+                value=value,
+                constraint=constraint,
+            ):
+                return False
+
+        return True
+
+    def _validate_direct_values_against_constraints(
+        self,
+        *,
+        direct_values: dict[str, Any],
+        constraints: dict[str, _VariableConstraint],
+    ) -> None:
+        """
+        Döngü veya exception çözümlemesinden gelen doğrudan
+        değerlerin, aynı yürütme yolundaki koşul kısıtlarıyla
+        uyumlu olduğunu doğrular.
+        """
+        for variable_name, direct_value in direct_values.items():
+            constraint = constraints.get(variable_name)
+
+            if constraint is None:
+                continue
+
+            if constraint.has_equal_value:
+                expected_value = constraint.equal_value
+
+                if isinstance(expected_value, bool):
+                    if bool(direct_value) is not expected_value:
+                        raise UnreachablePathError(
+                            "Doğrudan üretilen değer, Boolean yol "
+                            "kısıtıyla çelişiyor: "
+                            f"{variable_name}={direct_value!r}, "
+                            f"beklenen doğruluk={expected_value}"
+                        )
+                elif direct_value != expected_value:
+                    raise UnreachablePathError(
+                        "Doğrudan üretilen değer eşitlik "
+                        "kısıtıyla çelişiyor: "
+                        f"{variable_name}={direct_value!r}, "
+                        f"beklenen={expected_value!r}"
+                    )
+
+            if direct_value in constraint.forbidden_values:
+                raise UnreachablePathError(
+                    "Doğrudan üretilen değer eşitsizlik "
+                    "kısıtıyla yasaklanıyor: "
+                    f"{variable_name}={direct_value!r}"
+                )
+
+            if (
+                constraint.allowed_values is not None
+                and direct_value not in constraint.allowed_values
+            ):
+                raise UnreachablePathError(
+                    "Doğrudan üretilen değer üyelik "
+                    "kısıtını sağlamıyor: "
+                    f"{variable_name}={direct_value!r}"
+                )
+
+            if (
+                isinstance(direct_value, (int, float))
+                and not isinstance(direct_value, bool)
+            ):
+                if not self._satisfies_minimum(
+                    value=direct_value,
+                    constraint=constraint,
+                ):
+                    raise UnreachablePathError(
+                        "Doğrudan üretilen değer minimum "
+                        "kısıtını sağlamıyor: "
+                        f"{variable_name}={direct_value!r}"
+                    )
+
+                if not self._satisfies_maximum(
+                    value=direct_value,
+                    constraint=constraint,
+                ):
+                    raise UnreachablePathError(
+                        "Doğrudan üretilen değer maksimum "
+                        "kısıtını sağlamıyor: "
+                        f"{variable_name}={direct_value!r}"
+                    )
+
     def _create_parameter_value(
         self,
         parameter_name: str,
         constraint: _VariableConstraint | None,
+        parameter_type: str | None = None,
     ) -> Any:
         """
         Parametre kısıtından somut bir test değeri seçer.
         """
         if constraint is None:
-            return 0
+            return self._create_default_typed_value(
+                parameter_type
+            )
 
         if constraint.has_equal_value:
             self._validate_constraint_consistency(
                 constraint
             )
 
+            if isinstance(
+                constraint.equal_value,
+                bool,
+            ):
+                return self._create_typed_boolean_value(
+                    desired_value=constraint.equal_value,
+                    parameter_type=parameter_type,
+                )
+
             return constraint.equal_value
+
+        if constraint.allowed_values is not None:
+            self._validate_constraint_consistency(
+                constraint
+            )
+
+            for candidate in constraint.allowed_values:
+                if candidate in constraint.forbidden_values:
+                    continue
+
+                if isinstance(candidate, bool):
+                    if (
+                        constraint.minimum is None
+                        and constraint.maximum is None
+                    ):
+                        return candidate
+                    continue
+
+                if isinstance(candidate, (int, float)):
+                    if (
+                        self._satisfies_minimum(
+                            value=candidate,
+                            constraint=constraint,
+                        )
+                        and self._satisfies_maximum(
+                            value=candidate,
+                            constraint=constraint,
+                        )
+                    ):
+                        return candidate
+                    continue
+
+                if (
+                    constraint.minimum is None
+                    and constraint.maximum is None
+                ):
+                    return candidate
+
+            raise ValueError(
+                f"{parameter_name} için üyelik kısıtına uygun "
+                "değer üretilemedi."
+            )
+
+        if (
+            constraint.minimum is None
+            and constraint.maximum is None
+            and constraint.forbidden_values
+            and any(
+                not isinstance(value, (int, float, bool))
+                for value in constraint.forbidden_values
+            )
+        ):
+            candidate = "__generated_value__"
+
+            while candidate in constraint.forbidden_values:
+                candidate += "_x"
+
+            return candidate
 
         value = self._select_numeric_value(constraint)
 
@@ -1338,6 +2339,209 @@ class PathInputGenerator:
                 )
 
         return value
+
+    @staticmethod
+    def _coerce_value_to_parameter_type(
+        *,
+        value: Any,
+        parameter_type: str | None,
+    ) -> Any:
+        """
+        Üretilen değeri fonksiyon parametresinin type hint
+        ifadesiyle uyumlu koleksiyon türüne dönüştürür.
+
+        Kısıt çözümleme sırasında koleksiyonlar kolay değiştirilebilmesi
+        için geçici olarak list biçiminde tutulabilir. Bu metot,
+        ``GeneratedTestInput`` oluşturulmadan önce gerçek parametre
+        türünü geri yükler.
+        """
+        if parameter_type is None:
+            return value
+
+        normalized = parameter_type.strip().replace(
+            " ",
+            "",
+        )
+
+        if (
+            normalized == "tuple"
+            or normalized.startswith("tuple[")
+            or normalized.startswith("typing.Tuple[")
+        ):
+            if isinstance(value, tuple):
+                return value
+
+            if isinstance(
+                value,
+                (list, set, frozenset),
+            ):
+                return tuple(value)
+
+            raise UnreachablePathError(
+                "Tuple parametresi için iterable olmayan değer "
+                "üretildi: "
+                f"{value!r}"
+            )
+
+        if (
+            normalized == "list"
+            or normalized.startswith("list[")
+            or normalized.startswith("typing.List[")
+        ):
+            if isinstance(value, list):
+                return value
+
+            if isinstance(
+                value,
+                (tuple, set, frozenset),
+            ):
+                return list(value)
+
+            raise UnreachablePathError(
+                "List parametresi için iterable olmayan değer "
+                "üretildi: "
+                f"{value!r}"
+            )
+
+        if (
+            normalized == "set"
+            or normalized.startswith("set[")
+            or normalized.startswith("typing.Set[")
+        ):
+            if isinstance(value, set):
+                return value
+
+            if isinstance(
+                value,
+                (list, tuple, frozenset),
+            ):
+                return set(value)
+
+            raise UnreachablePathError(
+                "Set parametresi için iterable olmayan değer "
+                "üretildi: "
+                f"{value!r}"
+            )
+
+        if (
+            normalized == "frozenset"
+            or normalized.startswith("frozenset[")
+            or normalized.startswith("typing.FrozenSet[")
+        ):
+            if isinstance(value, frozenset):
+                return value
+
+            if isinstance(
+                value,
+                (list, tuple, set),
+            ):
+                return frozenset(value)
+
+            raise UnreachablePathError(
+                "Frozenset parametresi için iterable olmayan "
+                "değer üretildi: "
+                f"{value!r}"
+            )
+
+        return value
+
+    @staticmethod
+    def _create_default_typed_value(
+        parameter_type: str | None,
+    ) -> Any:
+        """Type hint bilgisine göre güvenli varsayılan değer üretir."""
+        normalized = parameter_type or ""
+
+        if normalized in {"str", "builtins.str"}:
+            return ""
+
+        if normalized in {"float", "builtins.float"}:
+            return 0.0
+
+        if normalized in {"bool", "builtins.bool"}:
+            return False
+
+        if (
+            normalized == "list"
+            or normalized.startswith("list[")
+            or normalized.startswith("typing.List[")
+        ):
+            return []
+
+        if (
+            normalized == "tuple"
+            or normalized.startswith("tuple[")
+            or normalized.startswith("typing.Tuple[")
+        ):
+            return ()
+
+        if (
+            normalized == "dict"
+            or normalized.startswith("dict[")
+            or normalized.startswith("typing.Dict[")
+        ):
+            return {}
+
+        if (
+            normalized == "set"
+            or normalized.startswith("set[")
+            or normalized.startswith("typing.Set[")
+        ):
+            return set()
+
+        return 0
+
+    @classmethod
+    def _create_typed_boolean_value(
+        cls,
+        *,
+        desired_value: bool,
+        parameter_type: str | None,
+    ) -> Any:
+        """
+        Bir doğruluk koşulunu parametrenin gerçek tipine uygun
+        somut değere dönüştürür.
+        """
+        normalized = parameter_type or ""
+
+        if (
+            normalized == "list"
+            or normalized.startswith("list[")
+            or normalized.startswith("typing.List[")
+        ):
+            return [0] if desired_value else []
+
+        if (
+            normalized == "tuple"
+            or normalized.startswith("tuple[")
+            or normalized.startswith("typing.Tuple[")
+        ):
+            return (0,) if desired_value else ()
+
+        if (
+            normalized == "dict"
+            or normalized.startswith("dict[")
+            or normalized.startswith("typing.Dict[")
+        ):
+            return {"key": 0} if desired_value else {}
+
+        if (
+            normalized == "set"
+            or normalized.startswith("set[")
+            or normalized.startswith("typing.Set[")
+        ):
+            return {0} if desired_value else set()
+
+        if normalized in {"str", "builtins.str"}:
+            return "value" if desired_value else ""
+
+        if normalized in {"int", "builtins.int"}:
+            return 1 if desired_value else 0
+
+        if normalized in {"float", "builtins.float"}:
+            return 1.0 if desired_value else 0.0
+
+        return desired_value
 
     @staticmethod
     def _select_numeric_value(
@@ -1927,6 +3131,8 @@ class PathInputGenerator:
             ast.GtE: ast.Lt,
             ast.Lt: ast.GtE,
             ast.LtE: ast.Gt,
+            ast.In: ast.NotIn,
+            ast.NotIn: ast.In,
         }
 
         operator_type = type(operator)

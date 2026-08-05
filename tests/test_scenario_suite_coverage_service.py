@@ -24,8 +24,11 @@ def create_scenario(
     scenario_id: str,
     path_index: int,
     priority_rank: int,
-    score: int,
-    expected_result: str,
+    score: int = 0,
+    expected_result: object = None,
+    keyword_arguments: (
+        tuple[tuple[str, object], ...] | None
+    ) = None,
 ) -> Scenario:
     """Testlerde kullanılacak örnek Scenario nesnesini oluşturur."""
     return Scenario(
@@ -40,7 +43,11 @@ def create_scenario(
         contains_loop=False,
         contains_exception=False,
         description="Scenario suite coverage testi.",
-        keyword_arguments=(("score", score),),
+        keyword_arguments=(
+            keyword_arguments
+            if keyword_arguments is not None
+            else (("score", score),)
+        ),
         expected_result=expected_result,
         expected_exception=None,
     )
@@ -420,7 +427,7 @@ def test_measure_scenarios_rejects_invalid_scenario_item(
         )
 
 
-def test_measure_scenarios_rejects_duplicate_scenarios(
+def test_measure_scenarios_rejects_duplicate_scenario_ids(
     tmp_path: Path,
 ) -> None:
     source_file = create_source_file(tmp_path)
@@ -432,7 +439,7 @@ def test_measure_scenarios_rejects_duplicate_scenarios(
         ValueError,
         match=(
             "scenarios tekrar eden "
-            "Scenario içeremez"
+            "scenario_id içeremez"
         ),
     ):
         service.measure_scenarios(
@@ -707,4 +714,144 @@ def test_measure_scenarios_rejects_invalid_function_range(
             output_directory=tmp_path,
             function_start_line=5,
             function_end_line=2,
+        )
+
+
+def test_measure_scenarios_accepts_list_argument_in_scenario(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+
+    scenario = create_scenario(
+        scenario_id="list_scenario_001",
+        path_index=1,
+        priority_rank=1,
+        keyword_arguments=(
+            ("items", [10, 20, 30]),
+        ),
+        expected_result="Başarılı",
+    )
+
+    (
+        pytest_generator,
+        file_writer,
+        coverage_service,
+        coverage_result,
+    ) = create_dependencies(tmp_path)
+
+    service = ScenarioSuiteCoverageService(
+        pytest_generator=pytest_generator,
+        file_writer=file_writer,
+        coverage_service=coverage_service,
+    )
+
+    result = service.measure_scenarios(
+        source_file=source_file,
+        module_path="datasets.sample_code",
+        function_name="calculate_score",
+        scenarios=(scenario,),
+        output_directory=tmp_path,
+    )
+
+    assert result.scenarios == (scenario,)
+    assert result.coverage is coverage_result
+
+    pytest_generator.generate.assert_called_once_with(
+        module_path="datasets.sample_code",
+        function_name="calculate_score",
+        scenarios=(scenario,),
+    )
+
+
+def test_measure_scenarios_accepts_dictionary_values(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+
+    scenario = create_scenario(
+        scenario_id="dictionary_scenario_001",
+        path_index=1,
+        priority_rank=1,
+        keyword_arguments=(
+            (
+                "payload",
+                {
+                    "score": 85,
+                    "items": [1, 2],
+                },
+            ),
+        ),
+        expected_result={
+            "status": "accepted",
+            "tags": ["high", "priority"],
+        },
+    )
+
+    (
+        pytest_generator,
+        file_writer,
+        coverage_service,
+        coverage_result,
+    ) = create_dependencies(tmp_path)
+
+    service = ScenarioSuiteCoverageService(
+        pytest_generator=pytest_generator,
+        file_writer=file_writer,
+        coverage_service=coverage_service,
+    )
+
+    result = service.measure_scenarios(
+        source_file=source_file,
+        module_path="datasets.sample_code",
+        function_name="calculate_score",
+        scenarios=(scenario,),
+        output_directory=tmp_path,
+    )
+
+    assert result.scenario_count == 1
+    assert result.coverage is coverage_result
+
+
+def test_measure_scenarios_rejects_different_scenarios_with_same_id(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+    service = ScenarioSuiteCoverageService()
+
+    first_scenario = create_scenario(
+        scenario_id="duplicate_id",
+        path_index=1,
+        priority_rank=1,
+        keyword_arguments=(
+            ("items", [1]),
+        ),
+        expected_result="Birinci",
+    )
+
+    second_scenario = create_scenario(
+        scenario_id="duplicate_id",
+        path_index=2,
+        priority_rank=2,
+        keyword_arguments=(
+            ("items", [2]),
+        ),
+        expected_result="İkinci",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "scenarios tekrar eden "
+            "scenario_id içeremez"
+        ),
+    ):
+        service.measure_scenarios(
+            source_file=source_file,
+            module_path="datasets.sample_code",
+            function_name="calculate_score",
+            scenarios=(
+                first_scenario,
+                second_scenario,
+            ),
+            output_directory=tmp_path,
         )

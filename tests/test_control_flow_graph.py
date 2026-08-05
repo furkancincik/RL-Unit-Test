@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.path_analyzer import CFGPathAnalyzer
 
 
 SOURCE_FILE = "datasets/sample_code.py"
@@ -263,5 +264,150 @@ def first_item(values: list[int]) -> int | None:
         edge.source_id == assignment_node.node_id
         and edge.target_id == except_node.node_id
         and edge.label == "Exception"
+        for edge in graph.edges
+    )
+
+
+def test_continue_returns_directly_to_for_node(
+    tmp_path: Path,
+) -> None:
+    """Continue düğümünün doğrudan ilgili for düğümüne döndüğünü doğrular."""
+    source_file = tmp_path / "continue_example.py"
+    source_file.write_text(
+        """
+def count_valid(items: list[int]) -> int:
+    count = 0
+
+    for item in items:
+        if item < 0:
+            continue
+
+        count += 1
+
+    return count
+""".strip(),
+        encoding="utf-8",
+    )
+
+    graph = ControlFlowGraphBuilder().build_from_file(
+        source_file
+    )[0]
+
+    for_node = next(
+        node
+        for node in graph.nodes
+        if node.node_type == "for"
+    )
+    continue_node = next(
+        node
+        for node in graph.nodes
+        if node.node_type == "continue"
+    )
+    increment_node = next(
+        node
+        for node in graph.nodes
+        if node.node_type == "AugAssign"
+    )
+
+    assert any(
+        edge.source_id == continue_node.node_id
+        and edge.target_id == for_node.node_id
+        and edge.label == "Continue"
+        for edge in graph.edges
+    )
+
+    assert not any(
+        edge.source_id == continue_node.node_id
+        and edge.target_id == increment_node.node_id
+        for edge in graph.edges
+    )
+
+
+def test_paths_do_not_continue_after_continue_statement(
+    tmp_path: Path,
+) -> None:
+    """
+    Continue sonrasında aynı iterasyondaki return ifadesine
+    doğrudan geçilmediğini doğrular.
+    """
+    source_file = tmp_path / "continue_path_example.py"
+    source_file.write_text(
+        """
+def classify(items: list[int]) -> str:
+    for item in items:
+        if item < 0:
+            continue
+
+        return "non-negative"
+
+    return "finished"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    graph = ControlFlowGraphBuilder().build_from_file(
+        source_file
+    )[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+
+    for path in paths:
+        steps = path.steps
+
+        for index, step in enumerate(steps):
+            if (
+                step.node_type != "continue"
+                or index + 1 >= len(steps)
+            ):
+                continue
+
+            next_step = steps[index + 1]
+
+            assert next_step.node_type == "for"
+            assert (
+                step.outgoing_edge_label
+                == "Continue"
+            )
+
+def test_nested_if_continue_returns_to_loop(
+    tmp_path: Path,
+) -> None:
+    """İç içe if içindeki continue ifadesinin doğru döngüye döndüğünü doğrular."""
+    source_file = tmp_path / "nested_continue.py"
+    source_file.write_text(
+        """
+def process(items: list[int]) -> int:
+    total = 0
+
+    for item in items:
+        if item < 0:
+            if item < -10:
+                continue
+
+        total += item
+
+    return total
+""".strip(),
+        encoding="utf-8",
+    )
+
+    graph = ControlFlowGraphBuilder().build_from_file(
+        source_file
+    )[0]
+
+    continue_node = next(
+        node
+        for node in graph.nodes
+        if node.node_type == "continue"
+    )
+    for_node = next(
+        node
+        for node in graph.nodes
+        if node.node_type == "for"
+    )
+
+    assert any(
+        edge.source_id == continue_node.node_id
+        and edge.target_id == for_node.node_id
+        and edge.label == "Continue"
         for edge in graph.edges
     )

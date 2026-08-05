@@ -259,9 +259,33 @@ class ScenarioSuiteCoverageTransition:
         if not suite_result.success:
             self._selected_scenarios.pop()
 
+            coverage_result = suite_result.coverage
+
+            if isinstance(
+                coverage_result,
+                FunctionCoverageResult,
+            ):
+                file_coverage = coverage_result.file_coverage
+                test_exit_code = coverage_result.test_exit_code
+            else:
+                file_coverage = coverage_result
+                test_exit_code = coverage_result.test_exit_code
+
+            scenario_ids = ", ".join(
+                selected_scenario.scenario_id
+                for selected_scenario in suite_result.scenarios
+            )
+
             raise RuntimeError(
                 "Seçilen senaryo paketinin coverage işlemi "
-                "başarısız oldu."
+                "başarısız oldu. "
+                f"Pytest çıkış kodu: {test_exit_code}. "
+                f"Test dosyası: {suite_result.test_file}. "
+                f"Kaynak dosya: {file_coverage.source_file}. "
+                f"Senaryolar: {scenario_ids}. "
+                "Gerçek pytest hatasını görmek için şu komutu "
+                "çalıştırın: "
+                f"pytest {suite_result.test_file} -x -vv"
             )
 
         self._last_coverage_result = suite_result.coverage

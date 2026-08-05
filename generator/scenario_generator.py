@@ -142,6 +142,7 @@ class ScenarioGenerator:
         paths: list[ExecutionPath],
         scores: list[DQMScore],
         parameter_names: tuple[str, ...] = (),
+        parameter_types: dict[str, str] | None = None,
     ) -> list[Scenario]:
         """
         Bir fonksiyona ait yürütme yollarını test senaryolarına
@@ -184,6 +185,12 @@ class ScenarioGenerator:
         self._validate_paths(paths)
         self._validate_scores(scores)
         self._validate_parameter_names(parameter_names)
+        normalized_parameter_types = (
+            self._normalize_parameter_types(
+                parameter_types=parameter_types,
+                parameter_names=parameter_names,
+            )
+        )
 
         scenarios: list[Scenario] = []
         skipped_path_indices: list[int] = []
@@ -199,6 +206,7 @@ class ScenarioGenerator:
                     self._path_input_generator.generate(
                         path=path,
                         parameter_names=parameter_names,
+                        parameter_types=normalized_parameter_types,
                     )
                 )
             except UnreachablePathError:
@@ -350,6 +358,52 @@ class ScenarioGenerator:
             raise ValueError(
                 "parameter_names tekrar eden değer içeremez."
             )
+
+    @staticmethod
+    def _normalize_parameter_types(
+        *,
+        parameter_types: dict[str, str] | None,
+        parameter_names: tuple[str, ...],
+    ) -> dict[str, str]:
+        """Parametre type hint eşlemesini doğrular."""
+        if parameter_types is None:
+            return {}
+
+        if not isinstance(parameter_types, dict):
+            raise TypeError(
+                "parameter_types bir dict veya None olmalıdır."
+            )
+
+        normalized: dict[str, str] = {}
+
+        for parameter_name, type_name in parameter_types.items():
+            if (
+                not isinstance(parameter_name, str)
+                or not parameter_name.strip()
+            ):
+                raise ValueError(
+                    "parameter_types anahtarları boş olmayan "
+                    "string değerler olmalıdır."
+                )
+
+            if parameter_name not in parameter_names:
+                raise ValueError(
+                    "parameter_types bilinmeyen parametre içeriyor: "
+                    f"{parameter_name}"
+                )
+
+            if (
+                not isinstance(type_name, str)
+                or not type_name.strip()
+            ):
+                raise ValueError(
+                    "parameter_types değerleri boş olmayan "
+                    "string değerler olmalıdır."
+                )
+
+            normalized[parameter_name] = type_name.strip()
+
+        return normalized
 
     @staticmethod
     def _get_path(

@@ -117,6 +117,7 @@ class ControlFlowGraphBuilder:
         statements: list[ast.stmt],
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
+        continue_target_id: int | None = None,
     ) -> list[tuple[int, str | None]]:
         """
         Bir kod bloÄŸundaki ifadeleri sÄ±rayla CFG'ye ekler.
@@ -135,6 +136,7 @@ class ControlFlowGraphBuilder:
                     statement=statement,
                     incoming_paths=current_paths,
                     end_node_id=end_node_id,
+                    continue_target_id=continue_target_id,
                 )
                 continue
 
@@ -159,7 +161,35 @@ class ControlFlowGraphBuilder:
                     statement=statement,
                     incoming_paths=current_paths,
                     end_node_id=end_node_id,
+                    continue_target_id=continue_target_id,
                 )
+                continue
+
+            if isinstance(statement, ast.Continue):
+                if continue_target_id is None:
+                    raise ValueError(
+                        "continue ifadesi bir döngü dışında "
+                        "kullanılamaz."
+                    )
+
+                continue_node = self._create_node(
+                    label="continue",
+                    node_type="continue",
+                    line_number=statement.lineno,
+                )
+
+                self._connect_paths(
+                    incoming_paths=current_paths,
+                    target_id=continue_node.node_id,
+                )
+
+                self._add_edge(
+                    source_id=continue_node.node_id,
+                    target_id=continue_target_id,
+                    label="Continue",
+                )
+
+                current_paths = []
                 continue
 
             if isinstance(statement, ast.Return):
@@ -202,6 +232,7 @@ class ControlFlowGraphBuilder:
         statement: ast.If,
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
+        continue_target_id: int | None = None,
     ) -> list[tuple[int, str | None]]:
         """Bir if ifadesinin True ve False yollarÄ±nÄ± oluÅŸturur."""
         condition_node = self._create_node(
@@ -219,6 +250,7 @@ class ControlFlowGraphBuilder:
             statements=statement.body,
             incoming_paths=[(condition_node.node_id, "True")],
             end_node_id=end_node_id,
+            continue_target_id=continue_target_id,
         )
 
         if statement.orelse:
@@ -226,6 +258,7 @@ class ControlFlowGraphBuilder:
                 statements=statement.orelse,
                 incoming_paths=[(condition_node.node_id, "False")],
                 end_node_id=end_node_id,
+                continue_target_id=continue_target_id,
             )
         else:
             false_paths = [
@@ -258,6 +291,7 @@ class ControlFlowGraphBuilder:
                 (condition_node.node_id, "True")
             ],
             end_node_id=end_node_id,
+            continue_target_id=condition_node.node_id,
         )
 
         for source_id, _ in body_paths:
@@ -309,6 +343,7 @@ class ControlFlowGraphBuilder:
                 (loop_node.node_id, "Iterate")
             ],
             end_node_id=end_node_id,
+            continue_target_id=loop_node.node_id,
         )
 
         for source_id, _ in body_paths:
@@ -336,6 +371,7 @@ class ControlFlowGraphBuilder:
         statement: ast.Try,
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
+        continue_target_id: int | None = None,
     ) -> list[tuple[int, str | None]]:
         """
         Try/except yapısının kontrol akışını oluşturur.
@@ -364,6 +400,7 @@ class ControlFlowGraphBuilder:
                 (try_node.node_id, "Success")
             ],
             end_node_id=end_node_id,
+            continue_target_id=continue_target_id,
         )
 
         body_end_node_id = self._node_counter
@@ -405,6 +442,7 @@ class ControlFlowGraphBuilder:
                     (handler_node.node_id, None)
                 ],
                 end_node_id=end_node_id,
+                continue_target_id=continue_target_id,
             )
 
             exception_paths.extend(handler_paths)
@@ -414,6 +452,7 @@ class ControlFlowGraphBuilder:
                 statements=statement.orelse,
                 incoming_paths=normal_paths,
                 end_node_id=end_node_id,
+                continue_target_id=continue_target_id,
             )
 
         combined_paths = normal_paths + exception_paths
@@ -423,6 +462,7 @@ class ControlFlowGraphBuilder:
                 statements=statement.finalbody,
                 incoming_paths=combined_paths,
                 end_node_id=end_node_id,
+                continue_target_id=continue_target_id,
             )
 
         return combined_paths
