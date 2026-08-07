@@ -15,11 +15,15 @@ class StateKey:
 
         uncovered_branches_bucket:
             Kapsanmayan branch sayısının ait olduğu aralık.
+
+        executed_tests_bucket:
+            Çalıştırılmış test sayısının ait olduğu aralık.
     """
 
     coverage_bucket: int
     missing_lines_bucket: int
     uncovered_branches_bucket: int
+    executed_tests_bucket: int
 
     def __post_init__(self) -> None:
         self._validate_bucket(
@@ -34,6 +38,10 @@ class StateKey:
             name="uncovered_branches_bucket",
             value=self.uncovered_branches_bucket,
         )
+        self._validate_bucket(
+            name="executed_tests_bucket",
+            value=self.executed_tests_bucket,
+        )
 
     @staticmethod
     def _validate_bucket(
@@ -41,10 +49,16 @@ class StateKey:
         value: int,
     ) -> None:
         if isinstance(value, bool):
-            raise TypeError(f"{name} must be an integer.")
+            raise TypeError(
+                f"{name} must be an integer."
+            )
 
         if not isinstance(value, int):
-            raise TypeError(f"{name} must be an integer.")
+            raise TypeError(
+                f"{name} must be an integer."
+            )
 
         if value < 0:
-            raise ValueError(f"{name} cannot be negative.")
+            raise ValueError(
+                f"{name} cannot be negative."
+            )

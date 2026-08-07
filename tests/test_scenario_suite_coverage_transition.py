@@ -190,7 +190,7 @@ def create_function_coverage_result(
 def create_suite_result(
     *,
     scenarios: tuple[Scenario, ...],
-    coverage_result: CoverageResult,
+    coverage_result: CoverageResult | FunctionCoverageResult,
 ) -> ScenarioSuiteCoverageResult:
     """ScenarioSuiteCoverageResult oluşturur."""
     return ScenarioSuiteCoverageResult(
@@ -992,3 +992,369 @@ def test_transition_reset_preserves_last_coverage_result(
 
     assert transition.selected_scenarios == ()
     assert transition.last_coverage_result is coverage_result
+
+
+def test_measure_scenarios_returns_baseline_file_coverage_without_mutating_episode(
+    tmp_path: Path,
+) -> None:
+    scenarios = create_scenarios()
+
+    baseline_coverage = create_coverage_result(
+        line_coverage_percent=83.33,
+        branch_coverage_percent=75.0,
+        covered_line_count=5,
+        missing_line_count=1,
+        total_line_count=6,
+        covered_branch_count=3,
+        missing_branch_count=1,
+        total_branch_count=4,
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=scenarios,
+                coverage_result=baseline_coverage,
+            )
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    result = transition.measure_scenarios(
+        scenarios
+    )
+
+    assert result is baseline_coverage
+    assert transition.selected_scenarios == ()
+    assert transition.selected_scenario_count == 0
+    assert transition.last_coverage_result is None
+    assert transition.last_function_coverage is None
+    assert transition.last_file_coverage is None
+
+
+def test_measure_scenarios_passes_complete_baseline_package_to_service(
+    tmp_path: Path,
+) -> None:
+    scenarios = create_scenarios()
+
+    baseline_coverage = create_coverage_result(
+        line_coverage_percent=100.0,
+        branch_coverage_percent=100.0,
+        covered_line_count=6,
+        missing_line_count=0,
+        total_line_count=6,
+        covered_branch_count=4,
+        missing_branch_count=0,
+        total_branch_count=4,
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=scenarios,
+                coverage_result=baseline_coverage,
+            )
+        ]
+    )
+
+    source_file = create_source_file(
+        tmp_path
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=source_file,
+        module_path="sample_code",
+        function_name="calculate_score",
+        function_start_line=1,
+        function_end_line=6,
+        output_directory=tmp_path,
+        coverage_service=service,
+        overwrite=False,
+        timeout_seconds=12.5,
+    )
+
+    transition.measure_scenarios(
+        scenarios
+    )
+
+    service.measure_scenarios.assert_called_once_with(
+        source_file=source_file.resolve(),
+        module_path="sample_code",
+        function_name="calculate_score",
+        scenarios=scenarios,
+        output_directory=tmp_path,
+        function_start_line=1,
+        function_end_line=6,
+        overwrite=False,
+        timeout_seconds=12.5,
+    )
+
+
+def test_measure_scenarios_returns_function_coverage_without_mutating_last_result(
+    tmp_path: Path,
+) -> None:
+    scenarios = create_scenarios()
+    function_coverage = (
+        create_function_coverage_result(
+            function_line_coverage_percent=83.33,
+            function_branch_coverage_percent=75.0,
+        )
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=scenarios,
+                coverage_result=function_coverage,
+            )
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        function_start_line=1,
+        function_end_line=6,
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    result = transition.measure_scenarios(
+        scenarios
+    )
+
+    assert result is function_coverage
+    assert result.line_coverage_percent == 83.33
+    assert result.branch_coverage_percent == 75.0
+
+    assert transition.selected_scenarios == ()
+    assert transition.last_coverage_result is None
+    assert transition.last_function_coverage is None
+    assert transition.last_file_coverage is None
+
+
+def test_measure_scenarios_does_not_replace_previous_episode_coverage(
+    tmp_path: Path,
+) -> None:
+    first_scenario = create_scenarios()[0]
+    all_scenarios = create_scenarios()
+
+    previous_coverage = create_coverage_result(
+        line_coverage_percent=50.0,
+        branch_coverage_percent=50.0,
+        covered_line_count=3,
+        missing_line_count=3,
+        total_line_count=6,
+        covered_branch_count=2,
+        missing_branch_count=2,
+        total_branch_count=4,
+    )
+
+    baseline_coverage = create_coverage_result(
+        line_coverage_percent=100.0,
+        branch_coverage_percent=100.0,
+        covered_line_count=6,
+        missing_line_count=0,
+        total_line_count=6,
+        covered_branch_count=4,
+        missing_branch_count=0,
+        total_branch_count=4,
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=(first_scenario,),
+                coverage_result=previous_coverage,
+            ),
+            create_suite_result(
+                scenarios=all_scenarios,
+                coverage_result=baseline_coverage,
+            ),
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    transition(
+        create_state(),
+        first_scenario,
+    )
+
+    baseline_result = (
+        transition.measure_scenarios(
+            all_scenarios
+        )
+    )
+
+    assert baseline_result is baseline_coverage
+
+    assert transition.selected_scenarios == (
+        first_scenario,
+    )
+    assert transition.selected_scenario_count == 1
+    assert (
+        transition.last_coverage_result
+        is previous_coverage
+    )
+
+
+def test_measure_scenarios_raises_for_failed_baseline_without_mutating_episode(
+    tmp_path: Path,
+) -> None:
+    scenarios = create_scenarios()
+
+    failed_coverage = create_coverage_result(
+        line_coverage_percent=83.33,
+        branch_coverage_percent=75.0,
+        covered_line_count=5,
+        missing_line_count=1,
+        total_line_count=6,
+        covered_branch_count=3,
+        missing_branch_count=1,
+        total_branch_count=4,
+        test_exit_code=1,
+    )
+
+    service = create_mock_service(
+        [
+            create_suite_result(
+                scenarios=scenarios,
+                coverage_result=failed_coverage,
+            )
+        ]
+    )
+
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        coverage_service=service,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+    ) as error_info:
+        transition.measure_scenarios(
+            scenarios
+        )
+
+    error_message = str(
+        error_info.value
+    )
+
+    assert (
+        "Baseline coverage ölçümü başarısız oldu."
+        in error_message
+    )
+    assert (
+        "Pytest çıkış kodu: 1."
+        in error_message
+    )
+    assert (
+        "test_calculate_score_scenario_suite.py"
+        in error_message
+    )
+
+    for scenario in scenarios:
+        assert (
+            scenario.scenario_id
+            in error_message
+        )
+
+    assert "pytest " in error_message
+    assert "-x -vv" in error_message
+
+    assert transition.selected_scenarios == ()
+    assert transition.selected_scenario_count == 0
+    assert transition.last_coverage_result is None
+
+
+@pytest.mark.parametrize(
+    "invalid_scenarios",
+    (
+        [],
+        "invalid",
+        42,
+    ),
+)
+def test_measure_scenarios_rejects_non_tuple_input(
+    tmp_path: Path,
+    invalid_scenarios: object,
+) -> None:
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            "scenarios bir Scenario tuple'ı "
+            "olmalıdır."
+        ),
+    ):
+        transition.measure_scenarios(
+            invalid_scenarios,  # type: ignore[arg-type]
+        )
+
+
+def test_measure_scenarios_rejects_empty_tuple(
+    tmp_path: Path,
+) -> None:
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="scenarios boş olamaz.",
+    ):
+        transition.measure_scenarios(
+            ()
+        )
+
+
+def test_measure_scenarios_rejects_invalid_scenario_item(
+    tmp_path: Path,
+) -> None:
+    transition = ScenarioSuiteCoverageTransition(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            "scenarios yalnızca Scenario "
+            "nesneleri içermelidir."
+        ),
+    ):
+        transition.measure_scenarios(
+            (
+                create_scenarios()[0],
+                "invalid",  # type: ignore[arg-type]
+            )
+        )

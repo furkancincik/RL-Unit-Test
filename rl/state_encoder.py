@@ -12,11 +12,15 @@ class StateEncoder:
 
     Bucket yaklaşımı, birbirine yakın coverage durumlarının aynı
     RL durumu altında değerlendirilmesini sağlar.
+
+    executed_tests_bucket, aynı coverage seviyesine farklı sayıda
+    test ile ulaşılan durumların birbirinden ayrılabilmesini sağlar.
     """
 
     coverage_bucket_size: float = 10.0
     missing_lines_bucket_size: int = 5
     uncovered_branches_bucket_size: int = 5
+    executed_tests_bucket_size: int = 1
 
     def __post_init__(self) -> None:
         self._validate_positive_number(
@@ -34,6 +38,11 @@ class StateEncoder:
             value=self.uncovered_branches_bucket_size,
         )
 
+        self._validate_positive_integer(
+            name="executed_tests_bucket_size",
+            value=self.executed_tests_bucket_size,
+        )
+
     def encode(
         self,
         state: CoverageState,
@@ -41,7 +50,10 @@ class StateEncoder:
         """
         CoverageState bilgisini bucket tabanlı StateKey'e dönüştürür.
         """
-        if not isinstance(state, CoverageState):
+        if not isinstance(
+            state,
+            CoverageState,
+        ):
             raise TypeError(
                 "state must be a CoverageState instance."
             )
@@ -61,10 +73,16 @@ class StateEncoder:
             // self.uncovered_branches_bucket_size
         )
 
+        executed_tests_bucket = (
+            state.executed_tests
+            // self.executed_tests_bucket_size
+        )
+
         return StateKey(
             coverage_bucket=coverage_bucket,
             missing_lines_bucket=missing_lines_bucket,
             uncovered_branches_bucket=uncovered_branches_bucket,
+            executed_tests_bucket=executed_tests_bucket,
         )
 
     @staticmethod
@@ -73,13 +91,22 @@ class StateEncoder:
         value: float,
     ) -> None:
         if isinstance(value, bool):
-            raise TypeError(f"{name} must be a number.")
+            raise TypeError(
+                f"{name} must be a number."
+            )
 
-        if not isinstance(value, (int, float)):
-            raise TypeError(f"{name} must be a number.")
+        if not isinstance(
+            value,
+            (int, float),
+        ):
+            raise TypeError(
+                f"{name} must be a number."
+            )
 
         if value <= 0:
-            raise ValueError(f"{name} must be greater than zero.")
+            raise ValueError(
+                f"{name} must be greater than zero."
+            )
 
     @staticmethod
     def _validate_positive_integer(
@@ -87,10 +114,19 @@ class StateEncoder:
         value: int,
     ) -> None:
         if isinstance(value, bool):
-            raise TypeError(f"{name} must be an integer.")
+            raise TypeError(
+                f"{name} must be an integer."
+            )
 
-        if not isinstance(value, int):
-            raise TypeError(f"{name} must be an integer.")
+        if not isinstance(
+            value,
+            int,
+        ):
+            raise TypeError(
+                f"{name} must be an integer."
+            )
 
         if value <= 0:
-            raise ValueError(f"{name} must be greater than zero.")
+            raise ValueError(
+                f"{name} must be greater than zero."
+            )

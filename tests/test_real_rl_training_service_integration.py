@@ -20,6 +20,9 @@ def test_real_rl_training_service_runs_end_to_end(
     """
     Kaynak kod analizinden gerçek coverage tabanlı RL eğitimine
     kadar bütün hattın birlikte çalıştığını doğrular.
+
+    Bu entegrasyon testi deterministik davranışı korumak için
+    epsilon=0.0 ve epsilon_decay_rate=None kullanır.
     """
     service = RealRLTrainingService()
 
@@ -30,6 +33,8 @@ def test_real_rl_training_service_runs_end_to_end(
         output_directory=tmp_path,
         episode_count=3,
         epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
         learning_rate=0.5,
         discount_factor=0.9,
         random_seed=42,
@@ -101,6 +106,8 @@ def test_real_rl_training_service_generates_cumulative_test_file(
         output_directory=tmp_path,
         episode_count=1,
         epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
         random_seed=42,
         overwrite=True,
         timeout_seconds=30.0,
@@ -145,6 +152,8 @@ def test_real_rl_training_service_produces_readable_report(
         output_directory=tmp_path,
         episode_count=2,
         epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
         random_seed=42,
         overwrite=True,
         timeout_seconds=30.0,

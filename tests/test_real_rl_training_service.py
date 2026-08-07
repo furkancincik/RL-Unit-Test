@@ -143,6 +143,9 @@ def create_session_result() -> TrainingSessionResult:
 
 def create_function_coverage_result(
     tmp_path: Path,
+    *,
+    line_coverage_percent: float = 100.0,
+    branch_coverage_percent: float = 100.0,
 ) -> FunctionCoverageResult:
     """Mock eğitim akışı için kontrollü coverage sonucu oluşturur."""
     source_file = create_source_file(tmp_path).resolve()
@@ -172,10 +175,18 @@ def create_function_coverage_result(
         function_name="calculate_score",
         start_line=1,
         end_line=4,
-        line_coverage_percent=100.0,
-        branch_coverage_percent=100.0,
-        covered_lines=(1, 2, 3, 4),
-        missing_lines=(),
+        line_coverage_percent=line_coverage_percent,
+        branch_coverage_percent=branch_coverage_percent,
+        covered_lines=(
+            (1, 2, 3, 4)
+            if line_coverage_percent == 100.0
+            else (1, 2, 3)
+        ),
+        missing_lines=(
+            ()
+            if line_coverage_percent == 100.0
+            else (4,)
+        ),
         covered_branch_count=2,
         missing_branch_count=0,
         test_exit_code=0,
@@ -203,6 +214,12 @@ def provide_mock_transition_coverage(
         property(
             lambda self: coverage_result
         ),
+    )
+
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "measure_scenarios",
+        lambda self, scenarios: coverage_result,
     )
 
 
@@ -733,3 +750,493 @@ def test_run_rejects_invalid_function_name(
             function_name="calculate-score",
             output_directory=tmp_path,
         )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_uses_reachable_baseline_as_environment_target(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    baseline_coverage = create_function_coverage_result(
+        tmp_path,
+        line_coverage_percent=75.0,
+        branch_coverage_percent=50.0,
+    )
+
+    measured_scenarios: list[
+        tuple[Scenario, ...]
+    ] = []
+
+    def measure_baseline(
+        transition: ScenarioSuiteCoverageTransition,
+        scenarios: tuple[Scenario, ...],
+    ) -> FunctionCoverageResult:
+        measured_scenarios.append(scenarios)
+        return baseline_coverage
+
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "measure_scenarios",
+        measure_baseline,
+    )
+
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    environment = mock_run.call_args.kwargs[
+        "environment"
+    ]
+
+    assert (
+        environment.target_coverage_percentage
+        == pytest.approx(75.0)
+    )
+    assert measured_scenarios == [
+        result.scenarios
+    ]
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_accepts_non_full_reachable_coverage_target(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    baseline_coverage = create_function_coverage_result(
+        tmp_path,
+        line_coverage_percent=62.5,
+        branch_coverage_percent=50.0,
+    )
+
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "measure_scenarios",
+        lambda self, scenarios: baseline_coverage,
+    )
+
+    service, _ = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    environment = mock_run.call_args.kwargs[
+        "environment"
+    ]
+
+    assert (
+        environment.target_coverage_percentage
+        == pytest.approx(62.5)
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_rejects_zero_reachable_coverage_before_training(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zero_coverage = create_function_coverage_result(
+        tmp_path,
+        line_coverage_percent=0.0,
+        branch_coverage_percent=0.0,
+    )
+
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "measure_scenarios",
+        lambda self, scenarios: zero_coverage,
+    )
+
+    service, _ = create_service()
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "pozitif bir reachable "
+            "coverage hedefi üretemedi"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            episode_count=1,
+        )
+
+    mock_run.assert_not_called()
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_baseline_uses_only_executable_scenarios(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    executable_scenario = create_scenario()
+
+    rejected_scenario = Scenario(
+        scenario_id="calculate_score_scenario_rejected",
+        name="calculate_score reddedilen yol",
+        path_index=2,
+        priority_rank=2,
+        priority_level="Medium",
+        dqm_score=50.0,
+        node_ids=(1, 2, 4),
+        edge_labels=(None, "False"),
+        contains_loop=False,
+        contains_exception=False,
+        description="Concrete validation tarafından elenecek senaryo.",
+        keyword_arguments=(("score", 10),),
+        expected_result="Yanlış beklenen sonuç",
+        expected_exception=None,
+    )
+
+    service, dependencies = create_service()
+
+    dependencies[4].generate.return_value = [
+        executable_scenario,
+        rejected_scenario,
+    ]
+
+    measured_scenarios: list[
+        tuple[Scenario, ...]
+    ] = []
+
+    baseline_coverage = create_function_coverage_result(
+        tmp_path,
+        line_coverage_percent=75.0,
+        branch_coverage_percent=50.0,
+    )
+
+    def measure_baseline(
+        transition: ScenarioSuiteCoverageTransition,
+        scenarios: tuple[Scenario, ...],
+    ) -> FunctionCoverageResult:
+        measured_scenarios.append(scenarios)
+        return baseline_coverage
+
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "measure_scenarios",
+        measure_baseline,
+    )
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert result.scenarios == (
+        executable_scenario,
+    )
+    assert measured_scenarios == [
+        (
+            executable_scenario,
+        )
+    ]
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_passes_default_epsilon_decay_configuration_to_session(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=3,
+    )
+
+    call_kwargs = mock_run.call_args.kwargs
+
+    assert call_kwargs["episode_count"] == 3
+    assert (
+        call_kwargs["epsilon_decay_rate"]
+        == pytest.approx(0.95)
+    )
+    assert (
+        call_kwargs["minimum_epsilon"]
+        == pytest.approx(0.05)
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_passes_custom_epsilon_decay_configuration_to_session(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=2,
+        epsilon=0.40,
+        epsilon_decay_rate=0.80,
+        minimum_epsilon=0.10,
+    )
+
+    call_kwargs = mock_run.call_args.kwargs
+
+    assert call_kwargs["episode_count"] == 2
+    assert (
+        call_kwargs["epsilon_decay_rate"]
+        == pytest.approx(0.80)
+    )
+    assert (
+        call_kwargs["minimum_epsilon"]
+        == pytest.approx(0.10)
+    )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_allows_disabling_epsilon_decay(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=2,
+        epsilon=0.25,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.05,
+    )
+
+    call_kwargs = mock_run.call_args.kwargs
+
+    assert (
+        call_kwargs["epsilon_decay_rate"]
+        is None
+    )
+    assert (
+        call_kwargs["minimum_epsilon"]
+        == pytest.approx(0.05)
+    )
+
+
+@pytest.mark.parametrize(
+    "epsilon_decay_rate",
+    (
+        -0.1,
+        1.1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+    ),
+)
+def test_run_rejects_invalid_epsilon_decay_rate(
+    tmp_path: Path,
+    epsilon_decay_rate: float,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            epsilon_decay_rate=epsilon_decay_rate,
+        )
+
+
+@pytest.mark.parametrize(
+    "epsilon_decay_rate",
+    (
+        True,
+        "0.95",
+        object(),
+    ),
+)
+def test_run_rejects_invalid_epsilon_decay_rate_type(
+    tmp_path: Path,
+    epsilon_decay_rate: object,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        TypeError,
+        match="epsilon_decay_rate sayısal olmalıdır",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            epsilon_decay_rate=(  # type: ignore[arg-type]
+                epsilon_decay_rate
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "minimum_epsilon",
+    (
+        -0.1,
+        1.1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+    ),
+)
+def test_run_rejects_invalid_minimum_epsilon(
+    tmp_path: Path,
+    minimum_epsilon: float,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            minimum_epsilon=minimum_epsilon,
+        )
+
+
+@pytest.mark.parametrize(
+    "minimum_epsilon",
+    (
+        True,
+        "0.05",
+        object(),
+    ),
+)
+def test_run_rejects_invalid_minimum_epsilon_type(
+    tmp_path: Path,
+    minimum_epsilon: object,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        TypeError,
+        match="minimum_epsilon sayısal olmalıdır",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            minimum_epsilon=(  # type: ignore[arg-type]
+                minimum_epsilon
+            ),
+        )
+
+
+def test_run_rejects_minimum_epsilon_above_initial_epsilon(
+    tmp_path: Path,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "minimum_epsilon başlangıç epsilon "
+            "değerinden büyük olamaz"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            epsilon=0.10,
+            epsilon_decay_rate=0.95,
+            minimum_epsilon=0.20,
+        )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_allows_minimum_above_epsilon_when_decay_disabled(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+
+    service, _ = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.50,
+    )
+
+    assert (
+        mock_run.call_args.kwargs[
+            "epsilon_decay_rate"
+        ]
+        is None
+    )

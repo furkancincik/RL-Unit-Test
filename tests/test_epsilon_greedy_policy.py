@@ -36,6 +36,7 @@ def create_state_key() -> StateKey:
         coverage_bucket=5,
         missing_lines_bucket=2,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=3,
     )
 
 
@@ -536,3 +537,250 @@ def test_select_action_rejects_invalid_q_table() -> None:
             actions=(create_action(),),
             q_table="invalid",  # type: ignore[arg-type]
         )
+
+
+def test_set_epsilon_updates_policy_value() -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.30,
+    )
+
+    result = policy.set_epsilon(
+        0.20
+    )
+
+    assert result == pytest.approx(0.20)
+    assert policy.epsilon == pytest.approx(0.20)
+
+
+@pytest.mark.parametrize(
+    "epsilon",
+    [
+        -0.1,
+        1.1,
+        math.nan,
+        math.inf,
+        -math.inf,
+    ],
+)
+def test_set_epsilon_rejects_invalid_value(
+    epsilon: float,
+) -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.30,
+    )
+
+    with pytest.raises(
+        ValueError,
+    ):
+        policy.set_epsilon(
+            epsilon
+        )
+
+    assert policy.epsilon == pytest.approx(0.30)
+
+
+@pytest.mark.parametrize(
+    "epsilon",
+    [
+        True,
+        "0.2",
+        None,
+    ],
+)
+def test_set_epsilon_rejects_invalid_type(
+    epsilon: object,
+) -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.30,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="epsilon must be a numeric value.",
+    ):
+        policy.set_epsilon(
+            epsilon  # type: ignore[arg-type]
+        )
+
+    assert policy.epsilon == pytest.approx(0.30)
+
+
+def test_decay_epsilon_reduces_current_value() -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.30,
+    )
+
+    result = policy.decay_epsilon(
+        decay_rate=0.5,
+        minimum_epsilon=0.05,
+    )
+
+    assert result == pytest.approx(0.15)
+    assert policy.epsilon == pytest.approx(0.15)
+
+
+def test_decay_epsilon_respects_minimum_value() -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.10,
+    )
+
+    first_result = policy.decay_epsilon(
+        decay_rate=0.50,
+        minimum_epsilon=0.05,
+    )
+
+    second_result = policy.decay_epsilon(
+        decay_rate=0.50,
+        minimum_epsilon=0.05,
+    )
+
+    assert first_result == pytest.approx(0.05)
+    assert second_result == pytest.approx(0.05)
+    assert policy.epsilon == pytest.approx(0.05)
+
+
+def test_decay_epsilon_allows_zero_minimum() -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.20,
+    )
+
+    result = policy.decay_epsilon(
+        decay_rate=0.0,
+        minimum_epsilon=0.0,
+    )
+
+    assert result == pytest.approx(0.0)
+    assert policy.epsilon == pytest.approx(0.0)
+
+
+def test_decay_epsilon_rejects_minimum_above_current_epsilon() -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.20,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "minimum_epsilon cannot be greater "
+            "than current epsilon."
+        ),
+    ):
+        policy.decay_epsilon(
+            decay_rate=0.90,
+            minimum_epsilon=0.30,
+        )
+
+    assert policy.epsilon == pytest.approx(0.20)
+
+
+@pytest.mark.parametrize(
+    "decay_rate",
+    [
+        -0.1,
+        1.1,
+        math.nan,
+        math.inf,
+    ],
+)
+def test_decay_epsilon_rejects_invalid_decay_rate(
+    decay_rate: float,
+) -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.30,
+    )
+
+    with pytest.raises(
+        ValueError,
+    ):
+        policy.decay_epsilon(
+            decay_rate=decay_rate,
+            minimum_epsilon=0.05,
+        )
+
+    assert policy.epsilon == pytest.approx(0.30)
+
+
+@pytest.mark.parametrize(
+    "minimum_epsilon",
+    [
+        -0.1,
+        1.1,
+        math.nan,
+        math.inf,
+    ],
+)
+def test_decay_epsilon_rejects_invalid_minimum(
+    minimum_epsilon: float,
+) -> None:
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.30,
+    )
+
+    with pytest.raises(
+        ValueError,
+    ):
+        policy.decay_epsilon(
+            decay_rate=0.90,
+            minimum_epsilon=minimum_epsilon,
+        )
+
+    assert policy.epsilon == pytest.approx(0.30)
+
+
+def test_updated_epsilon_changes_exploration_decision() -> None:
+    random_generator = ControlledRandom(
+        random_value=0.15,
+        choice_index=1,
+    )
+
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.20,
+        random_generator=random_generator,
+    )
+
+    q_table = QTable()
+    state_key = create_state_key()
+
+    first_action = create_action(0)
+    second_action = create_action(1)
+
+    q_table.set_value(
+        state_key,
+        first_action,
+        10.0,
+    )
+
+    q_table.set_value(
+        state_key,
+        second_action,
+        0.0,
+    )
+
+    exploring_result = policy.select_action(
+        state_key=state_key,
+        actions=(
+            first_action,
+            second_action,
+        ),
+        q_table=q_table,
+    )
+
+    assert exploring_result == second_action
+
+    policy.set_epsilon(
+        0.10
+    )
+
+    random_generator._choice_index = 0
+
+    exploiting_result = policy.select_action(
+        state_key=state_key,
+        actions=(
+            first_action,
+            second_action,
+        ),
+        q_table=q_table,
+    )
+
+    assert exploiting_result == first_action
+

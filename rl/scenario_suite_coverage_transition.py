@@ -213,6 +213,98 @@ class ScenarioSuiteCoverageTransition:
 
         return None
 
+
+    def measure_scenarios(
+        self,
+        scenarios: tuple[Scenario, ...],
+    ) -> CoverageResult | FunctionCoverageResult:
+        """
+        Verilen senaryo paketinin birlikte sağlayabildiği
+        coverage sonucunu ölçer.
+
+        Bu metot baseline / reachable target coverage
+        hesaplamak amacıyla kullanılır.
+
+        Ölçüm sırasında:
+        - episode içerisindeki selected_scenarios değiştirilmez,
+        - transition state'i değiştirilmez,
+        - last_coverage_result değiştirilmez.
+
+        Args:
+            scenarios:
+                Birlikte coverage ölçümü yapılacak senaryolar.
+
+        Returns:
+            Dosya veya hedef fonksiyon bazlı coverage sonucu.
+
+        Raises:
+            TypeError:
+                scenarios tuple değilse veya geçersiz
+                Scenario içeriyorsa.
+
+            ValueError:
+                scenarios boşsa.
+
+            RuntimeError:
+                Pytest veya coverage ölçümü başarısız olursa.
+        """
+        self._validate_scenarios(
+            scenarios
+        )
+
+        suite_result = (
+            self._coverage_service.measure_scenarios(
+                source_file=self._source_file,
+                module_path=self._module_path,
+                function_name=self._function_name,
+                scenarios=scenarios,
+                output_directory=self._output_directory,
+                function_start_line=self._function_start_line,
+                function_end_line=self._function_end_line,
+                overwrite=self._overwrite,
+                timeout_seconds=self._timeout_seconds,
+            )
+        )
+
+        if not suite_result.success:
+            coverage_result = (
+                suite_result.coverage
+            )
+
+            if isinstance(
+                coverage_result,
+                FunctionCoverageResult,
+            ):
+                file_coverage = (
+                    coverage_result.file_coverage
+                )
+                test_exit_code = (
+                    coverage_result.test_exit_code
+                )
+            else:
+                file_coverage = coverage_result
+                test_exit_code = (
+                    coverage_result.test_exit_code
+                )
+
+            scenario_ids = ", ".join(
+                scenario.scenario_id
+                for scenario in scenarios
+            )
+
+            raise RuntimeError(
+                "Baseline coverage ölçümü başarısız oldu. "
+                f"Pytest çıkış kodu: {test_exit_code}. "
+                f"Test dosyası: {suite_result.test_file}. "
+                f"Kaynak dosya: {file_coverage.source_file}. "
+                f"Senaryolar: {scenario_ids}. "
+                "Gerçek pytest hatasını görmek için şu "
+                "komutu çalıştırın: "
+                f"pytest {suite_result.test_file} -x -vv"
+            )
+
+        return suite_result.coverage
+
     def __call__(
         self,
         state: CoverageState,
@@ -562,6 +654,41 @@ class ScenarioSuiteCoverageTransition:
         if not isinstance(scenario, Scenario):
             raise TypeError(
                 "scenario bir Scenario örneği olmalıdır."
+            )
+
+
+    @staticmethod
+    def _validate_scenarios(
+        scenarios: tuple[Scenario, ...],
+    ) -> None:
+        """
+        Baseline coverage için verilen senaryo
+        paketini doğrular.
+        """
+        if not isinstance(
+            scenarios,
+            tuple,
+        ):
+            raise TypeError(
+                "scenarios bir Scenario tuple'ı "
+                "olmalıdır."
+            )
+
+        if not scenarios:
+            raise ValueError(
+                "scenarios boş olamaz."
+            )
+
+        if any(
+            not isinstance(
+                scenario,
+                Scenario,
+            )
+            for scenario in scenarios
+        ):
+            raise TypeError(
+                "scenarios yalnızca Scenario "
+                "nesneleri içermelidir."
             )
 
     @staticmethod

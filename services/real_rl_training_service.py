@@ -210,7 +210,9 @@ class RealRLTrainingService:
         function_name: str,
         output_directory: str | Path,
         episode_count: int = 3,
-        epsilon: float = 0.0,
+        epsilon: float = 0.30,
+        epsilon_decay_rate: float | None = 0.95,
+        minimum_epsilon: float = 0.05,
         learning_rate: float = 0.5,
         discount_factor: float = 0.9,
         random_seed: int | None = 42,
@@ -237,7 +239,16 @@ class RealRLTrainingService:
                 Gerçekleştirilecek eğitim episode sayısı.
 
             epsilon:
-                Epsilon-greedy politikasının keşif oranı.
+                Epsilon-greedy politikasının başlangıç keşif oranı.
+
+            epsilon_decay_rate:
+                Her tamamlanan episode sonrasında epsilon değerine
+                uygulanacak decay katsayısı. None verilirse epsilon
+                sabit kalır.
+
+            minimum_epsilon:
+                Decay aktifken epsilon değerinin düşebileceği
+                minimum keşif oranı.
 
             learning_rate:
                 Q-Learning öğrenme oranı.
@@ -288,6 +299,19 @@ class RealRLTrainingService:
         self._validate_probability(
             name="epsilon",
             value=epsilon,
+        )
+        self._validate_optional_probability(
+            name="epsilon_decay_rate",
+            value=epsilon_decay_rate,
+        )
+        self._validate_probability(
+            name="minimum_epsilon",
+            value=minimum_epsilon,
+        )
+        self._validate_epsilon_configuration(
+            epsilon=epsilon,
+            epsilon_decay_rate=epsilon_decay_rate,
+            minimum_epsilon=minimum_epsilon,
         )
         self._validate_probability(
             name="learning_rate",
@@ -407,6 +431,22 @@ class RealRLTrainingService:
             timeout_seconds=timeout_seconds,
         )
 
+        baseline_coverage_result = (
+            suite_transition.measure_scenarios(
+                scenario_tuple
+            )
+        )
+
+        reachable_target_coverage = (
+            baseline_coverage_result.line_coverage_percent
+        )
+
+        if reachable_target_coverage <= 0.0:
+            raise RuntimeError(
+                "Geçerli senaryo paketi pozitif bir reachable "
+                "coverage hedefi üretemedi."
+            )
+
         transition_adapter = ScenarioTransitionAdapter(
             mapper=mapper,
             transition_function=suite_transition,
@@ -422,6 +462,9 @@ class RealRLTrainingService:
             actions=mapper.actions,
             transition_function=transition_adapter,
             episode_reset_callback=suite_transition.reset,
+            target_coverage_percentage=(
+                reachable_target_coverage
+            ),
         )
 
         q_table = QTable()
@@ -444,6 +487,7 @@ class RealRLTrainingService:
             coverage_bucket_size=10.0,
             missing_lines_bucket_size=2,
             uncovered_branches_bucket_size=1,
+            executed_tests_bucket_size=1,
         )
 
         trainer = QLearningTrainer(
@@ -461,6 +505,8 @@ class RealRLTrainingService:
         session_result = session.run(
             environment=environment,
             episode_count=episode_count,
+            epsilon_decay_rate=epsilon_decay_rate,
+            minimum_epsilon=minimum_epsilon,
         )
 
         final_coverage_result = (
@@ -880,6 +926,42 @@ class RealRLTrainingService:
         if not 0.0 <= normalized_value <= 1.0:
             raise ValueError(
                 f"{name} 0 ile 1 arasında olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_optional_probability(
+        *,
+        name: str,
+        value: float | None,
+    ) -> None:
+        """
+        None veya 0-1 aralığında sonlu olasılık değeri doğrular.
+        """
+        if value is None:
+            return
+
+        RealRLTrainingService._validate_probability(
+            name=name,
+            value=value,
+        )
+
+    @staticmethod
+    def _validate_epsilon_configuration(
+        *,
+        epsilon: float,
+        epsilon_decay_rate: float | None,
+        minimum_epsilon: float,
+    ) -> None:
+        """
+        Epsilon decay parametrelerinin birlikte geçerli olmasını doğrular.
+        """
+        if epsilon_decay_rate is None:
+            return
+
+        if float(minimum_epsilon) > float(epsilon):
+            raise ValueError(
+                "minimum_epsilon başlangıç epsilon "
+                "değerinden büyük olamaz."
             )
 
     @staticmethod

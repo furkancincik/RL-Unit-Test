@@ -25,6 +25,7 @@ def test_state_encoder_can_be_created_with_defaults() -> None:
     assert encoder.coverage_bucket_size == 10.0
     assert encoder.missing_lines_bucket_size == 5
     assert encoder.uncovered_branches_bucket_size == 5
+    assert encoder.executed_tests_bucket_size == 1
 
 
 def test_encoder_converts_coverage_state_to_state_key() -> None:
@@ -34,6 +35,7 @@ def test_encoder_converts_coverage_state_to_state_key() -> None:
         coverage_percentage=72.5,
         missing_lines=(8, 12, 15),
         uncovered_branches=2,
+        executed_tests=3,
     )
 
     result = encoder.encode(state)
@@ -42,6 +44,7 @@ def test_encoder_converts_coverage_state_to_state_key() -> None:
         coverage_bucket=7,
         missing_lines_bucket=0,
         uncovered_branches_bucket=0,
+        executed_tests_bucket=3,
     )
 
 
@@ -131,22 +134,81 @@ def test_encoder_calculates_uncovered_branches_bucket(
     assert result.uncovered_branches_bucket == expected_bucket
 
 
-def test_similar_states_can_produce_same_state_key() -> None:
+@pytest.mark.parametrize(
+    ("executed_tests", "expected_bucket"),
+    [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (5, 5),
+        (10, 10),
+    ],
+)
+def test_encoder_calculates_executed_tests_bucket(
+    executed_tests: int,
+    expected_bucket: int,
+) -> None:
     encoder = StateEncoder()
+
+    state = create_state(
+        coverage_percentage=50.0,
+        executed_tests=executed_tests,
+    )
+
+    result = encoder.encode(state)
+
+    assert (
+        result.executed_tests_bucket
+        == expected_bucket
+    )
+
+
+def test_same_coverage_with_different_test_counts_produces_different_state_key() -> None:
+    encoder = StateEncoder()
+
+    first_state = create_state(
+        coverage_percentage=80.0,
+        missing_lines=(1, 2),
+        uncovered_branches=1,
+        executed_tests=4,
+    )
+
+    second_state = create_state(
+        coverage_percentage=80.0,
+        missing_lines=(1, 2),
+        uncovered_branches=1,
+        executed_tests=5,
+    )
+
+    assert (
+        encoder.encode(first_state)
+        != encoder.encode(second_state)
+    )
+
+
+def test_similar_states_can_produce_same_state_key() -> None:
+    encoder = StateEncoder(
+        executed_tests_bucket_size=2,
+    )
 
     first_state = create_state(
         coverage_percentage=71.0,
         missing_lines=(1, 2, 3),
         uncovered_branches=2,
+        executed_tests=2,
     )
 
     second_state = create_state(
         coverage_percentage=79.9,
         missing_lines=(4,),
         uncovered_branches=4,
+        executed_tests=3,
     )
 
-    assert encoder.encode(first_state) == encoder.encode(second_state)
+    assert (
+        encoder.encode(first_state)
+        == encoder.encode(second_state)
+    )
 
 
 def test_custom_bucket_sizes_are_used() -> None:
@@ -154,12 +216,14 @@ def test_custom_bucket_sizes_are_used() -> None:
         coverage_bucket_size=5.0,
         missing_lines_bucket_size=2,
         uncovered_branches_bucket_size=3,
+        executed_tests_bucket_size=2,
     )
 
     state = create_state(
         coverage_percentage=72.5,
         missing_lines=(1, 2, 3, 4, 5),
         uncovered_branches=7,
+        executed_tests=5,
     )
 
     result = encoder.encode(state)
@@ -168,6 +232,7 @@ def test_custom_bucket_sizes_are_used() -> None:
         coverage_bucket=14,
         missing_lines_bucket=2,
         uncovered_branches_bucket=2,
+        executed_tests_bucket=2,
     )
 
 
@@ -190,6 +255,8 @@ def test_encoder_rejects_invalid_state() -> None:
         ("missing_lines_bucket_size", -1),
         ("uncovered_branches_bucket_size", 0),
         ("uncovered_branches_bucket_size", -1),
+        ("executed_tests_bucket_size", 0),
+        ("executed_tests_bucket_size", -1),
     ],
 )
 def test_encoder_rejects_non_positive_bucket_size(
@@ -200,6 +267,7 @@ def test_encoder_rejects_non_positive_bucket_size(
         "coverage_bucket_size": 10.0,
         "missing_lines_bucket_size": 5,
         "uncovered_branches_bucket_size": 5,
+        "executed_tests_bucket_size": 1,
     }
 
     values[field_name] = invalid_value
@@ -220,6 +288,10 @@ def test_encoder_rejects_non_positive_bucket_size(
         ("missing_lines_bucket_size", False),
         ("uncovered_branches_bucket_size", "5"),
         ("uncovered_branches_bucket_size", None),
+        ("executed_tests_bucket_size", 1.5),
+        ("executed_tests_bucket_size", "1"),
+        ("executed_tests_bucket_size", False),
+        ("executed_tests_bucket_size", None),
     ],
 )
 def test_encoder_rejects_invalid_bucket_type(
@@ -230,6 +302,7 @@ def test_encoder_rejects_invalid_bucket_type(
         "coverage_bucket_size": 10.0,
         "missing_lines_bucket_size": 5,
         "uncovered_branches_bucket_size": 5,
+        "executed_tests_bucket_size": 1,
     }
 
     values[field_name] = invalid_value

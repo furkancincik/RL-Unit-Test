@@ -9,11 +9,16 @@ def create_state_key(
     coverage_bucket: int = 5,
     missing_lines_bucket: int = 2,
     uncovered_branches_bucket: int = 1,
+    executed_tests_bucket: int = 0,
 ) -> StateKey:
+    """
+    QTable testlerinde kullanılacak StateKey nesnesini oluşturur.
+    """
     return StateKey(
         coverage_bucket=coverage_bucket,
         missing_lines_bucket=missing_lines_bucket,
         uncovered_branches_bucket=uncovered_branches_bucket,
+        executed_tests_bucket=executed_tests_bucket,
     )
 
 
@@ -515,3 +520,23 @@ def test_q_table_query_methods_reject_invalid_action_item(
                 create_state_key(),
                 actions,  # type: ignore[arg-type]
             )
+
+
+def test_states_with_different_executed_tests_buckets_are_stored_separately() -> None:
+    q_table = QTable()
+
+    first_state = create_state_key(
+        executed_tests_bucket=0,
+    )
+    second_state = create_state_key(
+        executed_tests_bucket=1,
+    )
+    action = create_action()
+
+    q_table.set_value(first_state, action, 2.0)
+    q_table.set_value(second_state, action, 8.0)
+
+    assert q_table.get_value(first_state, action) == 2.0
+    assert q_table.get_value(second_state, action) == 8.0
+    assert len(q_table) == 2
+

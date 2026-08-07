@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import math
 from dataclasses import dataclass
 
 from rl.coverage_state import CoverageState
@@ -6,7 +9,8 @@ from rl.coverage_state import CoverageState
 @dataclass(frozen=True, slots=True)
 class EnvironmentStep:
     """
-    RL ortamında bir aksiyon uygulandıktan sonra oluşan sonucu temsil eder.
+    RL ortamında bir aksiyon uygulandıktan sonra oluşan
+    sonucu temsil eder.
 
     Attributes:
         state:
@@ -24,14 +28,62 @@ class EnvironmentStep:
     done: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, CoverageState):
-            raise TypeError("state must be a CoverageState instance.")
+        """Environment step alanlarını doğrular."""
+        self._validate_state(
+            self.state
+        )
+        self._validate_reward(
+            self.reward
+        )
+        self._validate_done(
+            self.done
+        )
 
-        if isinstance(self.reward, bool):
-            raise TypeError("reward must be a number.")
+    @staticmethod
+    def _validate_state(
+        state: CoverageState,
+    ) -> None:
+        """Coverage state değerini doğrular."""
+        if not isinstance(
+            state,
+            CoverageState,
+        ):
+            raise TypeError(
+                "state must be a CoverageState instance."
+            )
 
-        if not isinstance(self.reward, (int, float)):
-            raise TypeError("reward must be a number.")
+    @staticmethod
+    def _validate_reward(
+        reward: float,
+    ) -> None:
+        """Reward değerinin geçerli ve sonlu olduğunu doğrular."""
+        if (
+            isinstance(reward, bool)
+            or not isinstance(
+                reward,
+                (int, float),
+            )
+        ):
+            raise TypeError(
+                "reward must be a number."
+            )
 
-        if not isinstance(self.done, bool):
-            raise TypeError("done must be a boolean.")
+        if not math.isfinite(
+            float(reward)
+        ):
+            raise ValueError(
+                "reward must be finite."
+            )
+
+    @staticmethod
+    def _validate_done(
+        done: bool,
+    ) -> None:
+        """Episode tamamlanma bilgisini doğrular."""
+        if not isinstance(
+            done,
+            bool,
+        ):
+            raise TypeError(
+                "done must be a boolean."
+            )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from rl.coverage_environment import CoverageEnvironment
@@ -54,27 +55,24 @@ class TrainingSessionResult:
     @property
     def best_episode(self) -> EpisodeStatistics | None:
         """
-        Tam coverage sağlayan episode'lar arasından en az adımlı
-        sonucu döndürür.
+        Proje hedeflerine göre en iyi episode sonucunu döndürür.
 
-        Adım sayıları eşitse reward değeri daha yüksek olan episode
-        tercih edilir. Tam coverage sağlayan episode yoksa None döner.
+        Öncelik sırası:
+        1. En yüksek final coverage,
+        2. Aynı coverage değerinde en az çalıştırılmış test,
+        3. Test sayısı eşitse en yüksek toplam reward,
+        4. Hâlâ eşitse daha erken episode.
         """
-        full_coverage_episodes = [
-            episode
-            for episode in self.episodes
-            if episode.full_coverage
-        ]
-
-        if not full_coverage_episodes:
+        if not self.episodes:
             return None
 
-        return min(
-            full_coverage_episodes,
+        return max(
+            self.episodes,
             key=lambda episode: (
-                episode.step_count,
-                -episode.total_reward,
-                episode.episode_number,
+                episode.final_coverage_percentage,
+                -episode.executed_test_count,
+                episode.total_reward,
+                -episode.episode_number,
             ),
         )
 
@@ -84,13 +82,13 @@ class TrainingSession:
     QLearningTrainer kullanarak birden fazla episode çalıştırır
     ve her episode sonucunu TrainingStatistics içerisinde kaydeder.
 
-    Bu sınıf:
-    - QTable oluşturmaz veya sıfırlamaz,
-    - Action seçme algoritmasını değiştirmez,
-    - CoverageEnvironment geçişlerini yönetmez.
-
     Aynı trainer ve agent kullanıldığı için QTable episode'lar
     arasında korunur.
+
+    epsilon_decay_rate verilirse her tamamlanan episode sonrasında
+    agent policy'sinin epsilon değeri azaltılır. Böylece eğitim
+    başlangıcında daha fazla keşif, ilerleyen episode'larda ise
+    daha fazla exploitation yapılabilir.
     """
 
     __slots__ = (
@@ -105,14 +103,6 @@ class TrainingSession:
     ) -> None:
         """
         Eğitim oturumunun bağımlılıklarını hazırlar.
-
-        Args:
-            trainer:
-                Her episode'u çalıştıracak QLearningTrainer.
-
-            statistics:
-                Episode sonuçlarını saklayacak istatistik bileşeni.
-                Verilmezse yeni bir TrainingStatistics oluşturulur.
         """
         self._validate_trainer(trainer)
         self._validate_statistics(statistics)
@@ -140,14 +130,11 @@ class TrainingSession:
         episode_count: int,
         *,
         clear_statistics: bool = True,
+        epsilon_decay_rate: float | None = None,
+        minimum_epsilon: float = 0.0,
     ) -> TrainingSessionResult:
         """
         Belirtilen sayıda episode çalıştırır.
-
-        Her episode başlamadan önce environment, QLearningTrainer
-        tarafından reset edilir. Environment reset edilirken state,
-        action listesi ve episode'a özel transition verileri temizlenir.
-        QTable ise aynı agent içerisinde korunduğu için öğrenme devam eder.
 
         Args:
             environment:
@@ -157,24 +144,31 @@ class TrainingSession:
                 Çalıştırılacak episode sayısı.
 
             clear_statistics:
-                Eğitim başlamadan önce daha önce kaydedilmiş
-                istatistiklerin temizlenip temizlenmeyeceği.
+                Eğitim başlamadan önce eski istatistiklerin
+                temizlenip temizlenmeyeceği.
+
+            epsilon_decay_rate:
+                Her tamamlanan episode sonrasında epsilon ile
+                çarpılacak decay katsayısı. None verilirse epsilon
+                değişmez ve eski davranış korunur.
+
+            minimum_epsilon:
+                Decay aktifken epsilon değerinin düşebileceği
+                minimum keşif oranı.
 
         Returns:
             Eğitim oturumunun episode sonuçlarını içeren
             TrainingSessionResult.
-
-        Raises:
-            TypeError:
-                environment, episode_count veya clear_statistics
-                geçersiz türdeyse.
-
-            ValueError:
-                episode_count sıfır veya negatifse.
         """
         self._validate_environment(environment)
         self._validate_episode_count(episode_count)
         self._validate_clear_statistics(clear_statistics)
+        self._validate_epsilon_decay_rate(
+            epsilon_decay_rate
+        )
+        self._validate_minimum_epsilon(
+            minimum_epsilon
+        )
 
         if clear_statistics:
             self._statistics.clear()
@@ -196,6 +190,12 @@ class TrainingSession:
             completed_episodes.append(
                 episode_statistics
             )
+
+            if epsilon_decay_rate is not None:
+                self._trainer.agent.policy.decay_epsilon(
+                    decay_rate=epsilon_decay_rate,
+                    minimum_epsilon=minimum_epsilon,
+                )
 
         return TrainingSessionResult(
             episodes=tuple(completed_episodes),
@@ -273,4 +273,80 @@ class TrainingSession:
         ):
             raise TypeError(
                 "clear_statistics bool olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_epsilon_decay_rate(
+        epsilon_decay_rate: float | None,
+    ) -> None:
+        if epsilon_decay_rate is None:
+            return
+
+        if (
+            isinstance(epsilon_decay_rate, bool)
+            or not isinstance(
+                epsilon_decay_rate,
+                (int, float),
+            )
+        ):
+            raise TypeError(
+                "epsilon_decay_rate sayısal bir değer "
+                "veya None olmalıdır."
+            )
+
+        normalized_value = float(
+            epsilon_decay_rate
+        )
+
+        if not math.isfinite(
+            normalized_value
+        ):
+            raise ValueError(
+                "epsilon_decay_rate sonlu olmalıdır."
+            )
+
+        if not (
+            0.0
+            <= normalized_value
+            <= 1.0
+        ):
+            raise ValueError(
+                "epsilon_decay_rate 0 ile 1 "
+                "arasında olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_minimum_epsilon(
+        minimum_epsilon: float,
+    ) -> None:
+        if (
+            isinstance(minimum_epsilon, bool)
+            or not isinstance(
+                minimum_epsilon,
+                (int, float),
+            )
+        ):
+            raise TypeError(
+                "minimum_epsilon sayısal olmalıdır."
+            )
+
+        normalized_value = float(
+            minimum_epsilon
+        )
+
+        if not math.isfinite(
+            normalized_value
+        ):
+            raise ValueError(
+                "minimum_epsilon sonlu olmalıdır."
+            )
+
+        if not (
+            0.0
+            <= normalized_value
+            <= 1.0
+        ):
+            raise ValueError(
+                "minimum_epsilon 0 ile 1 "
+                "arasında olmalıdır."
             )

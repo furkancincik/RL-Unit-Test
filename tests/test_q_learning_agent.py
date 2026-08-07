@@ -35,11 +35,21 @@ def create_agent(
 
 def create_state_key(
     coverage_bucket: int = 5,
+    missing_lines_bucket: int = 2,
+    uncovered_branches_bucket: int = 1,
+    executed_tests_bucket: int = 0,
 ) -> StateKey:
+    """
+    QLearningAgent testlerinde kullanılacak StateKey nesnesini oluşturur.
+
+    executed_tests_bucket, RL state yapısına sonradan eklenen
+    çalıştırılmış test sayısı bilgisini temsil eder.
+    """
     return StateKey(
         coverage_bucket=coverage_bucket,
-        missing_lines_bucket=2,
-        uncovered_branches_bucket=1,
+        missing_lines_bucket=missing_lines_bucket,
+        uncovered_branches_bucket=uncovered_branches_bucket,
+        executed_tests_bucket=executed_tests_bucket,
     )
 
 
@@ -903,3 +913,18 @@ def test_agent_update_rejects_invalid_terminal(
             next_actions=(),
             terminal=terminal,  # type: ignore[arg-type]
         )
+
+
+def test_create_state_key_supports_executed_tests_bucket() -> None:
+    state_key = create_state_key(
+        coverage_bucket=7,
+        missing_lines_bucket=1,
+        uncovered_branches_bucket=0,
+        executed_tests_bucket=4,
+    )
+
+    assert state_key.coverage_bucket == 7
+    assert state_key.missing_lines_bucket == 1
+    assert state_key.uncovered_branches_bucket == 0
+    assert state_key.executed_tests_bucket == 4
+

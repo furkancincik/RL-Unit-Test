@@ -10,25 +10,6 @@ from rl.environment_step import EnvironmentStep
 class EpisodeStatistics:
     """
     Tek bir RL episode'unun özet sonuçlarını temsil eder.
-
-    Attributes:
-        episode_number:
-            Episode'un bir tabanlı sıra numarası.
-
-        step_count:
-            Episode boyunca gerçekleştirilen adım sayısı.
-
-        total_reward:
-            Episode boyunca elde edilen reward değerlerinin toplamı.
-
-        final_coverage_percentage:
-            Episode sonunda ulaşılan satır coverage yüzdesi.
-
-        full_coverage:
-            Episode sonunda tam coverage elde edilip edilmediği.
-
-        executed_test_count:
-            Episode sonunda çalıştırılmış toplam test sayısı.
     """
 
     episode_number: int
@@ -210,30 +191,83 @@ class TrainingStatistics:
         )
 
     @property
+    def best_episode(self) -> EpisodeStatistics | None:
+        """
+        Proje hedeflerine göre en iyi episode sonucunu döndürür.
+
+        Öncelik sırası:
+        1. En yüksek coverage,
+        2. Aynı coverage değerinde en az çalıştırılmış test,
+        3. Test sayısı eşitse en yüksek reward,
+        4. Hâlâ eşitse daha erken episode.
+        """
+        if not self._episodes:
+            return None
+
+        return max(
+            self._episodes,
+            key=lambda episode: (
+                episode.final_coverage_percentage,
+                -episode.executed_test_count,
+                episode.total_reward,
+                -episode.episode_number,
+            ),
+        )
+
+    @property
     def best_step_count(self) -> int:
         """
-        Tam coverage sağlayan episode'lar içindeki en düşük
-        adım sayısını döndürür.
+        En yüksek coverage değerine ulaşan episode'lar içerisindeki
+        en düşük adım sayısını döndürür.
 
-        Tam coverage sağlayan episode yoksa 0 döndürülür.
+        Hiç episode yoksa 0 döndürülür.
         """
-        full_coverage_episodes = [
+        if not self._episodes:
+            return 0
+
+        best_coverage = self.best_coverage_percentage
+
+        best_coverage_episodes = (
             episode
             for episode in self._episodes
-            if episode.full_coverage
-        ]
-
-        if not full_coverage_episodes:
-            return 0
+            if (
+                episode.final_coverage_percentage
+                == best_coverage
+            )
+        )
 
         return min(
             episode.step_count
-            for episode in full_coverage_episodes
+            for episode in best_coverage_episodes
+        )
+
+    @property
+    def best_executed_test_count(self) -> int:
+        """
+        En yüksek coverage değerine ulaşan episode'lar içerisindeki
+        minimum çalıştırılmış test sayısını döndürür.
+
+        Hiç episode yoksa 0 döndürülür.
+        """
+        if not self._episodes:
+            return 0
+
+        best_coverage = self.best_coverage_percentage
+
+        return min(
+            episode.executed_test_count
+            for episode in self._episodes
+            if (
+                episode.final_coverage_percentage
+                == best_coverage
+            )
         )
 
     @property
     def best_coverage_percentage(self) -> float:
-        """Episode'lar içinde ulaşılan en yüksek coverage değerini döndürür."""
+        """
+        Episode'lar içinde ulaşılan en yüksek coverage değerini döndürür.
+        """
         if not self._episodes:
             return 0.0
 
@@ -256,22 +290,6 @@ class TrainingStatistics:
     ) -> EpisodeStatistics:
         """
         Tamamlanmış bir episode'un adımlarından istatistik üretir.
-
-        Args:
-            steps:
-                QLearningTrainer tarafından döndürülen episode
-                adımları.
-
-        Returns:
-            Oluşturulan EpisodeStatistics nesnesi.
-
-        Raises:
-            TypeError:
-                steps tuple değilse veya geçersiz eleman içeriyorsa.
-
-            ValueError:
-                Episode hiç adım içermiyorsa ya da son adım
-                tamamlanmamışsa.
         """
         self._validate_steps(steps)
 

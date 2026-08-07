@@ -271,7 +271,7 @@ def test_average_step_count_returns_average() -> None:
     assert statistics.average_step_count == 2.5
 
 
-def test_best_step_count_uses_only_full_coverage_episodes() -> None:
+def test_best_step_count_uses_highest_coverage_episodes() -> None:
     statistics = TrainingStatistics()
 
     statistics.record_episode(
@@ -291,10 +291,12 @@ def test_best_step_count_uses_only_full_coverage_episodes() -> None:
                 uncovered_branches=1,
             ),
             create_step(
-                coverage_percentage=100.0,
+                coverage_percentage=95.0,
                 executed_tests=2,
                 reward=50.0,
                 done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
             ),
         ),
     )
@@ -302,7 +304,7 @@ def test_best_step_count_uses_only_full_coverage_episodes() -> None:
     assert statistics.best_step_count == 2
 
 
-def test_best_step_count_returns_zero_without_full_coverage() -> None:
+def test_best_step_count_works_without_full_coverage() -> None:
     statistics = TrainingStatistics()
 
     statistics.record_episode(
@@ -311,7 +313,7 @@ def test_best_step_count_returns_zero_without_full_coverage() -> None:
         ),
     )
 
-    assert statistics.best_step_count == 0
+    assert statistics.best_step_count == 3
 
 
 def test_best_coverage_percentage_returns_highest_value() -> None:
@@ -369,6 +371,8 @@ def test_clear_removes_all_statistics() -> None:
     assert statistics.best_reward == 0.0
     assert statistics.average_step_count == 0.0
     assert statistics.best_step_count == 0
+    assert statistics.best_executed_test_count == 0
+    assert statistics.best_episode is None
     assert statistics.best_coverage_percentage == 0.0
     assert statistics.full_coverage_episode_count == 0
 
@@ -492,3 +496,146 @@ def test_episode_statistics_rejects_non_boolean_full_coverage() -> None:
             full_coverage=1,  # type: ignore[arg-type]
             executed_test_count=1,
         )
+
+
+def test_best_episode_prioritizes_highest_coverage() -> None:
+    statistics = TrainingStatistics()
+
+    lower = statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=90.0,
+                executed_tests=1,
+                reward=100.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    higher = statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=3,
+                reward=50.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    assert statistics.best_episode is higher
+    assert statistics.best_episode is not lower
+
+
+def test_best_episode_prefers_fewer_tests_when_coverage_equal() -> None:
+    statistics = TrainingStatistics()
+
+    statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=5,
+                reward=100.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    fewer_tests = statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=2,
+                reward=70.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    assert statistics.best_episode is fewer_tests
+    assert statistics.best_executed_test_count == 2
+
+
+def test_best_episode_prefers_higher_reward_after_coverage_and_test_tie() -> None:
+    statistics = TrainingStatistics()
+
+    statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=2,
+                reward=40.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    higher_reward = statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=2,
+                reward=70.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    assert statistics.best_episode is higher_reward
+
+
+def test_best_executed_test_count_uses_highest_coverage_only() -> None:
+    statistics = TrainingStatistics()
+
+    statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=90.0,
+                executed_tests=1,
+                reward=100.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=4,
+                reward=50.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    statistics.record_episode(
+        steps=(
+            create_step(
+                coverage_percentage=95.0,
+                executed_tests=2,
+                reward=60.0,
+                done=True,
+                missing_lines=(1,),
+                uncovered_branches=1,
+            ),
+        ),
+    )
+
+    assert statistics.best_executed_test_count == 2

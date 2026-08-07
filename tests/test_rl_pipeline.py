@@ -61,7 +61,42 @@ def test_rl_pipeline_encodes_coverage_state() -> None:
         coverage_bucket=8,
         missing_lines_bucket=1,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=4,
     )
+
+
+def test_rl_pipeline_distinguishes_same_coverage_with_different_test_counts() -> None:
+    """
+    Aynı coverage durumuna farklı test sayılarıyla ulaşılması,
+    farklı RL state'leri üretmelidir.
+    """
+    encoder = StateEncoder()
+
+    first_state = CoverageState(
+        coverage_percentage=82.0,
+        executed_tests=4,
+        missing_lines=(10, 12, 15),
+        uncovered_branches=2,
+    )
+
+    second_state = CoverageState(
+        coverage_percentage=82.0,
+        executed_tests=5,
+        missing_lines=(10, 12, 15),
+        uncovered_branches=2,
+    )
+
+    first_key = encoder.encode(
+        state=first_state,
+    )
+
+    second_key = encoder.encode(
+        state=second_state,
+    )
+
+    assert first_key != second_key
+    assert first_key.executed_tests_bucket == 4
+    assert second_key.executed_tests_bucket == 5
 
 
 def test_rl_pipeline_selects_best_action() -> None:

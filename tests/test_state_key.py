@@ -10,11 +10,13 @@ def test_state_key_can_be_created() -> None:
         coverage_bucket=7,
         missing_lines_bucket=2,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=3,
     )
 
     assert state_key.coverage_bucket == 7
     assert state_key.missing_lines_bucket == 2
     assert state_key.uncovered_branches_bucket == 1
+    assert state_key.executed_tests_bucket == 3
 
 
 def test_state_key_accepts_zero_buckets() -> None:
@@ -22,12 +24,14 @@ def test_state_key_accepts_zero_buckets() -> None:
         coverage_bucket=0,
         missing_lines_bucket=0,
         uncovered_branches_bucket=0,
+        executed_tests_bucket=0,
     )
 
     assert state_key == StateKey(
         coverage_bucket=0,
         missing_lines_bucket=0,
         uncovered_branches_bucket=0,
+        executed_tests_bucket=0,
     )
 
 
@@ -36,12 +40,14 @@ def test_state_keys_with_same_values_are_equal() -> None:
         coverage_bucket=5,
         missing_lines_bucket=3,
         uncovered_branches_bucket=2,
+        executed_tests_bucket=4,
     )
 
     second_key = StateKey(
         coverage_bucket=5,
         missing_lines_bucket=3,
         uncovered_branches_bucket=2,
+        executed_tests_bucket=4,
     )
 
     assert first_key == second_key
@@ -52,12 +58,32 @@ def test_state_keys_with_different_values_are_not_equal() -> None:
         coverage_bucket=5,
         missing_lines_bucket=3,
         uncovered_branches_bucket=2,
+        executed_tests_bucket=4,
     )
 
     second_key = StateKey(
         coverage_bucket=6,
         missing_lines_bucket=3,
         uncovered_branches_bucket=2,
+        executed_tests_bucket=4,
+    )
+
+    assert first_key != second_key
+
+
+def test_state_keys_with_different_executed_test_buckets_are_not_equal() -> None:
+    first_key = StateKey(
+        coverage_bucket=5,
+        missing_lines_bucket=3,
+        uncovered_branches_bucket=2,
+        executed_tests_bucket=4,
+    )
+
+    second_key = StateKey(
+        coverage_bucket=5,
+        missing_lines_bucket=3,
+        uncovered_branches_bucket=2,
+        executed_tests_bucket=5,
     )
 
     assert first_key != second_key
@@ -68,12 +94,14 @@ def test_state_key_is_hashable() -> None:
         coverage_bucket=5,
         missing_lines_bucket=2,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=3,
     )
 
     second_key = StateKey(
         coverage_bucket=5,
         missing_lines_bucket=2,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=3,
     )
 
     state_keys = {
@@ -90,6 +118,7 @@ def test_state_key_is_hashable() -> None:
         "coverage_bucket",
         "missing_lines_bucket",
         "uncovered_branches_bucket",
+        "executed_tests_bucket",
     ],
 )
 def test_state_key_rejects_negative_bucket(
@@ -99,6 +128,7 @@ def test_state_key_rejects_negative_bucket(
         "coverage_bucket": 1,
         "missing_lines_bucket": 1,
         "uncovered_branches_bucket": 1,
+        "executed_tests_bucket": 1,
     }
 
     values[field_name] = -1
@@ -120,6 +150,10 @@ def test_state_key_rejects_negative_bucket(
         ("missing_lines_bucket", False),
         ("uncovered_branches_bucket", 2.5),
         ("uncovered_branches_bucket", "2"),
+        ("executed_tests_bucket", 2.5),
+        ("executed_tests_bucket", "2"),
+        ("executed_tests_bucket", True),
+        ("executed_tests_bucket", None),
     ],
 )
 def test_state_key_rejects_non_integer_bucket(
@@ -130,6 +164,7 @@ def test_state_key_rejects_non_integer_bucket(
         "coverage_bucket": 1,
         "missing_lines_bucket": 1,
         "uncovered_branches_bucket": 1,
+        "executed_tests_bucket": 1,
     }
 
     values[field_name] = invalid_value
@@ -146,6 +181,7 @@ def test_state_key_is_immutable() -> None:
         coverage_bucket=5,
         missing_lines_bucket=2,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=3,
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -157,6 +193,7 @@ def test_state_key_has_readable_representation() -> None:
         coverage_bucket=5,
         missing_lines_bucket=2,
         uncovered_branches_bucket=1,
+        executed_tests_bucket=3,
     )
 
     representation = repr(state_key)
@@ -165,3 +202,4 @@ def test_state_key_has_readable_representation() -> None:
     assert "coverage_bucket=5" in representation
     assert "missing_lines_bucket=2" in representation
     assert "uncovered_branches_bucket=1" in representation
+    assert "executed_tests_bucket=3" in representation

@@ -7,6 +7,7 @@ from rl.reward_calculator import RewardCalculator
 def create_state(
     coverage_percentage: float,
     executed_tests: int = 0,
+    uncovered_branches: int = 0,
 ) -> CoverageState:
     """
     RewardCalculator testlerinde kullanılmak üzere CoverageState üretir.
@@ -15,7 +16,7 @@ def create_state(
         coverage_percentage=coverage_percentage,
         executed_tests=executed_tests,
         missing_lines=(),
-        uncovered_branches=0,
+        uncovered_branches=uncovered_branches,
     )
 
 
@@ -77,6 +78,130 @@ def test_no_improvement_penalty_is_applied() -> None:
     )
 
     assert reward == pytest.approx(-1.1)
+
+
+def test_branch_improvement_adds_reward() -> None:
+    calculator = RewardCalculator()
+
+    current_state = create_state(
+        coverage_percentage=60.0,
+        executed_tests=2,
+        uncovered_branches=8,
+    )
+    next_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=3,
+        uncovered_branches=5,
+    )
+
+    reward = calculator.calculate(
+        current_state=current_state,
+        next_state=next_state,
+    )
+
+    assert reward == pytest.approx(11.4)
+
+
+def test_branch_only_improvement_is_rewarded_without_no_improvement_penalty() -> None:
+    calculator = RewardCalculator()
+
+    current_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=2,
+        uncovered_branches=6,
+    )
+    next_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=3,
+        uncovered_branches=4,
+    )
+
+    reward = calculator.calculate(
+        current_state=current_state,
+        next_state=next_state,
+    )
+
+    assert reward == pytest.approx(0.9)
+
+
+def test_branch_regression_reduces_reward() -> None:
+    calculator = RewardCalculator()
+
+    current_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=2,
+        uncovered_branches=3,
+    )
+    next_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=3,
+        uncovered_branches=5,
+    )
+
+    reward = calculator.calculate(
+        current_state=current_state,
+        next_state=next_state,
+    )
+
+    assert reward == pytest.approx(-2.1)
+
+
+def test_higher_branch_improvement_gets_higher_reward_for_same_line_gain() -> None:
+    calculator = RewardCalculator()
+
+    current_state = create_state(
+        coverage_percentage=60.0,
+        executed_tests=2,
+        uncovered_branches=8,
+    )
+
+    small_branch_gain_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=3,
+        uncovered_branches=7,
+    )
+
+    large_branch_gain_state = create_state(
+        coverage_percentage=70.0,
+        executed_tests=3,
+        uncovered_branches=4,
+    )
+
+    small_reward = calculator.calculate(
+        current_state=current_state,
+        next_state=small_branch_gain_state,
+    )
+
+    large_reward = calculator.calculate(
+        current_state=current_state,
+        next_state=large_branch_gain_state,
+    )
+
+    assert large_reward > small_reward
+
+
+def test_custom_branch_improvement_weight_is_used() -> None:
+    calculator = RewardCalculator(
+        branch_improvement_weight=2.0,
+    )
+
+    current_state = create_state(
+        coverage_percentage=50.0,
+        executed_tests=1,
+        uncovered_branches=5,
+    )
+    next_state = create_state(
+        coverage_percentage=50.0,
+        executed_tests=2,
+        uncovered_branches=3,
+    )
+
+    reward = calculator.calculate(
+        current_state=current_state,
+        next_state=next_state,
+    )
+
+    assert reward == pytest.approx(3.9)
 
 
 def test_full_coverage_bonus_is_applied() -> None:
@@ -190,15 +315,18 @@ def test_custom_reward_parameters_are_used() -> None:
         no_improvement_penalty=2.0,
         test_execution_cost=0.5,
         full_coverage_bonus=20.0,
+        branch_improvement_weight=1.0,
     )
 
     current_state = create_state(
         coverage_percentage=90.0,
         executed_tests=2,
+        uncovered_branches=2,
     )
     next_state = create_state(
         coverage_percentage=100.0,
         executed_tests=3,
+        uncovered_branches=0,
     )
 
     reward = calculator.calculate(
@@ -206,7 +334,7 @@ def test_custom_reward_parameters_are_used() -> None:
         next_state=next_state,
     )
 
-    assert reward == pytest.approx(29.5)
+    assert reward == pytest.approx(31.5)
 
 
 def test_zero_reward_parameters_are_allowed() -> None:
@@ -214,15 +342,18 @@ def test_zero_reward_parameters_are_allowed() -> None:
         no_improvement_penalty=0.0,
         test_execution_cost=0.0,
         full_coverage_bonus=0.0,
+        branch_improvement_weight=0.0,
     )
 
     current_state = create_state(
         coverage_percentage=50.0,
         executed_tests=1,
+        uncovered_branches=5,
     )
     next_state = create_state(
         coverage_percentage=60.0,
         executed_tests=2,
+        uncovered_branches=3,
     )
 
     reward = calculator.calculate(
@@ -239,6 +370,7 @@ def test_zero_reward_parameters_are_allowed() -> None:
         ("no_improvement_penalty", -1.0),
         ("test_execution_cost", -0.1),
         ("full_coverage_bonus", -5.0),
+        ("branch_improvement_weight", -0.5),
     ],
 )
 def test_reward_parameters_cannot_be_negative(
@@ -249,6 +381,7 @@ def test_reward_parameters_cannot_be_negative(
         "no_improvement_penalty": 1.0,
         "test_execution_cost": 0.1,
         "full_coverage_bonus": 10.0,
+        "branch_improvement_weight": 0.5,
     }
 
     parameters[parameter_name] = parameter_value
@@ -267,6 +400,9 @@ def test_reward_parameters_cannot_be_negative(
         ("test_execution_cost", None),
         ("full_coverage_bonus", True),
         ("no_improvement_penalty", False),
+        ("branch_improvement_weight", "0.5"),
+        ("branch_improvement_weight", None),
+        ("branch_improvement_weight", True),
     ],
 )
 def test_reward_parameters_must_be_numeric(
@@ -277,6 +413,7 @@ def test_reward_parameters_must_be_numeric(
         "no_improvement_penalty": 1.0,
         "test_execution_cost": 0.1,
         "full_coverage_bonus": 10.0,
+        "branch_improvement_weight": 0.5,
     }
 
     parameters[parameter_name] = parameter_value
