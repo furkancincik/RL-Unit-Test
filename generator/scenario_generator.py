@@ -143,6 +143,10 @@ class ScenarioGenerator:
         scores: list[DQMScore],
         parameter_names: tuple[str, ...] = (),
         parameter_types: dict[str, str] | None = None,
+        candidate_values_by_path: dict[
+            int,
+            dict[str, Any],
+        ] | None = None,
     ) -> list[Scenario]:
         """
         Bir fonksiyona ait yürütme yollarını test senaryolarına
@@ -166,6 +170,15 @@ class ScenarioGenerator:
             parameter_names:
                 Test edilen fonksiyonun parametre adları.
 
+            parameter_types:
+                Parametre type hint eşlemesi.
+
+            candidate_values_by_path:
+                Path index -> candidate value sözlüğü eşlemesi.
+                Feasibility / InputCandidateGenerator katmanından gelen
+                adaylar ilgili yürütme yolu için PathInputGenerator'a
+                aktarılır.
+
         Returns:
             DQM önceliğine göre sıralanmış, yalnızca ulaşılabilir
             test senaryoları.
@@ -185,6 +198,11 @@ class ScenarioGenerator:
         self._validate_paths(paths)
         self._validate_scores(scores)
         self._validate_parameter_names(parameter_names)
+
+        self._validate_candidate_values_by_path(
+            candidate_values_by_path
+        )
+
         normalized_parameter_types = (
             self._normalize_parameter_types(
                 parameter_types=parameter_types,
@@ -207,6 +225,14 @@ class ScenarioGenerator:
                         path=path,
                         parameter_names=parameter_names,
                         parameter_types=normalized_parameter_types,
+                        candidate_values=(
+                            candidate_values_by_path.get(
+                                score.path_index
+                            )
+                            if candidate_values_by_path
+                            is not None
+                            else None
+                        ),
                     )
                 )
             except UnreachablePathError:
@@ -358,6 +384,60 @@ class ScenarioGenerator:
             raise ValueError(
                 "parameter_names tekrar eden değer içeremez."
             )
+
+    @staticmethod
+    def _validate_candidate_values_by_path(
+        candidate_values_by_path: dict[
+            int,
+            dict[str, Any],
+        ] | None,
+    ) -> None:
+        """
+        Path index bazlı candidate input eşlemesini doğrular.
+        """
+        if candidate_values_by_path is None:
+            return
+
+        if not isinstance(
+            candidate_values_by_path,
+            dict,
+        ):
+            raise TypeError(
+                "candidate_values_by_path bir dict veya None olmalıdır."
+            )
+
+        for path_index, candidate_values in (
+            candidate_values_by_path.items()
+        ):
+            if (
+                not isinstance(path_index, int)
+                or isinstance(path_index, bool)
+                or path_index <= 0
+            ):
+                raise ValueError(
+                    "candidate_values_by_path anahtarları "
+                    "pozitif int path index değerleri olmalıdır."
+                )
+
+            if not isinstance(
+                candidate_values,
+                dict,
+            ):
+                raise TypeError(
+                    "candidate_values_by_path değerleri "
+                    "dict olmalıdır."
+                )
+
+            for variable_name in candidate_values:
+                if (
+                    not isinstance(variable_name, str)
+                    or not variable_name.strip()
+                ):
+                    raise ValueError(
+                        "candidate_values_by_path içindeki "
+                        "değişken adları boş olmayan string "
+                        "değerler olmalıdır."
+                    )
 
     @staticmethod
     def _normalize_parameter_types(

@@ -881,9 +881,18 @@ class PathFeasibilityAnalyzer:
         unsupported: list[str] = []
 
         for step in path.steps:
-            if step.node_type == "Assign":
-                assignment = self._parse_local_numeric_assignment(
-                    step.node_label
+            if step.node_type in {
+                "Assign",
+                "AnnAssign",
+            }:
+                assignment = (
+                    self._parse_local_numeric_assignment(
+                        step.node_label
+                    )
+                    if step.node_type == "Assign"
+                    else self._parse_local_numeric_annassignment(
+                        step.node_label
+                    )
                 )
 
                 if assignment is not None:
@@ -898,6 +907,10 @@ class PathFeasibilityAnalyzer:
 
                 assigned_name = (
                     self._extract_simple_assignment_target(
+                        step.node_label
+                    )
+                    if step.node_type == "Assign"
+                    else self._extract_simple_annassignment_target(
                         step.node_label
                     )
                 )
@@ -1086,22 +1099,31 @@ class PathFeasibilityAnalyzer:
         path: ExecutionPath,
     ) -> set[str]:
         """
-        Bir while koşulunda kullanılan, ilk while ziyaretinden önce local
-        assignment alan ve path üzerinde AugAssign ile güncellenen isimleri
-        döndürür.
+        İlk while ziyaretinden önce local assignment alan ve while koşulunda
+        kullanılan isimleri döndürür.
+
+        Önemli:
+        Bir local while değişkenini tanımak için path üzerinde mutlaka
+        ``AugAssign`` görülmesi şart değildir. Sıfır iterasyonlu bir CFG
+        yolunda döngü gövdesi hiç çalışmadığı için update düğümü path'e
+        girmez. Buna rağmen örneğin ``counter = 2`` sonrasında
+        ``counter > 0 -> False`` akışı kesin olarak çelişkili olabilir.
+
+        Update'in desteklenip desteklenmediği ayrı olarak
+        ``_analyze_local_while_paths`` içinde değerlendirilir. Böylece
+        zero-iteration path'leri kanıtlayabilirken, bilinmeyen/unsupported
+        update içeren yollar yanlışlıkla INFEASIBLE yapılmaz.
 
         İsimler veya literal değerler dataset'e özel olarak hard-code edilmez.
         """
         if not path.has_node_metadata:
             return set()
 
-        while_names: set[str] = set()
         first_while_index_by_name: dict[str, int] = {}
         assigned_indices_by_name: dict[
             str,
             list[int],
         ] = {}
-        augmented_names: set[str] = set()
 
         for index, step in enumerate(
             path.steps
@@ -1110,17 +1132,21 @@ class PathFeasibilityAnalyzer:
                 for name in self._condition_name_set(
                     step.node_label
                 ):
-                    while_names.add(
-                        name
-                    )
                     first_while_index_by_name.setdefault(
                         name,
                         index,
                     )
 
-            elif step.node_type == "Assign":
+            elif step.node_type in {
+                "Assign",
+                "AnnAssign",
+            }:
                 target = (
                     self._extract_simple_assignment_target(
+                        step.node_label
+                    )
+                    if step.node_type == "Assign"
+                    else self._extract_simple_annassignment_target(
                         step.node_label
                     )
                 )
@@ -1133,33 +1159,14 @@ class PathFeasibilityAnalyzer:
                         index
                     )
 
-            elif step.node_type == "AugAssign":
-                target = self._extract_augassign_target(
-                    step.node_label
-                )
-
-                if target is not None:
-                    augmented_names.add(
-                        target
-                    )
-
         result: set[str] = set()
 
-        for name in (
-            while_names & augmented_names
-        ):
-            first_while_index = (
-                first_while_index_by_name.get(
-                    name
-                )
-            )
-
-            if first_while_index is None:
-                continue
-
+        for (
+            name,
+            first_while_index,
+        ) in first_while_index_by_name.items():
             if any(
-                assignment_index
-                < first_while_index
+                assignment_index < first_while_index
                 for assignment_index
                 in assigned_indices_by_name.get(
                     name,
@@ -1171,6 +1178,39 @@ class PathFeasibilityAnalyzer:
                 )
 
         return result
+
+    @staticmethod
+    def _extract_simple_annassignment_target(
+        statement_text: str,
+    ) -> str | None:
+        """
+        ``name: Type = value`` biçimindeki basit AnnAssign hedefini döndürür.
+        """
+        try:
+            module = ast.parse(
+                statement_text
+            )
+        except SyntaxError:
+            return None
+
+        if (
+            len(module.body) != 1
+            or not isinstance(
+                module.body[0],
+                ast.AnnAssign,
+            )
+        ):
+            return None
+
+        statement = module.body[0]
+
+        if not isinstance(
+            statement.target,
+            ast.Name,
+        ):
+            return None
+
+        return statement.target.id
 
     @staticmethod
     def _condition_references_any_name(
@@ -1282,6 +1322,53 @@ class PathFeasibilityAnalyzer:
 
         return (
             target_name,
+            value,
+        )
+
+    @classmethod
+    def _parse_local_numeric_annassignment(
+        cls,
+        statement_text: str,
+    ) -> tuple[str, float] | None:
+        """
+        ``name: Type = numeric_literal`` biçimindeki local atamayı çözümler.
+        """
+        try:
+            module = ast.parse(
+                statement_text
+            )
+        except SyntaxError:
+            return None
+
+        if (
+            len(module.body) != 1
+            or not isinstance(
+                module.body[0],
+                ast.AnnAssign,
+            )
+        ):
+            return None
+
+        statement = module.body[0]
+
+        if (
+            not isinstance(
+                statement.target,
+                ast.Name,
+            )
+            or statement.value is None
+        ):
+            return None
+
+        value = cls._numeric_ast_literal(
+            statement.value
+        )
+
+        if value is None:
+            return None
+
+        return (
+            statement.target.id,
             value,
         )
 

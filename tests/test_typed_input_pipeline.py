@@ -50,6 +50,7 @@ def test_analyzer_extracts_parameter_type_hints(
     tmp_path,
 ) -> None:
     source_file = tmp_path / "typed_sample.py"
+
     source_file.write_text(
         """
 def process(
@@ -73,6 +74,7 @@ def process(
         "items": "list[int]",
         "enabled": "bool",
     }
+
     assert function.typed_parameter_count == 4
 
 
@@ -80,6 +82,7 @@ def test_analyzer_omits_untyped_parameters(
     tmp_path,
 ) -> None:
     source_file = tmp_path / "partly_typed.py"
+
     source_file.write_text(
         """
 def process(score: int, payload):
@@ -92,15 +95,23 @@ def process(score: int, payload):
         source_file
     ).functions[0]
 
-    assert function.parameters == ["score", "payload"]
+    assert function.parameters == [
+        "score",
+        "payload",
+    ]
+
     assert function.parameter_types == {
         "score": "int",
     }
+
     assert function.typed_parameter_count == 1
 
 
 @pytest.mark.parametrize(
-    ("parameter_type", "expected_value"),
+    (
+        "parameter_type",
+        "expected_value",
+    ),
     (
         ("str", ""),
         ("float", 0.0),
@@ -140,7 +151,10 @@ def test_generate_uses_typed_default_values(
         },
     )
 
-    assert result.keyword_argument_dict["value"] == expected_value
+    assert (
+        result.keyword_argument_dict["value"]
+        == expected_value
+    )
 
 
 def test_generate_creates_truthy_list_for_false_not_condition(
@@ -295,7 +309,10 @@ def test_generate_rejects_unknown_parameter_type_name() -> None:
 
     with pytest.raises(
         ValueError,
-        match="parameter_types bilinmeyen parametre içeriyor",
+        match=(
+            "parameter_types bilinmeyen "
+            "parametre içeriyor"
+        ),
     ):
         PathInputGenerator().generate(
             path=path,
@@ -310,6 +327,7 @@ def test_scenario_generator_forwards_parameter_types() -> None:
     path_input_generator = Mock(
         spec=PathInputGenerator,
     )
+
     path_input_generator.generate.return_value = (
         GeneratedTestInput(
             keyword_arguments=(
@@ -359,7 +377,9 @@ def test_scenario_generator_forwards_parameter_types() -> None:
         parameter_types={
             "items": "list[int]",
         },
+        candidate_values=None,
     )
+
     assert scenarios[0].keyword_argument_dict == {
         "items": [0],
     }
@@ -371,7 +391,10 @@ def test_scenario_generator_rejects_unknown_parameter_type(
 
     with pytest.raises(
         ValueError,
-        match="parameter_types bilinmeyen parametre içeriyor",
+        match=(
+            "parameter_types bilinmeyen "
+            "parametre içeriyor"
+        ),
     ):
         generator.generate(
             function_name="process",

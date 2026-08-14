@@ -452,3 +452,228 @@ def test_generate_rejects_duplicate_parameter_names() -> None:
                 "score",
             ),
         )
+
+# ============================================================
+# ScenarioGenerator candidate_values_by_path integration tests
+# ============================================================
+
+
+def test_generate_forwards_candidate_values_to_matching_path() -> None:
+    path_input_generator = Mock(
+        spec=PathInputGenerator,
+    )
+
+    path_input_generator.generate.return_value = (
+        GeneratedTestInput(
+            keyword_arguments=(("score", 90),),
+            expected_result=1,
+        )
+    )
+
+    generator = ScenarioGenerator(
+        path_input_generator=path_input_generator,
+    )
+
+    generator.generate(
+        function_name="calculate_score",
+        paths=[create_mock_path(1)],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("score",),
+        candidate_values_by_path={
+            1: {
+                "score": 90,
+            },
+        },
+    )
+
+    path_input_generator.generate.assert_called_once_with(
+        path=create_mock_path(1),
+        parameter_names=("score",),
+        parameter_types={},
+        candidate_values={
+            "score": 90,
+        },
+    )
+
+
+def test_generate_uses_none_when_path_has_no_candidate_values() -> None:
+    path_input_generator = Mock(
+        spec=PathInputGenerator,
+    )
+
+    path_input_generator.generate.return_value = (
+        GeneratedTestInput(
+            keyword_arguments=(("score", 50),),
+            expected_result=1,
+        )
+    )
+
+    generator = ScenarioGenerator(
+        path_input_generator=path_input_generator,
+    )
+
+    generator.generate(
+        function_name="calculate_score",
+        paths=[create_mock_path(1)],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("score",),
+        candidate_values_by_path={
+            2: {
+                "score": 10,
+            },
+        },
+    )
+
+    call_kwargs = (
+        path_input_generator
+        .generate
+        .call_args
+        .kwargs
+    )
+
+    assert call_kwargs["candidate_values"] is None
+
+
+def test_generate_forwards_different_candidates_by_path() -> None:
+    path_input_generator = Mock(
+        spec=PathInputGenerator,
+    )
+
+    path_input_generator.generate.side_effect = [
+        GeneratedTestInput(
+            keyword_arguments=(("score", 90),),
+            expected_result=1,
+        ),
+        GeneratedTestInput(
+            keyword_arguments=(("score", 40),),
+            expected_result=2,
+        ),
+    ]
+
+    generator = ScenarioGenerator(
+        path_input_generator=path_input_generator,
+    )
+
+    generator.generate(
+        function_name="calculate_score",
+        paths=[
+            create_mock_path(1),
+            create_mock_path(2),
+        ],
+        scores=[
+            create_mock_score(1, 100.0),
+            create_mock_score(2, 90.0),
+        ],
+        parameter_names=("score",),
+        candidate_values_by_path={
+            1: {
+                "score": 90,
+            },
+            2: {
+                "score": 40,
+            },
+        },
+    )
+
+    calls = (
+        path_input_generator
+        .generate
+        .call_args_list
+    )
+
+    assert calls[0].kwargs[
+        "candidate_values"
+    ] == {
+        "score": 90,
+    }
+
+    assert calls[1].kwargs[
+        "candidate_values"
+    ] == {
+        "score": 40,
+    }
+
+
+def test_generate_rejects_invalid_candidate_values_by_path_type() -> None:
+    generator = ScenarioGenerator()
+
+    with pytest.raises(
+        TypeError,
+        match="candidate_values_by_path bir dict veya None olmalıdır.",
+    ):
+        generator.generate(
+            function_name="calculate_score",
+            paths=[],
+            scores=[],
+            parameter_names=(),
+            candidate_values_by_path=[  # type: ignore[arg-type]
+                (1, {"score": 90}),
+            ],
+        )
+
+
+def test_generate_rejects_invalid_candidate_path_index() -> None:
+    generator = ScenarioGenerator()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "candidate_values_by_path anahtarları "
+            "pozitif int path index"
+        ),
+    ):
+        generator.generate(
+            function_name="calculate_score",
+            paths=[],
+            scores=[],
+            parameter_names=(),
+            candidate_values_by_path={
+                0: {
+                    "score": 90,
+                },
+            },
+        )
+
+
+def test_generate_rejects_non_dict_candidate_values() -> None:
+    generator = ScenarioGenerator()
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            "candidate_values_by_path değerleri "
+            "dict olmalıdır."
+        ),
+    ):
+        generator.generate(
+            function_name="calculate_score",
+            paths=[],
+            scores=[],
+            parameter_names=(),
+            candidate_values_by_path={
+                1: 90,  # type: ignore[dict-item]
+            },
+        )
+
+
+def test_generate_rejects_empty_candidate_variable_name() -> None:
+    generator = ScenarioGenerator()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "candidate_values_by_path içindeki "
+            "değişken adları boş olmayan string"
+        ),
+    ):
+        generator.generate(
+            function_name="calculate_score",
+            paths=[],
+            scores=[],
+            parameter_names=(),
+            candidate_values_by_path={
+                1: {
+                    "": 90,
+                },
+            },
+        )

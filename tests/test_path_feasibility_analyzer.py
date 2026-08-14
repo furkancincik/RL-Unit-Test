@@ -3718,3 +3718,39 @@ def test_local_while_with_unsupported_update_is_not_proven_infeasible() -> None:
     # Desteklenmeyen update için güvenlik ilkesi:
     # kesin çelişki kanıtlanamadığı sürece INFEASIBLE denmemeli.
     assert result.status != FeasibilityStatus.INFEASIBLE
+
+
+def test_local_constant_while_zero_iteration_is_infeasible() -> None:
+    """
+    Sabit pozitif bir local değişken ile başlayan while döngüsünün
+    sıfır iterasyonlu CFG yolu erişilemez olmalıdır.
+
+    Path üzerinde döngü gövdesindeki AugAssign bulunmasa bile
+    başlangıç ataması ile ilk while koşulu birlikte değerlendirilmelidir.
+    """
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "remaining_checks = 2",
+            "remaining_checks > 0",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+            "False",
+            None,
+        ],
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE

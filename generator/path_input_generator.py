@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, replace
@@ -81,7 +80,10 @@ class PathInputGenerator:
     - iç içe not ifadeleri
     - sınırlı while döngüsü girdileri
     - for döngüleri için iterable girdileri
+    - path replay sırasında for hedeflerinin iterasyon değerleri
+    - upstream katmanda çözülenmiş değişkenler arası ilişkiler
     - sabit ve güvenli dinamik return ifadeleri
+    - güvenli f-string return ifadeleri
 
     Bu sınıf pytest kodu üretmez. Yalnızca yürütme yolunu
     çalıştırabilecek girdileri ve beklenen sonucu hesaplar.
@@ -92,6 +94,7 @@ class PathInputGenerator:
         path: ExecutionPath,
         parameter_names: tuple[str, ...],
         parameter_types: dict[str, str] | None = None,
+        candidate_values: dict[str, Any] | None = None,
     ) -> GeneratedTestInput:
         """
         Yürütme yolundan test girdisi ve beklenen sonuç üretir.
@@ -102,6 +105,19 @@ class PathInputGenerator:
 
             parameter_names:
                 Test edilen fonksiyonun parametre adları.
+
+            parameter_types:
+                Parametre type hint eşlemesi.
+
+            candidate_values:
+                Feasibility / InputCandidateGenerator katmanından gelen
+                somut aday değerler. Yalnızca gerçek fonksiyon
+                parametreleri başlangıç direct-value girdisi olarak
+                uygulanır; yerel değişken adayları burada yok sayılır.
+
+                Döngü ve exception gibi path'e özgü daha güçlü yapısal
+                girdiler gerekirse bu başlangıç değerlerini güvenli biçimde
+                geçersiz kılabilir.
 
         Returns:
             Somut test girdilerini ve beklenen sonucu içeren nesne.
@@ -116,6 +132,7 @@ class PathInputGenerator:
         self._validate_input(
             path=path,
             parameter_names=parameter_names,
+            candidate_values=candidate_values,
         )
 
         normalized_parameter_types = (
@@ -126,7 +143,11 @@ class PathInputGenerator:
         )
 
         constraints: dict[str, _VariableConstraint] = {}
-        direct_values: dict[str, Any] = {}
+
+        direct_values = self._initialize_candidate_values(
+            candidate_values=candidate_values,
+            parameter_names=parameter_names,
+        )
 
         handled_loop_node_ids = self._apply_loop_inputs(
             path=path,
@@ -227,6 +248,7 @@ class PathInputGenerator:
     def _validate_input(
         path: ExecutionPath,
         parameter_names: tuple[str, ...],
+        candidate_values: dict[str, Any] | None,
     ) -> None:
         if not isinstance(path, ExecutionPath):
             raise TypeError(
@@ -258,6 +280,49 @@ class PathInputGenerator:
             raise ValueError(
                 "parameter_names tekrar eden değer içeremez."
             )
+
+        if candidate_values is not None:
+            if not isinstance(candidate_values, dict):
+                raise TypeError(
+                    "candidate_values bir dict veya None olmalıdır."
+                )
+
+            for variable_name in candidate_values:
+                if (
+                    not isinstance(variable_name, str)
+                    or not variable_name.strip()
+                ):
+                    raise ValueError(
+                        "candidate_values anahtarları boş olmayan "
+                        "string değerler olmalıdır."
+                    )
+
+    @staticmethod
+    def _initialize_candidate_values(
+        *,
+        candidate_values: dict[str, Any] | None,
+        parameter_names: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """
+        Feasibility katmanından gelen adayları direct-value başlangıç
+        girdilerine dönüştürür.
+
+        InputCandidateGenerator yerel symbolic değişkenler için de değer
+        üretebilir. PathInputGenerator yalnızca gerçek fonksiyon
+        parametrelerini doğrudan çağrı girdisi yapabildiği için diğer
+        değişkenler burada bilinçli olarak filtrelenir.
+        """
+        if candidate_values is None:
+            return {}
+
+        parameter_name_set = set(parameter_names)
+
+        return {
+            variable_name: value
+            for variable_name, value
+            in candidate_values.items()
+            if variable_name in parameter_name_set
+        }
 
     @staticmethod
     def _normalize_parameter_types(
@@ -1261,7 +1326,18 @@ class PathInputGenerator:
     ) -> None:
         """
         Basit karşılaştırma ifadesini değişken kısıtına dönüştürür.
+
+        Her iki tarafı da isim olan ilişkiler literal kısıt değildir.
+        Bu ilişkiler PathFeasibilityAnalyzer ve relational witness
+        katmanında çözülür. Burada tekrar literal olarak yorumlanmaları,
+        geçerli path'lerin aday üretimi sırasında hata vermesine neden olur.
         """
+        if (
+            isinstance(left, ast.Name)
+            and isinstance(right, ast.Name)
+        ):
+            return
+
         if isinstance(left, ast.Name):
             variable_name = left.id
             value = self._extract_literal(right)
@@ -2691,10 +2767,27 @@ class PathInputGenerator:
         """
         Return düğümünden önceki basit atamaları değerlendirme ortamına
         uygular.
+
+        Bir ``for`` düğümü ``Iterate`` kenarından geçildiğinde döngü
+        hedefi iterable'ın sıradaki değerine bağlanır. Aynı döngü
+        düğümünün tekrarlanan ziyaretleri aynı iterator'ı ilerletir.
         """
+        loop_iterators: dict[int, Any] = {}
+
         for step in path.steps:
             if step.node_id == return_node_id:
                 break
+
+            if (
+                step.node_type == "for"
+                and step.outgoing_edge_label == "Iterate"
+            ):
+                cls._bind_for_iteration_target(
+                    step=step,
+                    environment=environment,
+                    loop_iterators=loop_iterators,
+                )
+                continue
 
             if step.node_type not in {
                 "Assign",
@@ -2717,6 +2810,122 @@ class PathInputGenerator:
                 statement=statement,
                 environment=environment,
             )
+
+    @classmethod
+    def _bind_for_iteration_target(
+        cls,
+        *,
+        step: PathStep,
+        environment: dict[str, Any],
+        loop_iterators: dict[int, Any],
+    ) -> None:
+        """
+        Bir for path adımının hedefini sıradaki iterable değerine bağlar.
+
+        CFG for etiketi ``target in iterable`` biçimindedir. Iterable
+        ifadesi güvenli expression değerlendiricisiyle hesaplanır ve her
+        döngü düğümü için ayrı bir iterator tutulur.
+        """
+        try:
+            expression = ast.parse(
+                step.node_label,
+                mode="eval",
+            ).body
+        except SyntaxError as error:
+            raise ValueError(
+                "For döngüsü ifadesi çözümlenemedi: "
+                f"{step.node_label}"
+            ) from error
+
+        if not (
+            isinstance(expression, ast.Compare)
+            and len(expression.ops) == 1
+            and isinstance(expression.ops[0], ast.In)
+            and len(expression.comparators) == 1
+        ):
+            raise ValueError(
+                "For döngüsü etiketi 'target in iterable' "
+                "biçiminde olmalıdır: "
+                f"{step.node_label}"
+            )
+
+        iterator = loop_iterators.get(step.node_id)
+
+        if iterator is None:
+            iterable_value = cls._evaluate_safe_expression(
+                expression=expression.comparators[0],
+                environment=environment,
+            )
+
+            try:
+                iterator = iter(iterable_value)
+            except TypeError as error:
+                raise ValueError(
+                    "For döngüsü kaynağı iterable değil: "
+                    f"{step.node_label}"
+                ) from error
+
+            loop_iterators[step.node_id] = iterator
+
+        try:
+            iteration_value = next(iterator)
+        except StopIteration as error:
+            raise ValueError(
+                "Execution path, iterable uzunluğundan daha fazla "
+                "for iterasyonu gerektiriyor: "
+                f"{step.node_label}"
+            ) from error
+
+        cls._bind_assignment_target(
+            target=expression.left,
+            value=iteration_value,
+            environment=environment,
+        )
+
+    @classmethod
+    def _bind_assignment_target(
+        cls,
+        *,
+        target: ast.expr,
+        value: Any,
+        environment: dict[str, Any],
+    ) -> None:
+        """For hedefindeki isim veya iç içe unpacking yapısını bağlar."""
+        if isinstance(target, ast.Name):
+            environment[target.id] = value
+            return
+
+        if isinstance(target, (ast.Tuple, ast.List)):
+            try:
+                unpacked_values = tuple(value)
+            except TypeError as error:
+                raise ValueError(
+                    "For döngüsü unpacking değeri iterable olmalıdır."
+                ) from error
+
+            if len(target.elts) != len(unpacked_values):
+                raise ValueError(
+                    "For döngüsü unpacking hedefi ile değer "
+                    "uzunlukları uyuşmuyor."
+                )
+
+            for child_target, child_value in zip(
+                target.elts,
+                unpacked_values,
+                strict=True,
+            ):
+                cls._bind_assignment_target(
+                    target=child_target,
+                    value=child_value,
+                    environment=environment,
+                )
+
+            return
+
+        raise ValueError(
+            "Desteklenmeyen for döngüsü hedefi: "
+            f"{type(target).__name__}"
+        )
 
     @classmethod
     def _apply_assignment_statement(
@@ -2961,10 +3170,99 @@ class PathInputGenerator:
             )
             return collection[key]
 
+        if isinstance(expression, ast.JoinedStr):
+            return "".join(
+                cls._evaluate_joined_string_part(
+                    part=part,
+                    environment=environment,
+                )
+                for part in expression.values
+            )
+
+        if isinstance(expression, ast.FormattedValue):
+            return cls._evaluate_formatted_value(
+                expression=expression,
+                environment=environment,
+            )
+
         raise ValueError(
             "Desteklenmeyen dinamik expression türü: "
             f"{type(expression).__name__}"
         )
+
+    @classmethod
+    def _evaluate_joined_string_part(
+        cls,
+        *,
+        part: ast.expr,
+        environment: dict[str, Any],
+    ) -> str:
+        """F-string içindeki sabit veya formatlanmış bir parçayı üretir."""
+        if isinstance(part, ast.Constant):
+            if not isinstance(part.value, str):
+                raise ValueError(
+                    "F-string sabit parçası string olmalıdır."
+                )
+
+            return part.value
+
+        if isinstance(part, ast.FormattedValue):
+            return cls._evaluate_formatted_value(
+                expression=part,
+                environment=environment,
+            )
+
+        raise ValueError(
+            "Desteklenmeyen f-string parçası: "
+            f"{type(part).__name__}"
+        )
+
+    @classmethod
+    def _evaluate_formatted_value(
+        cls,
+        *,
+        expression: ast.FormattedValue,
+        environment: dict[str, Any],
+    ) -> str:
+        """Yan etkisiz bir f-string değerini Python format kurallarıyla üretir."""
+        value = cls._evaluate_safe_expression(
+            expression=expression.value,
+            environment=environment,
+        )
+
+        if expression.conversion == ord("s"):
+            value = str(value)
+        elif expression.conversion == ord("r"):
+            value = repr(value)
+        elif expression.conversion == ord("a"):
+            value = ascii(value)
+        elif expression.conversion != -1:
+            raise ValueError(
+                "Desteklenmeyen f-string conversion değeri: "
+                f"{expression.conversion}"
+            )
+
+        format_spec = ""
+
+        if expression.format_spec is not None:
+            evaluated_format_spec = cls._evaluate_safe_expression(
+                expression=expression.format_spec,
+                environment=environment,
+            )
+
+            if not isinstance(evaluated_format_spec, str):
+                raise ValueError(
+                    "F-string format spec değeri string olmalıdır."
+                )
+
+            format_spec = evaluated_format_spec
+
+        try:
+            return format(value, format_spec)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "F-string değeri belirtilen formatla üretilemedi."
+            ) from error
 
     @staticmethod
     def _apply_binary_operator(

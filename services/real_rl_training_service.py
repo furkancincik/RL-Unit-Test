@@ -11,8 +11,16 @@ from typing import Any, Callable
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.data_flow_analyzer import DataFlowAnalyzer
 from cfg.path_analyzer import CFGPathAnalyzer
+from cfg.path_feasibility_analyzer import (
+    FeasibilityStatus,
+    PathFeasibilityAnalyzer,
+    PathFeasibilityResult,
+)
+from cfg.path_state_analyzer import PathStateAnalyzer
 from evaluator.dqm import DecisionQualityMatrix
+from generator.input_candidate_generator import InputCandidateGenerator
 from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
@@ -160,6 +168,12 @@ class RealRLTrainingService:
                 ↓
         CFGPathAnalyzer
                 ↓
+        DataFlowAnalyzer + PathStateAnalyzer
+                ↓
+        PathFeasibilityAnalyzer
+                ↓
+        InputCandidateGenerator
+                ↓
         DecisionQualityMatrix
                 ↓
         ScenarioGenerator
@@ -182,6 +196,10 @@ class RealRLTrainingService:
         analyzer: PythonAnalyzer | None = None,
         cfg_builder: ControlFlowGraphBuilder | None = None,
         path_analyzer: CFGPathAnalyzer | None = None,
+        data_flow_analyzer: DataFlowAnalyzer | None = None,
+        path_state_analyzer: PathStateAnalyzer | None = None,
+        path_feasibility_analyzer: PathFeasibilityAnalyzer | None = None,
+        input_candidate_generator: InputCandidateGenerator | None = None,
         dqm: DecisionQualityMatrix | None = None,
         scenario_generator: ScenarioGenerator | None = None,
         report_formatter: TrainingReportFormatter | None = None,
@@ -193,6 +211,20 @@ class RealRLTrainingService:
         )
         self._path_analyzer = (
             path_analyzer or CFGPathAnalyzer()
+        )
+        self._data_flow_analyzer = (
+            data_flow_analyzer or DataFlowAnalyzer()
+        )
+        self._path_state_analyzer = (
+            path_state_analyzer or PathStateAnalyzer()
+        )
+        self._path_feasibility_analyzer = (
+            path_feasibility_analyzer
+            or PathFeasibilityAnalyzer()
+        )
+        self._input_candidate_generator = (
+            input_candidate_generator
+            or InputCandidateGenerator()
         )
         self._dqm = dqm or DecisionQualityMatrix()
         self._scenario_generator = (
@@ -209,6 +241,7 @@ class RealRLTrainingService:
         module_path: str,
         function_name: str,
         output_directory: str | Path,
+        max_visits_per_node: int = 3,
         episode_count: int = 3,
         epsilon: float = 0.30,
         epsilon_decay_rate: float | None = 0.95,
@@ -234,6 +267,12 @@ class RealRLTrainingService:
 
             output_directory:
                 Kümülatif pytest dosyasının yazılacağı klasör.
+
+            max_visits_per_node:
+                Bir CFG düğümünün tek execution path içerisinde en
+                fazla kaç kez ziyaret edilebileceği. Bu sınır döngü
+                açılımını ve path sayısını kontrollü tutar. Varsayılan
+                3 değeri sıfır, bir ve iki iterasyonlu yolları kapsar.
 
             episode_count:
                 Gerçekleştirilecek eğitim episode sayısı.
@@ -295,6 +334,9 @@ class RealRLTrainingService:
             )
         )
 
+        self._validate_max_visits_per_node(
+            max_visits_per_node
+        )
         self._validate_episode_count(episode_count)
         self._validate_probability(
             name="epsilon",
@@ -365,7 +407,8 @@ class RealRLTrainingService:
             )
 
         paths = self._path_analyzer.find_paths(
-            graph
+            graph,
+            max_visits_per_node=max_visits_per_node,
         )
 
         if not paths:
@@ -374,20 +417,80 @@ class RealRLTrainingService:
                 f"{normalized_function_name}"
             )
 
-        scores = self._dqm.evaluate_paths(
+        parameter_names = self._extract_parameter_names(
+            function.parameters
+        )
+
+        data_flow_result = (
+            self._data_flow_analyzer.analyze_file(
+                source_file=normalized_source_file,
+                function_name=normalized_function_name,
+            )
+        )
+
+        path_states = tuple(
+            self._path_state_analyzer.analyze_file(
+                source_file=normalized_source_file,
+                function_name=normalized_function_name,
+                path=path,
+            )
+            for path in paths
+        )
+
+        feasibility_results = (
+            self._path_feasibility_analyzer.analyze_paths(
+                tuple(paths),
+                data_flow_result=data_flow_result,
+                path_states=path_states,
+            )
+        )
+
+        retained_path_indices = {
+            path_index
+            for path_index, feasibility_result
+            in enumerate(
+                feasibility_results,
+                start=1,
+            )
+            if (
+                feasibility_result.status
+                != FeasibilityStatus.INFEASIBLE
+            )
+        }
+
+        if not retained_path_indices:
+            raise ValueError(
+                "Fonksiyon için FEASIBLE veya UNKNOWN "
+                "yürütme yolu bulunamadı: "
+                f"{normalized_function_name}"
+            )
+
+        candidate_values_by_path = (
+            self._build_candidate_values_by_path(
+                paths=paths,
+                feasibility_results=feasibility_results,
+                path_states=path_states,
+                data_flow_result=data_flow_result,
+            )
+        )
+
+        all_scores = self._dqm.evaluate_paths(
             function=function,
             paths=paths,
         )
 
+        scores = [
+            score
+            for score in all_scores
+            if score.path_index in retained_path_indices
+        ]
+
         if not scores:
             raise ValueError(
-                "Fonksiyon için DQM sonucu üretilemedi: "
+                "Fonksiyon için uygulanabilir DQM sonucu "
+                "üretilemedi: "
                 f"{normalized_function_name}"
             )
-
-        parameter_names = self._extract_parameter_names(
-            function.parameters
-        )
 
         scenarios = self._scenario_generator.generate(
             function_name=normalized_function_name,
@@ -395,6 +498,9 @@ class RealRLTrainingService:
             scores=scores,
             parameter_names=parameter_names,
             parameter_types=function.parameter_types,
+            candidate_values_by_path=(
+                candidate_values_by_path
+            ),
         )
 
         if not scenarios:
@@ -537,6 +643,101 @@ class RealRLTrainingService:
             final_coverage_result=final_coverage_result,
             report=report,
         )
+
+    def _build_candidate_values_by_path(
+        self,
+        *,
+        paths: list,
+        feasibility_results: tuple[
+            PathFeasibilityResult,
+            ...
+        ],
+        path_states: tuple,
+        data_flow_result: Any,
+    ) -> dict[
+        int,
+        dict[str, Any],
+    ]:
+        """
+        FEASIBLE path'ler için feasibility constraint'lerini ve varsa
+        relational witness değerlerini ScenarioGenerator'ın tüketebileceği
+        path-index bazlı candidate sözlüğüne dönüştürür.
+
+        UNKNOWN path'ler güvenlik gereği pipeline'da tutulur ancak kesin
+        feasibility kanıtı olmadığı için bu katmandan candidate almaz.
+        INFEASIBLE path'ler ise daha önce pipeline'dan elenir.
+        """
+        candidate_values_by_path: dict[
+            int,
+            dict[str, Any],
+        ] = {}
+
+        for path_index, (
+            path,
+            feasibility_result,
+            path_state,
+        ) in enumerate(
+            zip(
+                paths,
+                feasibility_results,
+                path_states,
+            ),
+            start=1,
+        ):
+            if (
+                feasibility_result.status
+                != FeasibilityStatus.FEASIBLE
+            ):
+                continue
+
+            relational_witness = None
+
+            if feasibility_result.relational_constraints:
+                domains = (
+                    self._path_feasibility_analyzer
+                    ._build_domains(
+                        feasibility_result.constraints
+                    )
+                )
+
+                self._path_feasibility_analyzer._apply_data_flow_ranges(
+                    domains=domains,
+                    data_flow_result=data_flow_result,
+                )
+
+                self._path_feasibility_analyzer._apply_path_symbolic_state(
+                    domains=domains,
+                    path_state=path_state,
+                )
+
+                relational_witness = (
+                    self._path_feasibility_analyzer
+                    ._find_relational_witness(
+                        domains=domains,
+                        relational_constraints=(
+                            feasibility_result
+                            .relational_constraints
+                        ),
+                    )
+                )
+
+            candidate = (
+                self._input_candidate_generator.generate(
+                    feasibility_result=feasibility_result,
+                    relational_witness=relational_witness,
+                )
+            )
+
+            path_input_values = (
+                candidate.path_input_value_dict
+            )
+
+            if path_input_values:
+                candidate_values_by_path[
+                    path_index
+                ] = path_input_values
+
+        return candidate_values_by_path
 
     def _filter_executable_scenarios(
         self,
@@ -896,6 +1097,24 @@ class RealRLTrainingService:
         if episode_count < 1:
             raise ValueError(
                 "episode_count 1 veya daha büyük olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_max_visits_per_node(
+        max_visits_per_node: int,
+    ) -> None:
+        """CFG path üretimindeki düğüm ziyaret sınırını doğrular."""
+        if (
+            isinstance(max_visits_per_node, bool)
+            or not isinstance(max_visits_per_node, int)
+        ):
+            raise TypeError(
+                "max_visits_per_node bir tam sayı olmalıdır."
+            )
+
+        if max_visits_per_node < 1:
+            raise ValueError(
+                "max_visits_per_node 1 veya daha büyük olmalıdır."
             )
 
     @staticmethod

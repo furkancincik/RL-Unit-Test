@@ -2111,3 +2111,586 @@ def test_generate_rejects_non_empty_for_input_when_path_requires_falsy_list(
             path=path,
             parameter_names=("items",),
         )
+
+
+# ============================================================
+# PathInputGenerator candidate_values integration tests
+# ============================================================
+
+
+def test_generate_uses_candidate_value_for_parameter() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 50",
+            "return score",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+        candidate_values={
+            "score": 75,
+        },
+    )
+
+    assert result.keyword_argument_dict["score"] == 75
+    assert result.expected_result == 75
+
+
+def test_generate_filters_candidate_for_local_variable() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 50",
+            "return score",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+        candidate_values={
+            "score": 80,
+            "local_value": 999,
+        },
+    )
+
+    assert result.keyword_argument_dict == {
+        "score": 80,
+    }
+
+
+def test_generate_coerces_candidate_collection_to_parameter_type() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "return values",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={
+            "values": "tuple[int, ...]",
+        },
+        candidate_values={
+            "values": [1, 2],
+        },
+    )
+
+    assert result.keyword_argument_dict["values"] == (
+        1,
+        2,
+    )
+    assert isinstance(
+        result.keyword_argument_dict["values"],
+        tuple,
+    )
+
+
+def test_generate_loop_input_overrides_candidate_when_required() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "value > 0",
+            "value -= 1",
+            "value > 0",
+            "return value",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "while",
+            "AugAssign",
+            "while",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            "Loop",
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("value",),
+        candidate_values={
+            "value": 100,
+        },
+    )
+
+    # Bu path tam bir while iterasyonu gerektirir.
+    assert result.keyword_argument_dict["value"] == 1
+
+
+def test_generate_exception_input_overrides_candidate_when_required() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            "result = total / divisor",
+            "except ZeroDivisionError",
+            "return 'Hata'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=(
+            "total",
+            "divisor",
+        ),
+        candidate_values={
+            "total": 10,
+            "divisor": 5,
+        },
+    )
+
+    assert result.keyword_argument_dict["total"] == 10
+    assert result.keyword_argument_dict["divisor"] == 0
+    assert result.expected_result == "Hata"
+
+
+def test_generate_rejects_invalid_candidate_values_type() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="candidate_values bir dict veya None olmalıdır.",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("value",),
+            candidate_values=[  # type: ignore[arg-type]
+                ("value", 1),
+            ],
+        )
+
+
+def test_generate_rejects_invalid_candidate_variable_name() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "return 0",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="candidate_values anahtarları boş olmayan string",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("value",),
+            candidate_values={
+                "": 1,
+            },
+        )
+
+
+def test_generate_accepts_candidate_for_tighter_upper_bound_path() -> None:
+    generator = PathInputGenerator()
+
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score >= 85",
+            "score >= 50",
+            'return "Başarısız"',
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "False",
+            "False",
+            None,
+        ],
+    )
+
+    result = generator.generate(
+        path=path,
+        parameter_names=("score",),
+        candidate_values={
+            "score": 49,
+        },
+    )
+
+    assert result.keyword_argument_dict["score"] == 49
+    assert result.keyword_argument_dict["score"] < 85
+    assert result.keyword_argument_dict["score"] < 50
+    assert result.expected_result == "Başarısız"
+
+
+def test_generate_defers_name_to_name_comparison() -> None:
+    """
+    Değişkenler arası ilişki literal olarak yorumlanmamalıdır.
+
+    Somut değerler upstream relational witness katmanından geldiğinde
+    PathInputGenerator bu değerleri bozmadan kullanmalıdır.
+    """
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "lower < upper",
+            "return 'ordered'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=(
+            "lower",
+            "upper",
+        ),
+        candidate_values={
+            "lower": 1,
+            "upper": 2,
+        },
+    )
+
+    assert result.keyword_argument_dict == {
+        "lower": 1,
+        "upper": 2,
+    }
+    assert result.expected_result == "ordered"
+
+
+def test_generate_replays_for_target_before_dynamic_return() -> None:
+    """For hedefi, döngü gövdesindeki atamadan önce bağlanır."""
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "total = 0",
+            "value in values",
+            "total += value",
+            "value in values",
+            "return total",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "for",
+            "AugAssign",
+            "for",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+        ],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={
+            "values": "list[int]",
+        },
+    )
+
+    values = result.keyword_argument_dict["values"]
+
+    assert values == [0]
+    assert result.expected_result == sum(values)
+
+
+def test_extract_expected_result_replays_successive_for_values() -> None:
+    """Aynı for düğümünün her ziyareti iterator'ı ilerletir."""
+    path = ExecutionPath(
+        node_ids=[
+            1,
+            2,
+            3,
+            4,
+            3,
+            4,
+            3,
+            5,
+            6,
+        ],
+        edge_labels=[
+            None,
+            None,
+            "Iterate",
+            "Next",
+            "Iterate",
+            "Next",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "total = 0",
+            "value in values",
+            "total += value",
+            "value in values",
+            "total += value",
+            "value in values",
+            "return total",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "for",
+            "AugAssign",
+            "for",
+            "AugAssign",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=[
+            1,
+            2,
+            3,
+            4,
+            3,
+            4,
+            3,
+            5,
+            6,
+        ],
+    )
+
+    result = PathInputGenerator._extract_expected_result(
+        path=path,
+        keyword_arguments=(("values", [2, 3]),),
+    )
+
+    assert result == 5
+
+
+def test_extract_expected_result_supports_for_target_unpacking() -> None:
+    """For hedefindeki tuple unpacking yerel ortama aktarılır."""
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "total = 0",
+            "(left, right) in pairs",
+            "total += left",
+            "total += right",
+            "return total",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "for",
+            "AugAssign",
+            "AugAssign",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+            "Iterate",
+            None,
+            None,
+            None,
+        ],
+    )
+
+    result = PathInputGenerator._extract_expected_result(
+        path=path,
+        keyword_arguments=(
+            (
+                "pairs",
+                [(2, 3)],
+            ),
+        ),
+    )
+
+    assert result == 5
+
+
+def test_generate_supports_formatted_string_return() -> None:
+    """Dinamik f-string return, Python format spec kurallarını korur."""
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "score == 12.5",
+            "return f'Score: {score:.2f}'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "True",
+            None,
+        ],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("score",),
+        parameter_types={
+            "score": "float",
+        },
+    )
+
+    assert result.keyword_argument_dict["score"] == 12.5
+    assert result.expected_result == "Score: 12.50"
+
+
+def test_extract_expected_result_formats_replayed_loop_total() -> None:
+    """For replay sonucu f-string içinde formatlanabilir."""
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "total = 0",
+            "value in values",
+            "total += value",
+            "return f'Total: {total:.2f}'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "for",
+            "AugAssign",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            None,
+            "Iterate",
+            None,
+            None,
+        ],
+    )
+
+    result = PathInputGenerator._extract_expected_result(
+        path=path,
+        keyword_arguments=(("values", [7]),),
+    )
+
+    assert result == "Total: 7.00"

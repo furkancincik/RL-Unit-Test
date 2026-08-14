@@ -12,8 +12,15 @@ from models.coverage_result import (
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.data_flow_analyzer import DataFlowAnalyzer
 from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
+from cfg.path_feasibility_analyzer import (
+    FeasibilityStatus,
+    PathFeasibilityAnalyzer,
+)
+from cfg.path_state_analyzer import PathStateAnalyzer
 from evaluator.dqm import DQMScore, DecisionQualityMatrix
+from generator.input_candidate_generator import InputCandidateGenerator
 from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
@@ -59,6 +66,7 @@ def create_function_analysis() -> Mock:
 
     function.name = "calculate_score"
     function.parameters = ["score"]
+    function.parameter_types = {}
     function.branch_count = 1
     function.line_number = 1
     function.end_line_number = 4
@@ -230,26 +238,22 @@ def create_dependencies() -> tuple[
     Mock,
     Mock,
     Mock,
+    Mock,
+    Mock,
+    Mock,
+    Mock,
 ]:
     """RealRLTrainingService için mock bağımlılıklar oluşturur."""
-    analyzer = Mock(
-        spec=PythonAnalyzer,
-    )
-    cfg_builder = Mock(
-        spec=ControlFlowGraphBuilder,
-    )
-    path_analyzer = Mock(
-        spec=CFGPathAnalyzer,
-    )
-    dqm = Mock(
-        spec=DecisionQualityMatrix,
-    )
-    scenario_generator = Mock(
-        spec=ScenarioGenerator,
-    )
-    report_formatter = Mock(
-        spec=TrainingReportFormatter,
-    )
+    analyzer = Mock(spec=PythonAnalyzer)
+    cfg_builder = Mock(spec=ControlFlowGraphBuilder)
+    path_analyzer = Mock(spec=CFGPathAnalyzer)
+    data_flow_analyzer = Mock(spec=DataFlowAnalyzer)
+    path_state_analyzer = Mock(spec=PathStateAnalyzer)
+    path_feasibility_analyzer = Mock(spec=PathFeasibilityAnalyzer)
+    input_candidate_generator = Mock(spec=InputCandidateGenerator)
+    dqm = Mock(spec=DecisionQualityMatrix)
+    scenario_generator = Mock(spec=ScenarioGenerator)
+    report_formatter = Mock(spec=TrainingReportFormatter)
 
     function = create_function_analysis()
     graph = create_graph()
@@ -260,19 +264,42 @@ def create_dependencies() -> tuple[
     analysis_result = Mock()
     analysis_result.functions = [function]
 
+    data_flow_result = Mock()
+    path_state = Mock()
+
+    feasibility_result = Mock()
+    feasibility_result.status = FeasibilityStatus.FEASIBLE
+    feasibility_result.constraints = ()
+    feasibility_result.relational_constraints = ()
+
+    candidate = Mock()
+    candidate.values = (("score", 50),)
+    candidate.value_dict = {"score": 50}
+    candidate.path_input_value_dict = {
+        "score": 50,
+    }
+
     analyzer.analyze_file.return_value = analysis_result
     cfg_builder.build_from_file.return_value = [graph]
     path_analyzer.find_paths.return_value = [path]
+    data_flow_analyzer.analyze_file.return_value = data_flow_result
+    path_state_analyzer.analyze_file.return_value = path_state
+    path_feasibility_analyzer.analyze_paths.return_value = (
+        feasibility_result,
+    )
+    input_candidate_generator.generate.return_value = candidate
     dqm.evaluate_paths.return_value = [score]
     scenario_generator.generate.return_value = [scenario]
-    report_formatter.format_session.return_value = (
-        "RL EĞİTİM OTURUMU"
-    )
+    report_formatter.format_session.return_value = "RL EĞİTİM OTURUMU"
 
     return (
         analyzer,
         cfg_builder,
         path_analyzer,
+        data_flow_analyzer,
+        path_state_analyzer,
+        path_feasibility_analyzer,
+        input_candidate_generator,
         dqm,
         scenario_generator,
         report_formatter,
@@ -290,9 +317,13 @@ def create_service() -> tuple[
         analyzer=dependencies[0],
         cfg_builder=dependencies[1],
         path_analyzer=dependencies[2],
-        dqm=dependencies[3],
-        scenario_generator=dependencies[4],
-        report_formatter=dependencies[5],
+        data_flow_analyzer=dependencies[3],
+        path_state_analyzer=dependencies[4],
+        path_feasibility_analyzer=dependencies[5],
+        input_candidate_generator=dependencies[6],
+        dqm=dependencies[7],
+        scenario_generator=dependencies[8],
+        report_formatter=dependencies[9],
     )
 
     return service, dependencies
@@ -360,7 +391,7 @@ def test_run_executes_analysis_pipeline(
     analyzer = dependencies[0]
     cfg_builder = dependencies[1]
     path_analyzer = dependencies[2]
-    dqm = dependencies[3]
+    dqm = dependencies[7]
 
     analyzer.analyze_file.assert_called_once_with(
         source_file.resolve()
@@ -370,7 +401,22 @@ def test_run_executes_analysis_pipeline(
         source_file.resolve()
     )
 
-    path_analyzer.find_paths.assert_called_once()
+    graph = cfg_builder.build_from_file.return_value[0]
+
+    path_analyzer.find_paths.assert_called_once_with(
+        graph,
+        max_visits_per_node=3,
+    )
+
+    data_flow_analyzer = dependencies[3]
+    path_state_analyzer = dependencies[4]
+    path_feasibility_analyzer = dependencies[5]
+    input_candidate_generator = dependencies[6]
+
+    data_flow_analyzer.analyze_file.assert_called_once()
+    path_state_analyzer.analyze_file.assert_called_once()
+    path_feasibility_analyzer.analyze_paths.assert_called_once()
+    input_candidate_generator.generate.assert_called_once()
 
     dqm.evaluate_paths.assert_called_once()
 
@@ -395,7 +441,7 @@ def test_run_generates_scenarios_with_parameters(
         episode_count=1,
     )
 
-    scenario_generator = dependencies[4]
+    scenario_generator = dependencies[8]
 
     call_arguments = (
         scenario_generator.generate
@@ -410,6 +456,11 @@ def test_run_generates_scenarios_with_parameters(
     assert call_arguments["parameter_names"] == (
         "score",
     )
+    assert call_arguments["candidate_values_by_path"] == {
+        1: {
+            "score": 50,
+        },
+    }
 
 
 @patch.object(
@@ -459,7 +510,7 @@ def test_run_formats_training_report(
         episode_count=1,
     )
 
-    report_formatter = dependencies[5]
+    report_formatter = dependencies[9]
 
     report_formatter.format_session.assert_called_once()
 
@@ -604,11 +655,11 @@ def test_run_rejects_empty_dqm_scores(
 ) -> None:
     service, dependencies = create_service()
 
-    dependencies[3].evaluate_paths.return_value = []
+    dependencies[7].evaluate_paths.return_value = []
 
     with pytest.raises(
         ValueError,
-        match="Fonksiyon için DQM sonucu üretilemedi",
+        match="Fonksiyon için uygulanabilir DQM sonucu üretilemedi",
     ):
         service.run(
             source_file=create_source_file(tmp_path),
@@ -623,7 +674,7 @@ def test_run_rejects_empty_scenarios(
 ) -> None:
     service, dependencies = create_service()
 
-    dependencies[4].generate.return_value = []
+    dependencies[8].generate.return_value = []
 
     with pytest.raises(
         ValueError,
@@ -659,6 +710,106 @@ def test_run_rejects_invalid_episode_count(
             output_directory=tmp_path,
             episode_count=0,
         )
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_passes_custom_max_visits_to_path_analyzer(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    """Dışarıdan verilen path bütçesi CFG analizörüne aktarılır."""
+    mock_run.return_value = create_session_result()
+
+    service, dependencies = create_service()
+
+    service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        max_visits_per_node=5,
+        episode_count=1,
+    )
+
+    graph = dependencies[
+        1
+    ].build_from_file.return_value[0]
+
+    dependencies[2].find_paths.assert_called_once_with(
+        graph,
+        max_visits_per_node=5,
+    )
+
+
+@pytest.mark.parametrize(
+    "max_visits_per_node",
+    (
+        True,
+        3.0,
+        "3",
+        object(),
+    ),
+)
+def test_run_rejects_invalid_max_visits_type_before_analysis(
+    tmp_path: Path,
+    max_visits_per_node: object,
+) -> None:
+    """Path bütçesi yalnızca gerçek integer değer kabul eder."""
+    service, dependencies = create_service()
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            "max_visits_per_node bir tam sayı "
+            "olmalıdır"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            max_visits_per_node=(  # type: ignore[arg-type]
+                max_visits_per_node
+            ),
+        )
+
+    dependencies[0].analyze_file.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "max_visits_per_node",
+    (
+        0,
+        -1,
+    ),
+)
+def test_run_rejects_non_positive_max_visits_before_analysis(
+    tmp_path: Path,
+    max_visits_per_node: int,
+) -> None:
+    """Sıfır ve negatif path ziyaret sınırları reddedilir."""
+    service, dependencies = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "max_visits_per_node 1 veya daha büyük "
+            "olmalıdır"
+        ),
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            max_visits_per_node=max_visits_per_node,
+        )
+
+    dependencies[0].analyze_file.assert_not_called()
 
 
 def test_run_rejects_invalid_epsilon(
@@ -925,7 +1076,7 @@ def test_run_baseline_uses_only_executable_scenarios(
 
     service, dependencies = create_service()
 
-    dependencies[4].generate.return_value = [
+    dependencies[8].generate.return_value = [
         executable_scenario,
         rejected_scenario,
     ]
@@ -1240,3 +1391,205 @@ def test_run_allows_minimum_above_epsilon_when_decay_disabled(
         ]
         is None
     )
+
+
+# ============================================================
+# Feasibility + candidate pipeline integration tests
+# ============================================================
+
+
+def test_run_filters_infeasible_score_before_scenario_generation(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    infeasible_result = Mock()
+    infeasible_result.status = FeasibilityStatus.INFEASIBLE
+    infeasible_result.constraints = ()
+    infeasible_result.relational_constraints = ()
+
+    dependencies[5].analyze_paths.return_value = (
+        infeasible_result,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="FEASIBLE veya UNKNOWN yürütme yolu bulunamadı",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+    dependencies[8].generate.assert_not_called()
+
+
+def test_run_keeps_unknown_path_without_candidate_values(
+    tmp_path: Path,
+) -> None:
+    # Training'e kadar ilerlemeyi gerektirmeden ScenarioGenerator çağrısını
+    # yakalamak için generate sonrasında kontrollü olarak durduruyoruz.
+    service, dependencies = create_service()
+
+    unknown_result = Mock()
+    unknown_result.status = FeasibilityStatus.UNKNOWN
+    unknown_result.constraints = ()
+    unknown_result.relational_constraints = ()
+
+    dependencies[5].analyze_paths.return_value = (
+        unknown_result,
+    )
+    dependencies[8].generate.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match="Fonksiyon için test senaryosu üretilemedi",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+    call_kwargs = dependencies[8].generate.call_args.kwargs
+    assert call_kwargs["candidate_values_by_path"] == {}
+    dependencies[6].generate.assert_not_called()
+
+
+def test_run_passes_feasible_candidate_values_to_scenario_generator(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    dependencies[8].generate.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match="Fonksiyon için test senaryosu üretilemedi",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+    call_kwargs = dependencies[8].generate.call_args.kwargs
+
+    assert call_kwargs["candidate_values_by_path"] == {
+        1: {
+            "score": 50,
+        },
+    }
+
+    dependencies[6].generate.assert_called_once()
+
+
+def test_run_does_not_forward_structural_truthiness_placeholder(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    candidate = dependencies[
+        6
+    ].generate.return_value
+
+    candidate.values = (
+        ("values", True),
+    )
+    candidate.value_dict = {
+        "values": True,
+    }
+    candidate.path_input_value_dict = {}
+
+    dependencies[8].generate.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match="Fonksiyon için test senaryosu üretilemedi",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+    call_kwargs = (
+        dependencies[8]
+        .generate
+        .call_args
+        .kwargs
+    )
+
+    assert (
+        call_kwargs["candidate_values_by_path"]
+        == {}
+    )
+
+
+def test_run_filters_dqm_scores_for_infeasible_paths(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    second_path = ExecutionPath(
+        node_ids=[1, 2, 4],
+        edge_labels=[None, "False"],
+    )
+    dependencies[2].find_paths.return_value = [
+        create_path(),
+        second_path,
+    ]
+
+    feasible_result = Mock()
+    feasible_result.status = FeasibilityStatus.FEASIBLE
+    feasible_result.constraints = ()
+    feasible_result.relational_constraints = ()
+
+    infeasible_result = Mock()
+    infeasible_result.status = FeasibilityStatus.INFEASIBLE
+    infeasible_result.constraints = ()
+    infeasible_result.relational_constraints = ()
+
+    dependencies[5].analyze_paths.return_value = (
+        feasible_result,
+        infeasible_result,
+    )
+    dependencies[4].analyze_file.side_effect = [
+        Mock(),
+        Mock(),
+    ]
+
+    second_score = DQMScore(
+        path_index=2,
+        path_length=3,
+        decision_edge_count=1,
+        contains_loop=False,
+        contains_exception=False,
+        raw_score=5.0,
+        normalized_score=50.0,
+        priority_level="Medium",
+    )
+    dependencies[7].evaluate_paths.return_value = [
+        create_score(),
+        second_score,
+    ]
+    dependencies[8].generate.return_value = []
+
+    with pytest.raises(
+        ValueError,
+        match="Fonksiyon için test senaryosu üretilemedi",
+    ):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+    call_kwargs = dependencies[8].generate.call_args.kwargs
+    assert [score.path_index for score in call_kwargs["scores"]] == [1]
