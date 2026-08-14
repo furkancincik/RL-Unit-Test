@@ -254,31 +254,73 @@ DQM Reports
 
 Architecture
 
-flowchart TD
-    A["Python Source"] --> B["Python AST Analyzer"]
-    B --> C["Control Flow Graph Builder"]
-    C --> D["Execution Path Analyzer"]
-    D --> E["Data-Flow Analyzer"]
-    E --> F["Path-State Analyzer"]
-    F --> G["Path-Feasibility Analyzer"]
-    G --> H["Input Candidate Generator"]
-    H --> I["Decision Quality Matrix"]
-    I --> J["Scenario Generator"]
-    J --> K["Concrete Scenario Validation"]
-    K --> L["Scenario Action Mapper"]
-    L --> M["Coverage Environment"]
-    M --> N["State Encoder"]
-    N --> O["Q-Learning Agent"]
-    O -.-> O1["Q-Table"]
-    O -.-> O2["Epsilon-Greedy Policy"]
-    O --> P["Scenario Selection"]
-    P --> Q["Pytest Generation"]
-    Q --> R["Automatic Test Execution"]
-    R --> S["Real Coverage Measurement"]
-    S --> T["Reward Calculation"]
-    T --> U["Q-Value Update"]
-    U --> V["Next Training Step or Episode"]
-    V --> M
+Python Source
+      │
+      ▼
+Python AST Analyzer
+      │
+      ▼
+Control Flow Graph Builder
+      │
+      ▼
+Execution Path Analyzer
+      │
+      ▼
+Data-Flow Analyzer
+      │
+      ▼
+Path-State Analyzer
+      │
+      ▼
+Path-Feasibility Analyzer
+      │
+      ▼
+Input Candidate Generator
+      │
+      ▼
+Decision Quality Matrix
+      │
+      ▼
+Scenario Generator
+      │
+      ▼
+Concrete Scenario Validation
+      │
+      ▼
+Scenario Action Mapper
+      │
+      ▼
+Coverage Environment
+      │
+      ▼
+State Encoder
+      │
+      ▼
+Q-Learning Agent
+      │
+      ├── Q-Table
+      └── Epsilon-Greedy Policy
+      │
+      ▼
+Scenario Selection
+      │
+      ▼
+Pytest Generation
+      │
+      ▼
+Automatic Test Execution
+      │
+      ▼
+Real Coverage Measurement
+      │
+      ▼
+Reward Calculation
+      │
+      ▼
+Q-Value Update
+      │
+      ▼
+Next Training Step / Episode
 
 The feasibility and concrete-validation layers prevent contradictory or behaviorally incorrect scenarios from entering the RL action pool. The RL agent therefore learns from scenarios that are both statically supported and executable on the real target function.
 
@@ -568,18 +610,32 @@ The framework can now generate a substantially larger validated scenario pool fo
 
 Current situation:
 
-flowchart LR
-    A["60 validated scenarios"] --> B["RL scenario selection"]
-    B --> C["51 executed scenarios"]
-    C --> D["83.58% line and 84.62% branch coverage"]
+60 validated scenarios
+        │
+        ▼
+RL scenario selection
+        │
+        ▼
+51 executed scenarios
+        │
+        ▼
+83.58% line coverage / 84.62% branch coverage
 
 The next objective is to determine whether the same or higher reachable coverage can be achieved with a smaller subset:
 
-flowchart LR
-    A["60 available scenarios"] --> B["Contribution analysis"]
-    B --> C["Greedy and RL minimization"]
-    C --> D["Minimum verified scenario subset"]
-    D --> E["Maximum reachable coverage"]
+60 available scenarios
+        │
+        ▼
+Scenario contribution analysis
+        │
+        ├── Deterministic greedy baseline
+        └── RL-based scenario selection
+        │
+        ▼
+Minimum verified scenario subset
+        │
+        ▼
+Maximum reachable coverage
 
 To evaluate this objectively, scenario contribution analysis and a greedy minimum-scenario baseline will be used.
 
@@ -614,73 +670,27 @@ e1fbe53 feat: enhance path analysis and RL test generation
 
 Project Structure
 
-Path
-
-Responsibility
-
-analyzer/
-
-AST, function, type, and source-code analysis
-
-cfg/control_flow_graph.py
-
-Control Flow Graph construction
-
-cfg/path_analyzer.py
-
-Bounded execution-path discovery
-
-cfg/data_flow_analyzer.py
-
-Variable definition, update, and range analysis
-
-cfg/path_state_analyzer.py
-
-Local symbolic path-state propagation
-
-cfg/path_feasibility_analyzer.py
-
-Feasibility classification and relational constraints
-
-evaluator/
-
-DQM scoring and evaluation models
-
-generator/input_candidate_generator.py
-
-Candidate and witness conversion
-
-generator/path_input_generator.py
-
-Typed, collection, loop-aware, and relational input generation
-
-generator/scenario_generator.py
-
-Stable test-scenario generation
-
-rl/
-
-State, action, reward, Q-table, policy, agent, and training components
-
-services/
-
-Coverage, generation, automation, and real RL training services
-
-tests/
-
-Unit, integration, regression, and end-to-end tests
-
-output/
-
-Generated tests and reports
-
-datasets/
-
-Sample and benchmark Python targets
-
-main.py
-
-Current application entry point
+RL-Unit-Test
+│
+├── analyzer
+├── cfg
+│   ├── control_flow_graph.py
+│   ├── data_flow_analyzer.py
+│   ├── path_analyzer.py
+│   ├── path_feasibility_analyzer.py
+│   └── path_state_analyzer.py
+├── evaluator
+├── generator
+│   ├── input_candidate_generator.py
+│   ├── path_input_generator.py
+│   └── scenario_generator.py
+├── rl
+├── services
+│   └── real_rl_training_service.py
+├── tests
+├── output
+├── datasets
+└── main.py
 
 Development Roadmap
 
