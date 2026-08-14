@@ -1,4 +1,7 @@
-﻿from pathlib import Path
+﻿import argparse
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
@@ -28,10 +31,275 @@ FUNCTION_NAME = "calculate_score"
 GENERATED_TEST_DIRECTORY = Path("output/generated_tests")
 
 
-def print_analyzer_report() -> None:
-    """Örnek Python dosyası için statik analiz raporu üretir."""
+CLI_OPERATIONS = (
+    "menu",
+    "analyze",
+    "cfg",
+    "dqm",
+    "dqm-json",
+    "test",
+    "coverage",
+    "demo",
+    "rl",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationConfiguration:
+    """Komut satırından alınan hedef ve çalışma ayarlarını taşır."""
+
+    source_file: Path
+    module_path: str
+    function_name: str
+    output_directory: Path
+    operation: str = "menu"
+    max_visits_per_node: int = 3
+    episode_count: int = 3
+    epsilon: float = 0.0
+    learning_rate: float = 0.5
+    discount_factor: float = 0.9
+    random_seed: int = 42
+    overwrite: bool = True
+    timeout_seconds: float = 30.0
+
+
+def _python_source_file(value: str) -> Path:
+    """Var olan bir Python kaynak dosyası argümanı doğrular."""
+    source_file = Path(value)
+
+    if source_file.suffix.lower() != ".py":
+        raise argparse.ArgumentTypeError(
+            "source-file bir .py dosyası olmalıdır."
+        )
+
+    if not source_file.is_file():
+        raise argparse.ArgumentTypeError(
+            f"Python kaynak dosyası bulunamadı: {source_file}"
+        )
+
+    return source_file
+
+
+def _python_identifier(value: str) -> str:
+    """Python tanımlayıcısı olması gereken argümanı doğrular."""
+    normalized_value = value.strip()
+
+    if not normalized_value.isidentifier():
+        raise argparse.ArgumentTypeError(
+            f"Geçersiz Python tanımlayıcısı: {value!r}"
+        )
+
+    return normalized_value
+
+
+def _python_module_path(value: str) -> str:
+    """Nokta ayrımlı Python modül yolunu doğrular."""
+    normalized_value = value.strip()
+    path_parts = normalized_value.split(".")
+
+    if (
+        not normalized_value
+        or any(
+            not path_part.isidentifier()
+            for path_part in path_parts
+        )
+    ):
+        raise argparse.ArgumentTypeError(
+            f"Geçersiz Python modül yolu: {value!r}"
+        )
+
+    return normalized_value
+
+
+def _positive_int(value: str) -> int:
+    """Sıfırdan büyük tam sayı argümanı doğrular."""
+    try:
+        normalized_value = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"Pozitif tam sayı bekleniyordu: {value!r}"
+        ) from error
+
+    if normalized_value < 1:
+        raise argparse.ArgumentTypeError(
+            f"Değer 1 veya daha büyük olmalıdır: {value!r}"
+        )
+
+    return normalized_value
+
+
+def _positive_float(value: str) -> float:
+    """Sıfırdan büyük ondalık sayı argümanı doğrular."""
+    try:
+        normalized_value = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"Pozitif sayı bekleniyordu: {value!r}"
+        ) from error
+
+    if normalized_value <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"Değer sıfırdan büyük olmalıdır: {value!r}"
+        )
+
+    return normalized_value
+
+
+def _probability(value: str) -> float:
+    """0.0 ile 1.0 arasındaki oran argümanını doğrular."""
+    try:
+        normalized_value = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"Oran sayısal olmalıdır: {value!r}"
+        ) from error
+
+    if not 0.0 <= normalized_value <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"Oran 0.0 ile 1.0 arasında olmalıdır: {value!r}"
+        )
+
+    return normalized_value
+
+
+def create_argument_parser() -> argparse.ArgumentParser:
+    """Komut satırı argüman ayrıştırıcısını oluşturur."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Python kaynak kodu için analiz, otomatik test üretimi "
+            "ve gerçek coverage tabanlı RL eğitimi çalıştırır."
+        ),
+    )
+
+    parser.add_argument(
+        "--source-file",
+        type=_python_source_file,
+        default=Path(SOURCE_FILE),
+        help=(
+            "Analiz edilecek Python dosyası "
+            f"(varsayılan: {SOURCE_FILE})."
+        ),
+    )
+    parser.add_argument(
+        "--module-path",
+        type=_python_module_path,
+        default=MODULE_PATH,
+        help=(
+            "Kaynak dosyanın import edilebilir modül yolu "
+            f"(varsayılan: {MODULE_PATH})."
+        ),
+    )
+    parser.add_argument(
+        "--function-name",
+        type=_python_identifier,
+        default=FUNCTION_NAME,
+        help=(
+            "RL eğitimi uygulanacak fonksiyon "
+            f"(varsayılan: {FUNCTION_NAME})."
+        ),
+    )
+    parser.add_argument(
+        "--output-directory",
+        type=Path,
+        default=GENERATED_TEST_DIRECTORY,
+        help=(
+            "Test ve rapor çıktılarının yazılacağı klasör "
+            f"(varsayılan: {GENERATED_TEST_DIRECTORY})."
+        ),
+    )
+    parser.add_argument(
+        "--operation",
+        choices=CLI_OPERATIONS,
+        default="menu",
+        help=(
+            "Çalıştırılacak işlem. 'menu' interaktif menüyü açar; "
+            "diğer değerler seçilen işlemi doğrudan çalıştırır."
+        ),
+    )
+    parser.add_argument(
+        "--max-visits-per-node",
+        type=_positive_int,
+        default=3,
+        help="Bir CFG düğümünün yol başına azami ziyaret sayısı.",
+    )
+    parser.add_argument(
+        "--episode-count",
+        type=_positive_int,
+        default=3,
+        help="Gerçek RL eğitimi episode sayısı.",
+    )
+    parser.add_argument(
+        "--epsilon",
+        type=_probability,
+        default=0.0,
+        help="Epsilon-greedy başlangıç keşif oranı.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=_probability,
+        default=0.5,
+        help="Q-Learning öğrenme oranı.",
+    )
+    parser.add_argument(
+        "--discount-factor",
+        type=_probability,
+        default=0.9,
+        help="Q-Learning gelecek ödül iskonto oranı.",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Tekrarlanabilir RL seçimi için rastgelelik tohumu.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=_positive_float,
+        default=30.0,
+        help="Her test veya coverage çalıştırmasının süre sınırı.",
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        action="store_false",
+        dest="overwrite",
+        help=(
+            "Mevcut çıktı dosyalarının üzerine yazılmasını "
+            "engeller."
+        ),
+    )
+
+    return parser
+
+
+def parse_cli_arguments(
+    argv: Sequence[str] | None = None,
+) -> ApplicationConfiguration:
+    """CLI argümanlarını çalışma yapılandırmasına dönüştürür."""
+    arguments = create_argument_parser().parse_args(argv)
+
+    return ApplicationConfiguration(
+        source_file=arguments.source_file,
+        module_path=arguments.module_path,
+        function_name=arguments.function_name,
+        output_directory=arguments.output_directory,
+        operation=arguments.operation,
+        max_visits_per_node=arguments.max_visits_per_node,
+        episode_count=arguments.episode_count,
+        epsilon=arguments.epsilon,
+        learning_rate=arguments.learning_rate,
+        discount_factor=arguments.discount_factor,
+        random_seed=arguments.random_seed,
+        overwrite=arguments.overwrite,
+        timeout_seconds=arguments.timeout_seconds,
+    )
+
+
+def print_analyzer_report(
+    source_file: str | Path = SOURCE_FILE,
+) -> None:
+    """Seçilen Python dosyası için statik analiz raporu üretir."""
     analyzer = PythonAnalyzer()
-    result = analyzer.analyze_file(SOURCE_FILE)
+    result = analyzer.analyze_file(source_file)
 
     print("=" * 55)
     print("PYTHON DOSYA ANALİZ RAPORU")
@@ -79,10 +347,12 @@ def print_analyzer_report() -> None:
         )
 
 
-def print_cfg_report() -> None:
-    """Örnek Python dosyasındaki fonksiyonlar için CFG raporu üretir."""
+def print_cfg_report(
+    source_file: str | Path = SOURCE_FILE,
+) -> None:
+    """Seçilen Python dosyasındaki fonksiyonlar için CFG raporu üretir."""
     builder = ControlFlowGraphBuilder()
-    graphs = builder.build_from_file(SOURCE_FILE)
+    graphs = builder.build_from_file(source_file)
 
     if not graphs:
         print("Dosyada CFG üretilebilecek fonksiyon bulunamadı.")
@@ -116,15 +386,19 @@ def print_cfg_report() -> None:
             )
 
 
-def print_dqm_report() -> None:
+def print_dqm_report(
+    source_file: str | Path = SOURCE_FILE,
+    *,
+    max_visits_per_node: int = 3,
+) -> None:
     """Yürütme yolları için DQM önceliklendirme raporu üretir."""
     analyzer = PythonAnalyzer()
     cfg_builder = ControlFlowGraphBuilder()
     path_analyzer = CFGPathAnalyzer()
     dqm = DecisionQualityMatrix()
 
-    analysis_result = analyzer.analyze_file(SOURCE_FILE)
-    graphs = cfg_builder.build_from_file(SOURCE_FILE)
+    analysis_result = analyzer.analyze_file(source_file)
+    graphs = cfg_builder.build_from_file(source_file)
 
     if not analysis_result.functions or not graphs:
         print("DQM değerlendirmesi için fonksiyon bulunamadı.")
@@ -135,7 +409,10 @@ def print_dqm_report() -> None:
         graphs,
         strict=True,
     ):
-        paths = path_analyzer.find_paths(graph)
+        paths = path_analyzer.find_paths(
+            graph,
+            max_visits_per_node=max_visits_per_node,
+        )
 
         scores = dqm.evaluate_paths(
             function=function,
@@ -185,7 +462,11 @@ def print_dqm_report() -> None:
             print(f"Öncelik Seviyesi       : {score.priority_level}")
 
 
-def create_dqm_json_report() -> None:
+def create_dqm_json_report(
+    source_file: str | Path = SOURCE_FILE,
+    *,
+    max_visits_per_node: int = 3,
+) -> None:
     """DQM sonuçlarını JSON dosyası olarak kaydeder."""
     analyzer = PythonAnalyzer()
     cfg_builder = ControlFlowGraphBuilder()
@@ -193,8 +474,8 @@ def create_dqm_json_report() -> None:
     dqm = DecisionQualityMatrix()
     reporter = JSONReportWriter()
 
-    analysis_result = analyzer.analyze_file(SOURCE_FILE)
-    graphs = cfg_builder.build_from_file(SOURCE_FILE)
+    analysis_result = analyzer.analyze_file(source_file)
+    graphs = cfg_builder.build_from_file(source_file)
 
     if not analysis_result.functions or not graphs:
         print("JSON raporu için analiz edilebilir fonksiyon bulunamadı.")
@@ -205,7 +486,10 @@ def create_dqm_json_report() -> None:
         graphs,
         strict=True,
     ):
-        paths = path_analyzer.find_paths(graph)
+        paths = path_analyzer.find_paths(
+            graph,
+            max_visits_per_node=max_visits_per_node,
+        )
 
         scores = dqm.evaluate_paths(
             function=function,
@@ -222,7 +506,7 @@ def create_dqm_json_report() -> None:
             paths=paths,
             scores=scores,
             output_path=output_path,
-            source_file=SOURCE_FILE,
+            source_file=source_file,
         )
 
         print(
@@ -479,8 +763,11 @@ def run_real_rl_training(
     function_name: str = FUNCTION_NAME,
     output_directory: str | Path = GENERATED_TEST_DIRECTORY,
     *,
+    max_visits_per_node: int = 3,
     episode_count: int = 3,
     epsilon: float = 0.0,
+    epsilon_decay_rate: float | None = None,
+    minimum_epsilon: float = 0.0,
     learning_rate: float = 0.5,
     discount_factor: float = 0.9,
     random_seed: int | None = 42,
@@ -503,6 +790,7 @@ def run_real_rl_training(
     print(f"Kaynak dosya       : {source_file}")
     print(f"Modül yolu         : {module_path}")
     print(f"Fonksiyon          : {function_name}")
+    print(f"Düğüm ziyaret sınırı: {max_visits_per_node}")
     print(f"Episode sayısı     : {episode_count}")
     print("\nEğitim başlatılıyor...\n")
 
@@ -511,8 +799,11 @@ def run_real_rl_training(
         module_path=module_path,
         function_name=function_name,
         output_directory=output_directory,
+        max_visits_per_node=max_visits_per_node,
         episode_count=episode_count,
         epsilon=epsilon,
+        epsilon_decay_rate=epsilon_decay_rate,
+        minimum_epsilon=minimum_epsilon,
         learning_rate=learning_rate,
         discount_factor=discount_factor,
         random_seed=random_seed,
@@ -544,6 +835,101 @@ def run_real_rl_training(
 
     return result
 
+
+def print_runtime_configuration(
+    configuration: ApplicationConfiguration,
+) -> None:
+    """Etkin hedef ve çalışma ayarlarını ekrana yazdırır."""
+    print("\n" + "=" * 65)
+    print("AKTİF ÇALIŞMA YAPILANDIRMASI")
+    print("=" * 65)
+    print(f"Kaynak dosya          : {configuration.source_file}")
+    print(f"Modül yolu            : {configuration.module_path}")
+    print(f"Hedef fonksiyon       : {configuration.function_name}")
+    print(f"Çıktı klasörü         : {configuration.output_directory}")
+    print(
+        "Düğüm ziyaret sınırı : "
+        f"{configuration.max_visits_per_node}"
+    )
+    print(f"Episode sayısı        : {configuration.episode_count}")
+
+
+def run_configured_operation(
+    configuration: ApplicationConfiguration,
+) -> object | None:
+    """Yapılandırmada seçilen tek CLI işlemini çalıştırır."""
+    operation = configuration.operation
+
+    if operation == "analyze":
+        print_analyzer_report(configuration.source_file)
+        return None
+
+    if operation == "cfg":
+        print_cfg_report(configuration.source_file)
+        return None
+
+    if operation == "dqm":
+        print_dqm_report(
+            configuration.source_file,
+            max_visits_per_node=(
+                configuration.max_visits_per_node
+            ),
+        )
+        return None
+
+    if operation == "dqm-json":
+        create_dqm_json_report(
+            configuration.source_file,
+            max_visits_per_node=(
+                configuration.max_visits_per_node
+            ),
+        )
+        return None
+
+    if operation == "test":
+        return run_automated_test_pipeline(
+            source_file=configuration.source_file,
+            module_path=configuration.module_path,
+            output_directory=configuration.output_directory,
+            overwrite=configuration.overwrite,
+            timeout_seconds=configuration.timeout_seconds,
+        )
+
+    if operation == "coverage":
+        return run_coverage_pipeline(
+            source_file=configuration.source_file,
+            module_path=configuration.module_path,
+            output_directory=configuration.output_directory,
+            overwrite=configuration.overwrite,
+            timeout_seconds=configuration.timeout_seconds,
+        )
+
+    if operation == "demo":
+        return RLDemoService().run()
+
+    if operation == "rl":
+        return run_real_rl_training(
+            source_file=configuration.source_file,
+            module_path=configuration.module_path,
+            function_name=configuration.function_name,
+            output_directory=configuration.output_directory,
+            max_visits_per_node=(
+                configuration.max_visits_per_node
+            ),
+            episode_count=configuration.episode_count,
+            epsilon=configuration.epsilon,
+            learning_rate=configuration.learning_rate,
+            discount_factor=configuration.discount_factor,
+            random_seed=configuration.random_seed,
+            overwrite=configuration.overwrite,
+            timeout_seconds=configuration.timeout_seconds,
+        )
+
+    raise ValueError(
+        f"Doğrudan çalıştırılamayan işlem: {operation!r}"
+    )
+
+
 def print_menu() -> None:
     """Uygulama ana menüsünü ekrana yazdırır."""
     print("\n" + "=" * 55)
@@ -560,8 +946,17 @@ def print_menu() -> None:
     print("0 - Çıkış")
 
 
-def main() -> None:
+def main(
+    argv: Sequence[str] | None = None,
+) -> None:
     """Komut satırı uygulamasını çalıştırır."""
+    configuration = parse_cli_arguments(argv)
+    print_runtime_configuration(configuration)
+
+    if configuration.operation != "menu":
+        run_configured_operation(configuration)
+        return
+
     while True:
         print_menu()
 
@@ -569,29 +964,49 @@ def main() -> None:
 
         if choice == "1":
             print()
-            print_analyzer_report()
+            print_analyzer_report(configuration.source_file)
             continue
 
         if choice == "2":
             print()
-            print_cfg_report()
+            print_cfg_report(configuration.source_file)
             continue
 
         if choice == "3":
             print()
-            print_dqm_report()
+            print_dqm_report(
+                configuration.source_file,
+                max_visits_per_node=(
+                    configuration.max_visits_per_node
+                ),
+            )
             continue
 
         if choice == "4":
             print()
-            create_dqm_json_report()
+            create_dqm_json_report(
+                configuration.source_file,
+                max_visits_per_node=(
+                    configuration.max_visits_per_node
+                ),
+            )
             continue
 
         if choice == "5":
             print()
 
             try:
-                run_automated_test_pipeline()
+                run_automated_test_pipeline(
+                    source_file=configuration.source_file,
+                    module_path=configuration.module_path,
+                    output_directory=(
+                        configuration.output_directory
+                    ),
+                    overwrite=configuration.overwrite,
+                    timeout_seconds=(
+                        configuration.timeout_seconds
+                    ),
+                )
             except (
                 FileNotFoundError,
                 TypeError,
@@ -610,7 +1025,17 @@ def main() -> None:
             print()
 
             try:
-                run_coverage_pipeline()
+                run_coverage_pipeline(
+                    source_file=configuration.source_file,
+                    module_path=configuration.module_path,
+                    output_directory=(
+                        configuration.output_directory
+                    ),
+                    overwrite=configuration.overwrite,
+                    timeout_seconds=(
+                        configuration.timeout_seconds
+                    ),
+                )
             except (
                 FileNotFoundError,
                 TypeError,
@@ -648,7 +1073,28 @@ def main() -> None:
             print()
 
             try:
-                run_real_rl_training()
+                run_real_rl_training(
+                    source_file=configuration.source_file,
+                    module_path=configuration.module_path,
+                    function_name=configuration.function_name,
+                    output_directory=(
+                        configuration.output_directory
+                    ),
+                    max_visits_per_node=(
+                        configuration.max_visits_per_node
+                    ),
+                    episode_count=configuration.episode_count,
+                    epsilon=configuration.epsilon,
+                    learning_rate=configuration.learning_rate,
+                    discount_factor=(
+                        configuration.discount_factor
+                    ),
+                    random_seed=configuration.random_seed,
+                    overwrite=configuration.overwrite,
+                    timeout_seconds=(
+                        configuration.timeout_seconds
+                    ),
+                )
             except (
                 FileNotFoundError,
                 TypeError,
