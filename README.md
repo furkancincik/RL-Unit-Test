@@ -1,204 +1,174 @@
 RL-Unit-Test
 
-An intelligent and research-oriented framework for automated Python unit test generation and test-suite optimization using Abstract Syntax Trees (AST), Control Flow Graphs (CFG), path feasibility analysis, a Decision Quality Matrix (DQM), real coverage feedback, and Reinforcement Learning (RL).
+An intelligent framework for automated Python unit test generation and coverage optimization using Abstract Syntax Trees (AST), Control Flow Graphs (CFG), data-flow and path-feasibility analysis, a Decision Quality Matrix (DQM), and Reinforcement Learning (RL).
 
 Project Overview
 
-RL-Unit-Test analyzes Python source code, discovers execution paths, evaluates whether those paths are feasible, generates concrete test inputs, creates and executes pytest scenarios, measures real line and branch coverage, and trains a Q-learning agent to select efficient test suites.
+RL-Unit-Test is a research-oriented software engineering project that automatically analyzes Python source code, constructs execution paths, evaluates path feasibility, generates concrete test inputs and pytest scenarios, executes those scenarios on the real target function, measures line and branch coverage, and applies Reinforcement Learning to optimize test selection.
 
-The project has two ordered optimization objectives:
+The main optimization objectives are:
 
 Reach the maximum achievable coverage over reachable program behavior.
 
-Preserve that coverage using the minimum possible number of test scenarios.
+Reach that coverage using the minimum possible number of test scenarios.
 
-Coverage is therefore the primary objective. Test count is minimized only among suites that achieve the same coverage target.
+Coverage is the primary objective. Test count is minimized among suites that preserve the same coverage target.
 
-The framework is developed as a modular architecture suitable for academic experimentation and future industrial use with externally supplied Python files or repositories.
-
-Analysis and Generation Pipeline
-
-Python Source
-      │
-      ▼
-AST and Function Analysis
-      │
-      ▼
-Control Flow Graph Construction
-      │
-      ▼
-Bounded Execution Path Discovery
-      │
-      ├── Data-Flow Analysis
-      ├── Path-State Analysis
-      └── Path-Feasibility Analysis
-      │
-      ▼
-Concrete Input Candidate Generation
-      │
-      ▼
-DQM Path Prioritization
-      │
-      ▼
-Scenario Generation
-      │
-      ▼
-Concrete Execution Validation
-      │
-      ▼
-Scenario-Action Mapping
-      │
-      ▼
-Q-Learning Training
-      │
-      ▼
-Pytest Suite Generation and Execution
-      │
-      ▼
-Real Line and Branch Coverage
-      │
-      ▼
-Reward and Q-Value Update
-
-Concrete execution validation is a safety boundary between static analysis and RL training. A generated scenario is admitted to the RL action pool only when its observed result or exception matches its expected behavior on the target function.
+The project is being developed as a modular and extensible architecture suitable for academic research and future industrial applications, including externally supplied Python files and Git repositories.
 
 Current Features
 
 Static Code Analysis
 
-Python AST analysis
+Python AST Analysis
 
-Function and parameter extraction
+Function Extraction
 
-Type-hint analysis
+Cyclomatic Complexity Analysis
 
-Cyclomatic complexity analysis
+Branch Detection
 
-Condition, loop, return, and exception detection
+Type Hint Analysis
 
-Docstring and structural metadata extraction
+Docstring Analysis
 
-Risk-level detection
+Risk Level Detection
 
-Control-Flow and Path Analysis
+Control Flow Analysis
 
-Control Flow Graph construction
+Control Flow Graph (CFG)
 
-Bounded execution path discovery
+Bounded Execution Path Discovery
 
-Configurable per-node visit limit
+Configurable Per-Node Visit Limit
 
-Loop and continue flow modeling
+Loop and continue Flow Detection
 
-Exception-flow analysis
+Exception Flow Analysis
 
-Stable execution-path metadata
+Stable Path Metadata
 
-Data-Flow, State, and Feasibility Analysis
+Data-Flow and Path Feasibility
 
-Variable definition and update tracking
+Variable Definition and Update Tracking
 
-Local symbolic state propagation
+Local Symbolic State Propagation
 
-Numeric range inference
+Numeric Range Inference
 
-Relational constraint analysis
+Boolean and Collection-State Constraints
 
-Variable-to-variable constraint support
+Relational Constraint Analysis
 
-Boolean and collection-state constraints
+Variable-to-Variable Constraint Support
 
-Loop-state consistency checks
+Loop-State Consistency Checks
 
-Path classification as FEASIBLE, INFEASIBLE, or UNKNOWN
+FEASIBLE, INFEASIBLE, and UNKNOWN Path Classification
 
-Early elimination of contradictory execution paths
+Contradictory Path Elimination
 
-Input and Scenario Generation
+Path Prioritization
 
-Constraint-aware input candidate generation
+Decision Quality Matrix (DQM)
 
-Typed default value generation
+Path Ranking
 
-Support for primitive and collection types
+Risk-Based Prioritization
 
-Support for list, tuple, set, Optional, Union, and nested types
+Normalized DQM Scores
 
-Subscript alias propagation such as first_item = items[0]
+Scenario and Input Generation
 
-Loop-variable constraint propagation
+Automatic Scenario Generation
 
-Relational witness forwarding
+Constraint-Aware Input Candidate Generation
 
-Dynamic return-value evaluation
+Stable Scenario IDs
 
-Safe f-string and format-spec evaluation
+Scenario Metadata
 
-Stable scenario IDs and metadata
+Priority Levels
 
-Execution-path-to-scenario mapping
+Execution Path Mapping
 
-Concrete result and exception validation
+Scenario-Action Mapping
 
-Decision Quality Matrix
+Typed Default Value Generation
 
-Path scoring and ranking
+Primitive and Collection Type Support
 
-Risk-based prioritization
+list, tuple, set, Optional, Union, and Nested Type Support
 
-Normalized DQM scores
+Subscript Alias Propagation
 
-Decision, loop, and exception metadata
+Loop-Variable Constraint Propagation
+
+Relational Witness Forwarding
+
+Dynamic Return-Value Evaluation
+
+Safe f-String and Format-Spec Evaluation
+
+Concrete Result and Exception Validation
 
 Reinforcement Learning
 
-Coverage-state representation
+Coverage State Representation
 
-Extended state-key encoding
+State Encoder
 
-Executed-test-count representation
+Extended State Key Encoding
 
-Scenario action model
+Executed Test Count Representation
 
-Q-table
+Action Model
 
-Epsilon-greedy policy
+Q-Table
 
-Dynamic epsilon control
+Epsilon-Greedy Policy
 
-Q-learning agent and trainer
+Dynamic Epsilon Control
 
-Multi-episode training sessions
+Q-Learning Agent
 
-Best-episode selection
+Q-Learning Trainer
 
-Configurable target coverage
+Multi-Episode Training Sessions
 
-Training statistics
+Training Statistics
+
+Best Episode Selection
+
+Configurable Target Coverage
 
 Real Coverage Environment
 
-Real pytest execution
+Real pytest Execution
 
-Real coverage.py feedback
+Real Coverage Feedback
 
-Cumulative scenario-suite transitions
+Scenario Suite Coverage Transition
 
-Episode reset support
+Cumulative Scenario Execution
 
-Target-coverage termination
+Episode Reset Support
 
-Function-level line and branch coverage
+Target Coverage Based Termination
 
-File-level line and branch coverage
+Reachable Coverage Handling
 
-Missing-line and uncovered-branch detection
+Function-Level Coverage Evaluation
 
-Reachable-coverage support
+File-Level Coverage Evaluation
+
+Line Coverage Tracking
+
+Branch Coverage Tracking
 
 Reward System
 
-The reward model currently considers:
+The RL reward system currently considers:
 
 Coverage improvement
 
@@ -206,257 +176,111 @@ No-improvement penalties
 
 Test execution cost
 
-Full or target coverage reward
+Full/target coverage reward
 
-Efficient scenario selection
+Efficient test selection
 
-This supports the project's lexicographic objective: maximize coverage first, then reduce test-suite size without losing coverage.
+This allows the agent to optimize not only coverage growth but also the number of tests required to reach the target.
 
-Test Generation and Reporting
+Test Generation
 
-Automatic pytest generation
+Automatic pytest Generation
 
-Stable test naming
+Stable Test Naming
 
-Cumulative test-suite generation
+Metadata Generation
 
-Test-file writing
+Cumulative Test Suite Generation
 
-Timeout and execution-error handling
+Minimized Suite Export Support
 
-Human-readable RL training reports
+Test Automation
 
-JSON reports
+Automatic Test Execution
 
-DQM reports
+Concrete Scenario Validation
 
-Function and file coverage summaries
+Execution Summary
 
-Experimental Evaluation
+Timeout Handling
 
-The framework is evaluated on multiple datasets with different control-flow complexity levels. Results from different targets are reported separately and should not be interpreted as the same experiment.
+Error Reporting
 
-evaluate_application Benchmark
+Real Coverage Measurement
 
-An earlier complex-dataset experiment produced:
+Coverage Analysis
 
-Generated scenarios              : 36
-Reachable maximum line coverage  : 98.65%
-Reachable maximum branch coverage: 98.61%
-Highest single-scenario coverage : 24.32%
-Lowest single-scenario coverage  : 4.05%
-Average single-scenario coverage : 19.40%
+Line Coverage
 
-No individual scenario could approach the reachable maximum. The experiment demonstrated that multiple scenarios were necessary to cover distinct execution paths. Leave-one-out and greedy checks also showed that all 36 scenarios were required by the available scenario pool to preserve that result.
+Branch Coverage
 
-process_order Ultracomplex Benchmark
+Function-Level Coverage
 
-The datasets/sample_ultracomplex_code.py::process_order target was used to expose limitations in loop expansion, path feasibility, relational input generation, dynamic expected-result evaluation, and concrete scenario validation.
+File-Level Coverage
 
-With the original path expansion limit, the pipeline produced:
+Missing Line Detection
 
-Execution paths             : 619
-FEASIBLE paths              : 25
-INFEASIBLE paths            : 594
-Concrete scenario pool      : 14
-Function line coverage      : 52.24%
-Function branch coverage    : 48.08%
+Uncovered Branch Detection
 
-The diagnostic showed that paths after a two-iteration local while loop required a third visit to the loop condition in order to model the exit check. After integrating a configurable max_visits_per_node value with a default of 3, and improving general-purpose input generation, the updated production pipeline produced:
+Coverage Reports
 
-Execution paths             : 2128
-FEASIBLE paths              : 340
-INFEASIBLE paths            : 1788
-UNKNOWN paths               : 0
-Concrete scenario pool      : 60
-Executed scenarios          : 51
-Function line coverage      : 83.58%
-Function branch coverage    : 84.62%
-File line coverage          : 68.60%
-File branch coverage        : 66.67%
+Coverage Workflow
 
-This improvement was achieved without modifying the benchmark source code and without adding target-specific rules to the framework.
+Training and Reporting
 
-Some terminal branches in the benchmark are intentionally or structurally unreachable. Consequently, the remaining work is not to force raw coverage to 100%, but to identify the reachable coverage ceiling and minimize the scenario subset that preserves it.
+Multi-Episode Training
 
-Current Optimization Problem
+Episode Statistics
 
-The input-generation bottleneck has been substantially reduced: the ultracomplex scenario pool increased from 14 to 60 and function coverage increased from 52.24% to 83.58%.
+Total and Average Reward
 
-The current research problem is now test-suite minimization:
+Best Episode Detection
 
-60 validated scenarios
-        │
-        ▼
-Scenario contribution analysis
-        │
-        ├── Deterministic greedy baseline
-        └── RL-based scenario selection
-        │
-        ▼
-Smallest suite preserving maximum reachable coverage
+Best Coverage Detection
 
-Marginal scenario contribution is defined as:
+Executed Test Count Tracking
 
-Marginal Contribution =
-Coverage(Current Suite + Scenario)
-- Coverage(Current Suite)
+Q-Table State Statistics
 
-The greedy baseline provides a deterministic reference against which the Q-learning agent's selection efficiency can be evaluated.
+Function Coverage Summary
 
-Current Development Status
+File Coverage Summary
 
-Completed
+Human-Readable Training Reports
 
-AST and function analysis
+JSON Reports
 
-Type-hint extraction
+DQM Reports
 
-CFG construction
+Architecture
 
-Bounded execution path analysis
-
-Loop and exception-flow analysis
-
-Data-flow analysis
-
-Path-state analysis
-
-Path-feasibility classification
-
-DQM scoring and path prioritization
-
-Constraint-aware input candidate generation
-
-Typed and collection input generation
-
-Relational witness integration
-
-Dynamic return and f-string evaluation
-
-Scenario generation and action mapping
-
-Concrete scenario execution validation
-
-Pytest generation and file writing
-
-Automated test execution
-
-Real line and branch coverage measurement
-
-Function-level and file-level coverage evaluation
-
-Coverage-state and reward models
-
-Q-learning infrastructure
-
-Multi-episode real RL training
-
-Training statistics and reporting
-
-Configurable execution-path visit limit in the production service
-
-Complex and ultracomplex benchmark evaluation
-
-In Progress
-
-Raw versus reachable coverage separation
-
-Remaining coverage-gap classification
-
-Duplicate and equivalent scenario detection
-
-Scenario marginal-contribution analysis
-
-Greedy minimum-scenario baseline
-
-RL test-selection efficiency evaluation
-
-Test-suite minimization
-
-Planned
-
-RL versus greedy baseline comparison
-
-Reward-function optimization
-
-State-representation experiments
-
-Hyperparameter evaluation
-
-Configurable main.py command-line interface
-
-Additional complex dataset experiments
-
-External Python file and project ingestion
-
-Git repository input support
-
-Dependency discovery and isolated execution
-
-Tree-sitter integration
-
-FastAPI backend
-
-Web dashboard
-
-Next Sprint
-
-The next sprint focuses on measurable optimization rather than simply generating more paths:
-
-Make the target source file, module, function, episode count, and path-visit limit configurable from main.py.
-
-Report raw coverage and reachable coverage separately.
-
-Classify each remaining uncovered line and branch as reachable, unreachable, unsupported, or unresolved.
-
-Normalize and deduplicate concrete scenarios before RL training.
-
-Measure each scenario's marginal line and branch contribution.
-
-Build a deterministic greedy minimization baseline.
-
-Compare RL and greedy suites at equal coverage.
-
-Export the smallest verified pytest suite found.
-
-The sprint succeeds when the current process_order coverage is preserved or improved using fewer than 51 executed scenarios, without introducing benchmark-specific logic.
-
-Test Status
-
-The project includes unit, integration, regression, and end-to-end tests for the analysis, generation, validation, coverage, and RL layers.
-
-Latest full regression run:
-
-1249 tests passed
-
-Latest integrated change:
-
-e1fbe53 feat: enhance path analysis and RL test generation
-
-Project Structure
-
-RL-Unit-Test
-│
-├── analyzer
-├── cfg
-│   ├── control_flow_graph.py
-│   ├── data_flow_analyzer.py
-│   ├── path_analyzer.py
-│   ├── path_feasibility_analyzer.py
-│   └── path_state_analyzer.py
-├── evaluator
-├── generator
-│   ├── input_candidate_generator.py
-│   ├── path_input_generator.py
-│   └── scenario_generator.py
-├── rl
-├── services
-│   └── real_rl_training_service.py
-├── datasets
-├── tests
-├── output
-└── main.py
+flowchart TD
+    A["Python Source"] --> B["Python AST Analyzer"]
+    B --> C["Control Flow Graph Builder"]
+    C --> D["Execution Path Analyzer"]
+    D --> E["Data-Flow Analyzer"]
+    E --> F["Path-State Analyzer"]
+    F --> G["Path-Feasibility Analyzer"]
+    G --> H["Input Candidate Generator"]
+    H --> I["Decision Quality Matrix"]
+    I --> J["Scenario Generator"]
+    J --> K["Concrete Scenario Validation"]
+    K --> L["Scenario Action Mapper"]
+    L --> M["Coverage Environment"]
+    M --> N["State Encoder"]
+    N --> O["Q-Learning Agent"]
+    O -.-> O1["Q-Table"]
+    O -.-> O2["Epsilon-Greedy Policy"]
+    O --> P["Scenario Selection"]
+    P --> Q["Pytest Generation"]
+    Q --> R["Automatic Test Execution"]
+    R --> S["Real Coverage Measurement"]
+    S --> T["Reward Calculation"]
+    T --> U["Q-Value Update"]
+    U --> V["Next Training Step or Episode"]
+    V --> M
+
+The feasibility and concrete-validation layers prevent contradictory or behaviorally incorrect scenarios from entering the RL action pool. The RL agent therefore learns from scenarios that are both statically supported and executable on the real target function.
 
 Technologies
 
@@ -464,27 +288,521 @@ Python 3.14
 
 Python AST
 
-pytest
+Pytest
 
 coverage.py
 
 JSON
 
-Control Flow Graphs
+Control Flow Graph (CFG)
+
+Decision Quality Matrix (DQM)
+
+Data-Flow Analysis
+
+Symbolic Path-State Analysis
+
+Reinforcement Learning
+
+Q-Learning
+
+Future Integrations
+
+Tree-sitter
+
+FastAPI
+
+Web Dashboard
+
+Git Repository Input
+
+Isolated Project Execution
+
+Current Development Status
+
+Static Analysis
+
+✅ AST Analyzer
+
+✅ Function Analyzer
+
+✅ Type Hint Analyzer
+
+✅ Complexity Metrics
+
+CFG
+
+✅ CFG Builder
+
+✅ Execution Path Analyzer
+
+✅ Configurable Path Visit Limit
+
+✅ Loop and Exception Flow Analysis
+
+Data Flow and Feasibility
+
+✅ Data Flow Analyzer
+
+✅ Path State Analyzer
+
+✅ Path Feasibility Analyzer
+
+✅ Relational Constraint Support
+
+✅ Contradictory Path Filtering
+
+DQM
+
+✅ Decision Quality Matrix
+
+✅ Path Prioritization
+
+Scenario Generation
+
+✅ Input Candidate Generator
+
+✅ Typed Path Input Generator
+
+✅ Loop and Alias-Aware Input Generation
+
+✅ Dynamic Expected Result Generation
+
+✅ Scenario Generator
+
+✅ Scenario Action Mapper
+
+✅ Concrete Scenario Validation
+
+Reinforcement Learning
+
+✅ Coverage Environment
+
+✅ Reward Calculator
+
+✅ State Encoder
+
+✅ Extended State Representation
+
+✅ Q-Table
+
+✅ Epsilon-Greedy Policy
+
+✅ Dynamic Epsilon Support
+
+✅ Q-Learning Agent
+
+✅ Q-Learning Trainer
+
+✅ Multi-Episode Training
+
+✅ Training Statistics
+
+✅ Best Episode Selection
+
+Real Coverage Integration
+
+✅ Scenario Suite Coverage Transition
+
+✅ Real pytest Execution
+
+✅ Real Coverage Feedback
+
+✅ Target Coverage Support
+
+✅ Reachable Coverage Handling
+
+✅ Function-Level Coverage Evaluation
+
+✅ File-Level Coverage Evaluation
+
+Test Generation
+
+✅ Pytest Generator
+
+✅ Test File Writer
+
+✅ Cumulative Scenario Suite Generation
+
+Automation
+
+✅ Test Execution
+
+✅ Coverage Workflow
+
+✅ End-to-End RL Training Service
+
+✅ Configurable Path Expansion in the Production Service
+
+Experimental Evaluation
+
+The RL pipeline is evaluated on increasingly complex datasets rather than relying only on the initial sample program. Results from different target functions are reported separately.
+
+evaluate_application Benchmark
+
+An earlier experiment on the evaluate_application target produced:
+
+Metric
+
+Result
+
+Generated scenarios
+
+36
+
+Reachable maximum line coverage
+
+98.65%
+
+Reachable maximum branch coverage
+
+98.61%
+
+Highest single-scenario coverage
+
+24.32%
+
+Lowest single-scenario coverage
+
+4.05%
+
+Average single-scenario coverage
+
+19.40%
+
+The experiment demonstrated that no individual scenario could approach the reachable maximum. Multiple scenarios were required to cover different execution paths. Leave-one-out and greedy checks also showed that all 36 scenarios in the available pool were required to preserve the measured maximum.
+
+process_order Ultracomplex Benchmark
+
+The datasets/sample_ultracomplex_code.py::process_order target was used to expose limitations in loop expansion, feasibility analysis, relational input generation, expected-result evaluation, and concrete scenario validation.
+
+Before the latest revisions:
+
+Metric
+
+Result
+
+Execution paths
+
+619
+
+FEASIBLE paths
+
+25
+
+INFEASIBLE paths
+
+594
+
+UNKNOWN paths
+
+0
+
+Concrete scenario pool
+
+14
+
+Function line coverage
+
+52.24%
+
+Function branch coverage
+
+48.08%
+
+The diagnostic showed that paths after a local two-iteration while loop required a third visit to the loop condition to model the final exit check.
+
+After integrating a configurable max_visits_per_node value with a production default of 3, improving generic input generation, and validating generated scenarios against the real target function:
+
+Metric
+
+Result
+
+Execution paths
+
+2,128
+
+FEASIBLE paths
+
+340
+
+INFEASIBLE paths
+
+1,788
+
+UNKNOWN paths
+
+0
+
+Concrete scenario pool
+
+60
+
+Scenarios executed in the measured episode
+
+51
+
+Function line coverage
+
+83.58%
+
+Function branch coverage
+
+84.62%
+
+File line coverage
+
+68.60%
+
+File branch coverage
+
+66.67%
+
+The improvement was achieved without modifying the benchmark source code and without adding process_order-specific rules to the framework.
+
+Some terminal branches are intentionally or structurally unreachable. The next evaluation step is therefore to separate raw coverage from reachable coverage and determine the minimum scenario subset that preserves the reachable maximum.
+
+Current Optimization Problem
+
+The framework can now generate a substantially larger validated scenario pool for the ultracomplex target. The current optimization problem is test-suite minimization.
+
+Current situation:
+
+flowchart LR
+    A["60 validated scenarios"] --> B["RL scenario selection"]
+    B --> C["51 executed scenarios"]
+    C --> D["83.58% line and 84.62% branch coverage"]
+
+The next objective is to determine whether the same or higher reachable coverage can be achieved with a smaller subset:
+
+flowchart LR
+    A["60 available scenarios"] --> B["Contribution analysis"]
+    B --> C["Greedy and RL minimization"]
+    C --> D["Minimum verified scenario subset"]
+    D --> E["Maximum reachable coverage"]
+
+To evaluate this objectively, scenario contribution analysis and a greedy minimum-scenario baseline will be used.
+
+The baseline measures the marginal coverage contribution of each scenario:
+
+\text{Coverage}(\text{Current Suite})
+$$
+
+This provides a deterministic baseline against which the RL agent's test-selection efficiency can be compared.
+
+Test Status
+
+The project contains an extensive automated test suite covering individual analysis and RL components, regression cases, integration flows, and end-to-end real coverage training.
+
+Latest full regression run:
+
+Test result
+
+Status
+
+Passed
+
+1,249
+
+Failed
+
+0
+
+Latest integrated development commit:
+
+e1fbe53 feat: enhance path analysis and RL test generation
+
+Project Structure
+
+Path
+
+Responsibility
+
+analyzer/
+
+AST, function, type, and source-code analysis
+
+cfg/control_flow_graph.py
+
+Control Flow Graph construction
+
+cfg/path_analyzer.py
+
+Bounded execution-path discovery
+
+cfg/data_flow_analyzer.py
+
+Variable definition, update, and range analysis
+
+cfg/path_state_analyzer.py
+
+Local symbolic path-state propagation
+
+cfg/path_feasibility_analyzer.py
+
+Feasibility classification and relational constraints
+
+evaluator/
+
+DQM scoring and evaluation models
+
+generator/input_candidate_generator.py
+
+Candidate and witness conversion
+
+generator/path_input_generator.py
+
+Typed, collection, loop-aware, and relational input generation
+
+generator/scenario_generator.py
+
+Stable test-scenario generation
+
+rl/
+
+State, action, reward, Q-table, policy, agent, and training components
+
+services/
+
+Coverage, generation, automation, and real RL training services
+
+tests/
+
+Unit, integration, regression, and end-to-end tests
+
+output/
+
+Generated tests and reports
+
+datasets/
+
+Sample and benchmark Python targets
+
+main.py
+
+Current application entry point
+
+Development Roadmap
+
+Completed
+
+Python AST Analysis
+
+CFG Construction
+
+Bounded Execution Path Analysis
 
 Decision Quality Matrix
 
-Q-learning
+Data-Flow Analysis
 
-Planned integrations include Tree-sitter, FastAPI, and a web dashboard.
+Path-State Analysis
+
+Path-Feasibility Classification
+
+Contradictory Path Filtering
+
+Typed and Constraint-Aware Input Generation
+
+Collection, Alias, and Loop-Variable Input Generation
+
+Relational Witness Integration
+
+Dynamic Return and f-String Evaluation
+
+Scenario Generation
+
+Scenario Action Mapping
+
+Concrete Scenario Validation
+
+Pytest Generation
+
+Automatic Test Execution
+
+Coverage Analysis
+
+Coverage Workflow
+
+Reinforcement Learning Infrastructure
+
+Q-Learning Implementation
+
+Multi-Episode RL Training
+
+Real Coverage Feedback Integration
+
+Scenario Suite Coverage Transition
+
+Target Coverage Support
+
+Extended RL State Representation
+
+Training Statistics
+
+Best Episode Selection
+
+End-to-End Real RL Training
+
+Complex Dataset Evaluation
+
+Ultracomplex Dataset Evaluation
+
+Configurable Production Path Expansion
+
+In Progress
+
+Raw vs Reachable Coverage Separation
+
+Remaining Coverage-Gap Classification
+
+Duplicate and Equivalent Scenario Detection
+
+Scenario Marginal Coverage Analysis
+
+Greedy Minimum Scenario Baseline
+
+Test Suite Minimization
+
+RL Test Selection Efficiency Evaluation
+
+Planned
+
+RL vs Greedy Baseline Comparison
+
+Reward Function Optimization
+
+State Representation Experiments
+
+Hyperparameter Evaluation
+
+Configurable main.py Command-Line Interface
+
+Additional Complex Dataset Experiments
+
+External Python File and Project Input
+
+Git Repository Input
+
+Dependency Discovery
+
+Isolated and Resource-Limited Execution
+
+Tree-sitter Integration
+
+FastAPI Backend
+
+Web Interface
 
 Research Goal
 
-The long-term goal of RL-Unit-Test is not merely to maximize raw code coverage.
+The long-term research objective of RL-Unit-Test is not simply to maximize raw code coverage.
+
+The optimization problem is:
 
 Achieve the maximum reachable code coverage using the minimum number of automatically generated test cases.
 
-The RL agent is evaluated against deterministic baselines to determine whether learned scenario-selection strategies can reduce test-suite size while preserving the same verified coverage.
+The RL agent will therefore be evaluated against deterministic baseline methods to determine whether learned scenario-selection strategies can reduce test-suite size while preserving verified coverage.
 
 License
 
@@ -499,3 +817,5 @@ Software Engineering
 Manisa Celal Bayar University
 
 Research Project
+
+RL-Unit-Test
