@@ -38,7 +38,8 @@ The project is being developed as a modular and extensible architecture suitable
 - Control Flow Graph (CFG)
 - Bounded Execution Path Discovery
 - Configurable Per-Node Visit Limit
-- Loop and `continue` Flow Detection
+- Loop, `continue`, and Loop-Scoped `break` Flow Detection
+- Nested-Loop Exit and Loop-`else` Semantics
 - Exception Flow Analysis
 - Stable Path Metadata
 
@@ -50,9 +51,11 @@ The project is being developed as a modular and extensible architecture suitable
 - Local Symbolic State Propagation
 - Numeric Range Inference
 - Boolean and Collection-State Constraints
+- Aggregate Collection-State Propagation
 - Relational Constraint Analysis
 - Variable-to-Variable Constraint Support
 - Loop-State Consistency Checks
+- Iteration-Scoped Loop Activation Analysis
 - `FEASIBLE`, `INFEASIBLE`, and `UNKNOWN` Path Classification
 - Contradictory Path Elimination
 
@@ -81,9 +84,12 @@ The project is being developed as a modular and extensible architecture suitable
 - `list`, `tuple`, `set`, `Optional`, `Union`, and Nested Type Support
 - Subscript Alias Propagation
 - Loop-Variable Constraint Propagation
+- Aggregate-Aware Derived-Value Input Synthesis
 - Relational Witness Forwarding
 - Dynamic Return-Value Evaluation
+- Safe Built-in `round` Return Replay
 - Safe f-String and Format-Spec Evaluation
+- Stage- and Category-Aware Scenario Rejection Reporting
 - Concrete Result and Exception Validation
 
 ---
@@ -302,7 +308,8 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ CFG Builder
 - ✅ Execution Path Analyzer
 - ✅ Configurable Path Visit Limit
-- ✅ Loop and Exception Flow Analysis
+- ✅ Loop, Loop-Scoped `break`, and Exception Flow Analysis
+- ✅ Nested-Loop Exit and Loop-`else` Semantics
 
 ## Data Flow and Feasibility
 
@@ -310,6 +317,8 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Path State Analyzer
 - ✅ Path Feasibility Analyzer
 - ✅ Relational Constraint Support
+- ✅ Aggregate Collection-State Feasibility
+- ✅ Iteration-Scoped Loop Activation Analysis
 - ✅ Contradictory Path Filtering
 
 ## DQM
@@ -322,8 +331,11 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Input Candidate Generator
 - ✅ Typed Path Input Generator
 - ✅ Loop and Alias-Aware Input Generation
+- ✅ Aggregate-Aware Derived-Value Input Synthesis
 - ✅ Dynamic Expected Result Generation
+- ✅ Safe Built-in `round` Return Replay
 - ✅ Scenario Generator
+- ✅ Unsupported Path Failure Isolation and Rejection Reporting
 - ✅ Scenario Action Mapper
 - ✅ Concrete Scenario Validation
 
@@ -423,6 +435,20 @@ The improvement was achieved without modifying the benchmark source code and wit
 
 Some terminal branches are intentionally or structurally unreachable. The next evaluation step is therefore to separate raw coverage from reachable coverage and determine the minimum scenario subset that preserves the reachable maximum.
 
+## Robustness Benchmarks
+
+Recent robustness work extended the generic pipeline with aggregate-state feasibility, derived-value input synthesis, loop-scoped `break` control flow, safe `round` replay, and isolated handling of unsupported expected-result paths.
+
+| Target | Pipeline result | Validated scenarios | Function line coverage | Function branch coverage |
+| --- | --- | ---: | ---: | ---: |
+| `calculate_category_usage` | Completed | 3 / 3 | 100% | 100% |
+| `determine_transaction_risk` | Completed | 4 / 4 | 90% | 87.5% |
+| `analyze_transactions` | Blocked during input synthesis | — | — | — |
+
+For `determine_transaction_risk`, all five bounded paths were classified as feasible. Four became concrete-valid scenarios, while one was isolated as an `UNREACHABLE_INPUT` rejection instead of aborting scenario generation. The remaining feasible-but-uncovered branch is tracked separately from generator failures.
+
+The current robustness blocker is derived initialization of a `while` control variable, such as a local value computed from an input before the loop. This limitation is reported explicitly rather than producing an invalid scenario or hiding the failure.
+
 ---
 
 # Current Optimization Problem
@@ -485,12 +511,8 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,249 |
+| Passed | 1,466 |
 | Failed | 0 |
-
-Latest integrated development commit:
-
-`e1fbe53 feat: enhance path analysis and RL test generation`
 
 ---
 
@@ -527,8 +549,14 @@ RL-Unit-Test
 - Contradictory Path Filtering
 - Typed and Constraint-Aware Input Generation
 - Collection, Alias, and Loop-Variable Input Generation
+- Aggregate Collection-State Feasibility
+- Aggregate-Aware Derived-Value Input Synthesis
+- Iteration-Scoped Loop Activation Analysis
 - Relational Witness Integration
 - Dynamic Return and f-String Evaluation
+- Safe Built-in `round` Return Replay
+- Loop-Scoped `break` Control-Flow Semantics
+- Unsupported Scenario Path Failure Isolation
 - Scenario Generation
 - Scenario Action Mapping
 - Concrete Scenario Validation
@@ -561,6 +589,7 @@ RL-Unit-Test
 - Greedy Minimum Scenario Baseline
 - Test Suite Minimization
 - RL Test Selection Efficiency Evaluation
+- Derived `while` Control-Variable Initialization
 
 ---
 
