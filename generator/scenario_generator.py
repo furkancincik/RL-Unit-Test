@@ -11,6 +11,7 @@ from generator.path_input_generator import (
     PathInputGenerator,
     UnreachablePathError,
     UnsupportedExpectedResultError,
+    UnsupportedInputSynthesisError,
 )
 
 
@@ -24,6 +25,7 @@ class ScenarioRejectionCategory(str, Enum):
     """Beklenen ve izole edilebilir scenario rejection kategorisi."""
 
     UNREACHABLE_INPUT = "UNREACHABLE_INPUT"
+    UNSUPPORTED_INPUT_SYNTHESIS = "UNSUPPORTED_INPUT_SYNTHESIS"
     UNSUPPORTED_EXPECTED_RESULT = "UNSUPPORTED_EXPECTED_RESULT"
 
 
@@ -289,6 +291,18 @@ class ScenarioGenerator:
                         category=(
                             ScenarioRejectionCategory
                             .UNSUPPORTED_EXPECTED_RESULT
+                        ),
+                        error=error,
+                    )
+                )
+                continue
+            except UnsupportedInputSynthesisError as error:
+                rejections.append(
+                    self._create_rejection(
+                        path_index=score.path_index,
+                        category=(
+                            ScenarioRejectionCategory
+                            .UNSUPPORTED_INPUT_SYNTHESIS
                         ),
                         error=error,
                     )

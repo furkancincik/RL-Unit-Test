@@ -6,6 +6,7 @@ from cfg.path_analyzer import ExecutionPath
 from generator.path_input_generator import (
     PathInputGenerator,
     UnreachablePathError,
+    UnsupportedInputSynthesisError,
 )
 
 
@@ -2418,6 +2419,47 @@ def test_generate_accepts_candidate_for_tighter_upper_bound_path() -> None:
         },
     )
 
+
+def create_derived_local_while_path(
+    *,
+    assignment: str,
+    condition: str,
+    updates: tuple[str, ...] = (),
+    break_after_updates: bool = False,
+) -> ExecutionPath:
+    """Gerçek CFG ziyaret kimliği semantiğiyle local while yolu kurar."""
+    node_ids = [1, 2, 3]
+    edge_labels: list[str | None] = [None, None]
+    node_labels = ["START", assignment, condition]
+    node_types = ["start", "Assign", "while"]
+
+    for update_index, update in enumerate(updates, start=1):
+        node_ids.extend((3 + update_index, 3))
+        edge_labels.extend(("True", "Loop"))
+        node_labels.extend((update, condition))
+        node_types.extend(("AugAssign", "while"))
+
+    if break_after_updates:
+        node_ids.append(20)
+        edge_labels.extend(("True", "Break"))
+        node_labels.append("break")
+        node_types.append("break")
+    else:
+        edge_labels.append("False")
+
+    node_ids.extend((21, 22))
+    edge_labels.append(None)
+    node_labels.extend(("return source", "END"))
+    node_types.extend(("return", "end"))
+
+    return ExecutionPath(
+        node_ids=node_ids,
+        edge_labels=edge_labels,
+        node_labels=node_labels,
+        node_types=node_types,
+        line_numbers=list(range(1, len(node_ids) + 1)),
+    )
+
     assert result.keyword_argument_dict["score"] == 49
     assert result.keyword_argument_dict["score"] < 85
     assert result.keyword_argument_dict["score"] < 50
@@ -3021,3 +3063,283 @@ def test_generate_rejects_round_shadowed_in_function_path(
             parameter_names=("value",),
             candidate_values={"value": 12.5},
         )
+
+
+@pytest.mark.parametrize(
+    ("assignment", "expected_source"),
+    [
+        ("counter = source", 1),
+        ("counter = source + 1", 0),
+        ("counter = 1 + source", 0),
+        ("counter = source - 1", 2),
+        ("counter = 10 - source", 9),
+        ("counter = -source", -1),
+    ],
+)
+def test_generate_back_propagates_affine_local_while_initialization(
+    assignment: str,
+    expected_source: int,
+) -> None:
+    path = create_derived_local_while_path(
+        assignment=assignment,
+        condition="counter > 0",
+        updates=("counter -= 1",),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("source",),
+        parameter_types={"source": "int"},
+    )
+
+    assert result.keyword_argument_dict == {"source": expected_source}
+    assert isinstance(result.keyword_argument_dict["source"], int)
+
+
+def test_generate_back_propagates_affine_local_while_false_edge() -> None:
+    path = create_derived_local_while_path(
+        assignment="counter = source + 1",
+        condition="counter > 0",
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("source",),
+    )
+
+    assert result.keyword_argument_dict == {"source": -1}
+
+
+def test_generate_replays_multiple_affine_local_while_updates() -> None:
+    path = create_derived_local_while_path(
+        assignment="counter = source + 1",
+        condition="counter > 0",
+        updates=("counter -= 1", "counter -= 1"),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("source",),
+    )
+
+    assert result.keyword_argument_dict == {"source": 1}
+
+
+def test_generate_replays_incrementing_affine_local_while() -> None:
+    path = create_derived_local_while_path(
+        assignment="counter = source",
+        condition="counter < 2",
+        updates=("counter += 1",),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("source",),
+    )
+
+    assert result.keyword_argument_dict == {"source": 1}
+
+
+def test_generate_affine_local_while_break_needs_no_back_edge_update() -> None:
+    path = create_derived_local_while_path(
+        assignment="counter = source + 1",
+        condition="counter > 0",
+        break_after_updates=True,
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("source",),
+    )
+
+    assert set(result.keyword_argument_dict) == {"source"}
+    assert result.keyword_argument_dict["source"] + 1 > 0
+    assert path.loop_iteration_count == 0
+    assert path.is_zero_iteration_loop_path is False
+
+
+@pytest.mark.parametrize(
+    ("condition", "desired_result"),
+    [
+        ("counter > 2", True),
+        ("counter >= 2", True),
+        ("counter < 2", True),
+        ("counter <= 2", True),
+        ("counter == 2", True),
+        ("counter != 2", True),
+        ("counter > 2", False),
+        ("counter >= 2", False),
+        ("counter < 2", False),
+        ("counter <= 2", False),
+        ("counter == 2", False),
+        ("counter != 2", False),
+    ],
+)
+def test_generate_inverts_all_affine_while_comparisons(
+    condition: str,
+    desired_result: bool,
+) -> None:
+    path = create_derived_local_while_path(
+        assignment="counter = source + 1",
+        condition=condition,
+        break_after_updates=desired_result,
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("source",),
+    )
+    actual = eval(
+        condition,
+        {"__builtins__": {}},
+        {"counter": result.keyword_argument_dict["source"] + 1},
+    )
+
+    assert actual is desired_result
+
+
+def test_generate_replays_update_before_affine_while_break() -> None:
+    path = create_derived_local_while_path(
+        assignment="counter = source + 1",
+        condition="counter > 0",
+        updates=("counter -= 1",),
+        break_after_updates=True,
+    )
+
+    result = PathInputGenerator().generate(path, ("source",))
+
+    assert set(result.keyword_argument_dict) == {"source"}
+    assert result.keyword_argument_dict["source"] + 1 > 0
+
+
+def test_generate_keeps_separate_affine_while_activations() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 5, 7, 8],
+        edge_labels=[None, None, "False", None, "True", "Loop", "False", None],
+        node_labels=[
+            "START",
+            "counter = first + 1",
+            "counter > 0",
+            "counter = second + 1",
+            "counter > 0",
+            "counter -= 1",
+            "counter > 0",
+            "return first + second",
+            "END",
+        ],
+        node_types=[
+            "start", "Assign", "while", "Assign", "while",
+            "AugAssign", "while", "return", "end",
+        ],
+        line_numbers=list(range(1, 10)),
+    )
+
+    result = PathInputGenerator().generate(path, ("first", "second"))
+
+    assert result.keyword_argument_dict == {"first": -1, "second": 0}
+
+
+def test_generate_supports_affine_while_inside_for() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 4, 2, 6, 7],
+        edge_labels=[None, "Iterate", None, "True", "Loop", "False", "Complete", None],
+        node_labels=[
+            "START", "item in values", "counter = limit + 1",
+            "counter > 0", "counter -= 1", "counter > 0",
+            "item in values", "return limit", "END",
+        ],
+        node_types=[
+            "start", "for", "Assign", "while", "AugAssign",
+            "while", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 10)),
+    )
+
+    result = PathInputGenerator().generate(path, ("values", "limit"))
+
+    assert result.keyword_argument_dict == {"values": [0], "limit": 0}
+
+
+def test_generate_supports_nested_affine_while_loops() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 5, 7, 3, 8, 9],
+        edge_labels=[
+            None, None, "True", None, "True", "Loop", "False",
+            "Loop", "False", None,
+        ],
+        node_labels=[
+            "START", "outer = source + 1", "outer > 0",
+            "inner = source + 1", "inner > 0", "inner -= 1",
+            "inner > 0", "outer -= 1", "outer > 0", "return source", "END",
+        ],
+        node_types=[
+            "start", "Assign", "while", "Assign", "while", "AugAssign",
+            "while", "AugAssign", "while", "return", "end",
+        ],
+        line_numbers=list(range(1, 12)),
+    )
+
+    result = PathInputGenerator().generate(path, ("source",))
+
+    assert result.keyword_argument_dict == {"source": 0}
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "counter = first + second",
+        "counter = source * source",
+    ],
+)
+def test_generate_classifies_unsupported_local_while_initialization(
+    assignment: str,
+) -> None:
+    parameter_names = (
+        ("first", "second")
+        if "first" in assignment
+        else ("source",)
+    )
+    path = create_derived_local_while_path(
+        assignment=assignment,
+        condition="counter > 0",
+        break_after_updates=True,
+    )
+
+    with pytest.raises(
+        UnsupportedInputSynthesisError,
+        match="Derived while|desteklenmeyen provenance",
+    ):
+        PathInputGenerator().generate(path, parameter_names)
+
+
+def test_generate_keeps_affine_while_constraint_conflicts_unreachable() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6],
+        edge_labels=[None, "True", None, "False", None],
+        node_labels=[
+            "START", "source >= 0", "counter = source + 1",
+            "counter > 0", "return source", "END",
+        ],
+        node_types=["start", "if", "Assign", "while", "return", "end"],
+        line_numbers=list(range(1, 7)),
+    )
+
+    with pytest.raises(UnreachablePathError):
+        PathInputGenerator().generate(path, ("source",))
+
+
+def test_robustness_remaining_attempts_affine_initialization_is_accepted() -> None:
+    path = create_derived_local_while_path(
+        assignment="remaining_attempts = retry_count + 1",
+        condition="remaining_attempts > 0",
+        updates=("remaining_attempts -= 1",),
+    )
+    path.node_labels[-2] = "return retry_count"
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("retry_count",),
+        parameter_types={"retry_count": "int"},
+    )
+
+    assert result.keyword_argument_dict == {"retry_count": 0}

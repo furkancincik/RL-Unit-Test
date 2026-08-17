@@ -75,6 +75,10 @@ class DerivedValueSynthesisError(ValueError):
     """Bir derived koşul güvenli affine input'a geri yayılamadığında oluşur."""
 
 
+class UnsupportedDerivedValueSynthesisError(DerivedValueSynthesisError):
+    """Derived provenance desteklenen güvenli affine modelin dışındadır."""
+
+
 class DerivedValueInputSynthesizer:
     """Path-local affine provenance'i gerçek parametrelere geri yayar."""
 
@@ -128,6 +132,9 @@ class DerivedValueInputSynthesizer:
                 self._apply_condition(
                     condition=step.node_label,
                     desired_result=(step.outgoing_edge_label == "True"),
+                    require_single_parameter_affine=(
+                        step.node_type == "while"
+                    ),
                     parameter_names=parameter_set,
                     expressions=expressions,
                     unsupported_names=unsupported_names,
@@ -272,6 +279,15 @@ class DerivedValueInputSynthesizer:
                 )
             return None
 
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            operand = self._parse_expression(
+                node.operand,
+                parameter_names=parameter_names,
+                expressions=expressions,
+                resolving=resolving,
+            )
+            return None if operand is None else operand.scale(-1.0)
+
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             if node.value.id not in parameter_names:
                 return None
@@ -327,6 +343,7 @@ class DerivedValueInputSynthesizer:
         *,
         condition: str,
         desired_result: bool,
+        require_single_parameter_affine: bool,
         parameter_names: set[str],
         expressions: dict[str, AffineExpression],
         unsupported_names: set[str],
@@ -346,9 +363,19 @@ class DerivedValueInputSynthesizer:
             }
             ambiguous_names = referenced_names & unsupported_names
             if ambiguous_names:
-                raise DerivedValueSynthesisError(
+                error_type = (
+                    UnsupportedDerivedValueSynthesisError
+                    if require_single_parameter_affine
+                    else DerivedValueSynthesisError
+                )
+                raise error_type(
                     "Derived koşul desteklenmeyen provenance içeriyor: "
                     + ", ".join(sorted(ambiguous_names))
+                )
+            if require_single_parameter_affine:
+                self._validate_single_parameter_while_bindings(
+                    referenced_names=referenced_names,
+                    expressions=expressions,
                 )
             self._satisfy_comparison(
                 comparison=comparison,
@@ -357,6 +384,37 @@ class DerivedValueInputSynthesizer:
                 expressions=expressions,
                 direct_values=direct_values,
             )
+
+    @staticmethod
+    def _validate_single_parameter_while_bindings(
+        *,
+        referenced_names: set[str],
+        expressions: dict[str, AffineExpression],
+    ) -> None:
+        """Derived while local'lerini tek dış parametreli affine biçimle sınırlar."""
+        for name in referenced_names:
+            expression = expressions.get(name)
+            if expression is None or expression.is_constant:
+                continue
+
+            if len(expression.coefficients) != 1:
+                raise UnsupportedDerivedValueSynthesisError(
+                    "Derived while başlangıcı tam olarak bir dış "
+                    f"parametreye bağlı olmalıdır: {name}"
+                )
+
+            reference, coefficient = expression.coefficients[0]
+            if (
+                reference.element_index is not None
+                or not (
+                    math.isclose(coefficient, 1.0)
+                    or math.isclose(coefficient, -1.0)
+                )
+            ):
+                raise UnsupportedDerivedValueSynthesisError(
+                    "Derived while başlangıcı yalnız ±1 katsayılı "
+                    f"doğrudan parametre bağını destekler: {name}"
+                )
 
     def _required_comparisons(
         self,

@@ -7,6 +7,7 @@ from cfg.path_analyzer import ExecutionPath, PathStep
 from generator.derived_value_input_synthesizer import (
     DerivedValueInputSynthesizer,
     DerivedValueSynthesisError,
+    UnsupportedDerivedValueSynthesisError,
 )
 
 
@@ -35,6 +36,12 @@ class UnsupportedExpectedResultError(ValueError):
             "hesaplanamadı: "
             f"{return_expression}. Ayrıntı: {detail}"
         )
+
+
+class UnsupportedInputSynthesisError(ValueError):
+    """Bir path girdisi güvenli synthesis allowlist'iyle çözülemediğinde oluşur."""
+
+    category = "UNSUPPORTED_INPUT_SYNTHESIS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +241,8 @@ class PathInputGenerator:
                 parameter_names=parameter_names,
                 direct_values=direct_values,
             )
+        except UnsupportedDerivedValueSynthesisError as error:
+            raise UnsupportedInputSynthesisError(str(error)) from error
         except DerivedValueSynthesisError as error:
             raise UnreachablePathError(str(error)) from error
 
@@ -917,18 +926,18 @@ class PathInputGenerator:
 
         variable_name = next(iter(variable_names))
 
-        update_delta = self._extract_loop_update_delta(
-            path=path,
-            variable_name=variable_name,
-        )
-
-        if iteration_count > 0 and update_delta is None:
-            raise ValueError(
-                "While döngüsü için desteklenen bir değişken "
-                "güncellemesi bulunamadı."
+        if variable_name in parameter_names:
+            update_delta = self._extract_loop_update_delta(
+                path=path,
+                variable_name=variable_name,
             )
 
-        if variable_name in parameter_names:
+            if iteration_count > 0 and update_delta is None:
+                raise UnsupportedInputSynthesisError(
+                    "While döngüsü için desteklenen bir değişken "
+                    "güncellemesi bulunamadı."
+                )
+
             candidate = self._find_while_initial_value(
                 expression=condition_expression,
                 variable_name=variable_name,
@@ -939,19 +948,48 @@ class PathInputGenerator:
             direct_values[variable_name] = candidate
             return
 
-        local_initial_value = (
-            self._extract_local_loop_initial_value(
+        local_initial_expression = (
+            self._extract_local_loop_initial_expression(
                 path=path,
                 loop_step=step,
                 variable_name=variable_name,
             )
         )
 
-        if local_initial_value is None:
-            raise ValueError(
+        if local_initial_expression is None:
+            raise UnsupportedInputSynthesisError(
                 "While koşulundaki yerel değişken için döngüden "
-                "önce desteklenen bir başlangıç ataması bulunamadı: "
+                "önce bir başlangıç ataması bulunamadı: "
                 f"{variable_name}"
+            )
+
+        try:
+            local_initial_value = ast.literal_eval(
+                local_initial_expression
+            )
+        except (ValueError, TypeError):
+            # Affine ve desteklenmeyen derived ifadeler tek symbolic
+            # kaynağın sahibi olan DerivedValueInputSynthesizer'da ayrılır.
+            return
+
+        if (
+            isinstance(local_initial_value, bool)
+            or not isinstance(local_initial_value, (int, float))
+        ):
+            raise UnsupportedInputSynthesisError(
+                "While başlangıç ataması sayısal veya güvenli affine "
+                f"bir ifade olmalıdır: {variable_name}"
+            )
+
+        update_delta = self._extract_loop_update_delta(
+            path=path,
+            variable_name=variable_name,
+        )
+
+        if iteration_count > 0 and update_delta is None:
+            raise UnsupportedInputSynthesisError(
+                "While döngüsü için desteklenen bir değişken "
+                "güncellemesi bulunamadı."
             )
 
         if not self._matches_while_iteration_count(
@@ -968,16 +1006,16 @@ class PathInputGenerator:
             )
 
     @staticmethod
-    def _extract_local_loop_initial_value(
+    def _extract_local_loop_initial_expression(
         *,
         path: ExecutionPath,
         loop_step: PathStep,
         variable_name: str,
-    ) -> int | float | None:
+    ) -> ast.expr | None:
         """
-        Döngüden önceki son sabit yerel değişken atamasını döndürür.
+        Döngüden önceki son yerel değişken atamasının ifadesini döndürür.
         """
-        initial_value: int | float | None = None
+        initial_expression: ast.expr | None = None
 
         for path_step in path.steps:
             if path_step.node_id == loop_step.node_id:
@@ -1018,22 +1056,9 @@ class PathInputGenerator:
             ):
                 continue
 
-            try:
-                value = ast.literal_eval(
-                    value_expression
-                )
-            except (ValueError, TypeError):
-                continue
+            initial_expression = value_expression
 
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-            ):
-                continue
-
-            initial_value = value
-
-        return initial_value
+        return initial_expression
 
     @staticmethod
     def _matches_while_iteration_count(

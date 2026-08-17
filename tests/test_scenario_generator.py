@@ -8,13 +8,21 @@ import pytest
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.data_flow_analyzer import DataFlowAnalyzer
 from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
+from cfg.path_feasibility_analyzer import (
+    FeasibilityStatus,
+    PathFeasibilityAnalyzer,
+)
+from cfg.path_state_analyzer import PathStateAnalyzer
 from evaluator.dqm import DQMScore, DecisionQualityMatrix
+from generator.input_candidate_generator import InputCandidateGenerator
 from generator.path_input_generator import (
     GeneratedTestInput,
     PathInputGenerator,
     UnreachablePathError,
     UnsupportedExpectedResultError,
+    UnsupportedInputSynthesisError,
 )
 from generator.pytest_generator import PytestGenerator
 from generator.scenario_generator import (
@@ -548,6 +556,51 @@ def test_generate_propagates_unexpected_errors(
         )
 
 
+def test_generate_isolates_unsupported_input_synthesis_rejection() -> None:
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = [
+        UnsupportedInputSynthesisError(
+            "Derived while başlangıcı iki parametre içeriyor."
+        ),
+        GeneratedTestInput((), expected_result=2),
+    ]
+    generator = ScenarioGenerator(path_input_generator)
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=[create_mock_path(1), create_mock_path(2)],
+        scores=[create_mock_score(1, 100.0), create_mock_score(2, 90.0)],
+    )
+
+    assert [scenario.path_index for scenario in scenarios] == [2]
+    assert generator.skipped_path_indices == (1,)
+    rejection = generator.rejections[0]
+    assert rejection.category is ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+    assert rejection.stage is ScenarioRejectionStage.PATH_INPUT_GENERATION
+    assert rejection.exception_type == "UnsupportedInputSynthesisError"
+    assert "iki parametre" in rejection.message
+
+
+def test_unsupported_input_rejection_state_resets_between_calls() -> None:
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = [
+        UnsupportedInputSynthesisError("unsupported"),
+        GeneratedTestInput((), expected_result=1),
+    ]
+    generator = ScenarioGenerator(path_input_generator)
+    arguments = {
+        "function_name": "evaluate",
+        "paths": [create_mock_path(1)],
+        "scores": [create_mock_score(1, 100.0)],
+    }
+
+    assert generator.generate(**arguments) == []
+    assert len(generator.rejections) == 1
+
+    assert len(generator.generate(**arguments)) == 1
+    assert generator.rejections == ()
+
+
 def test_rejection_state_is_immutable_and_resets_between_calls() -> None:
     path_input_generator = Mock(spec=PathInputGenerator)
     path_input_generator.generate.side_effect = [
@@ -1011,6 +1064,81 @@ def test_ultracomplex_derived_value_lines_have_concrete_scenarios() -> None:
             accepted_lines.update(target_lines)
 
     assert accepted_lines == {101, 107}
+
+
+def test_real_cfg_affine_local_while_pipeline_is_concrete_valid(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "derived_local_while.py"
+    source_file.write_text(
+        """
+def evaluate(source: int) -> int:
+    counter = source + 1
+    while counter > 0:
+        counter -= 1
+    return source
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+    data_flow = DataFlowAnalyzer().analyze_file(
+        source_file=source_file,
+        function_name="evaluate",
+    )
+    path_states = tuple(
+        PathStateAnalyzer().analyze_file(
+            source_file=source_file,
+            function_name="evaluate",
+            path=path,
+        )
+        for path in paths
+    )
+    feasibility = PathFeasibilityAnalyzer().analyze_paths(
+        tuple(paths),
+        data_flow_result=data_flow,
+        path_states=path_states,
+        parameter_types=function.parameter_types,
+    )
+    retained = {
+        index
+        for index, result in enumerate(feasibility, start=1)
+        if result.status is not FeasibilityStatus.INFEASIBLE
+    }
+    candidates = {
+        index: InputCandidateGenerator().generate(
+            feasibility_result=result
+        ).path_input_value_dict
+        for index, result in enumerate(feasibility, start=1)
+        if result.status is FeasibilityStatus.FEASIBLE
+    }
+    scores = [
+        score
+        for score in DecisionQualityMatrix().evaluate_paths(function, paths)
+        if score.path_index in retained
+    ]
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=paths,
+        scores=scores,
+        parameter_names=("source",),
+        parameter_types=function.parameter_types,
+        candidate_values_by_path=candidates,
+    )
+    target = runpy.run_path(str(source_file))["evaluate"]
+
+    assert scenarios
+    assert all(
+        target(**scenario.keyword_argument_dict) == scenario.expected_result
+        for scenario in scenarios
+    )
+    assert all(
+        set(scenario.keyword_argument_dict) == {"source"}
+        for scenario in scenarios
+    )
 
 
 def test_real_cfg_round_scenario_matches_execution_and_pytest_assertion(
