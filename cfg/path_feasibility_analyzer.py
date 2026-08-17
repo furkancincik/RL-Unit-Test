@@ -544,6 +544,7 @@ class PathFeasibilityAnalyzer:
         active_for_loops: list[
             _ForLoopActivation
         ] = []
+        active_loop_nodes: list[tuple[int, str]] = []
         for_loop_activations: list[
             _ForLoopActivation
         ] = []
@@ -562,7 +563,36 @@ class PathFeasibilityAnalyzer:
         )
 
         for step in path.steps:
+            if (
+                step.node_type == "break"
+                and step.outgoing_edge_label == "Break"
+            ):
+                if active_loop_nodes:
+                    loop_node_id, loop_type = active_loop_nodes.pop()
+
+                    if loop_type == "for":
+                        active_index = self._find_active_for_loop_index(
+                            active_for_loops=active_for_loops,
+                            node_id=loop_node_id,
+                        )
+
+                        if active_index is not None:
+                            del active_for_loops[active_index:]
+
+                continue
+
             if step.node_type == "for":
+                loop_stack_index = next(
+                    (
+                        index
+                        for index, (node_id, _) in enumerate(
+                            active_loop_nodes
+                        )
+                        if node_id == step.node_id
+                    ),
+                    None,
+                )
+
                 active_index = (
                     self._find_active_for_loop_index(
                         active_for_loops=active_for_loops,
@@ -571,6 +601,13 @@ class PathFeasibilityAnalyzer:
                 )
 
                 if step.outgoing_edge_label == "Iterate":
+                    if loop_stack_index is None:
+                        active_loop_nodes.append(
+                            (step.node_id, "for")
+                        )
+                    else:
+                        del active_loop_nodes[loop_stack_index + 1:]
+
                     target_name = self._extract_for_target_name(
                         step
                     )
@@ -628,10 +665,38 @@ class PathFeasibilityAnalyzer:
                     continue
 
                 if step.outgoing_edge_label == "Complete":
+                    if loop_stack_index is not None:
+                        del active_loop_nodes[loop_stack_index:]
+
                     if active_index is not None:
                         del active_for_loops[active_index:]
 
                 continue
+
+            if step.node_type == "while":
+                loop_stack_index = next(
+                    (
+                        index
+                        for index, (node_id, _) in enumerate(
+                            active_loop_nodes
+                        )
+                        if node_id == step.node_id
+                    ),
+                    None,
+                )
+
+                if step.outgoing_edge_label == "True":
+                    if loop_stack_index is None:
+                        active_loop_nodes.append(
+                            (step.node_id, "while")
+                        )
+                    else:
+                        del active_loop_nodes[loop_stack_index + 1:]
+                elif (
+                    step.outgoing_edge_label == "False"
+                    and loop_stack_index is not None
+                ):
+                    del active_loop_nodes[loop_stack_index:]
 
             if step.node_type not in {"if", "while"}:
                 continue

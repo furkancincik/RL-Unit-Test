@@ -33,12 +33,24 @@ class ControlFlowGraph:
     edges: list[CFGEdge] = field(default_factory=list)
 
 
+@dataclass
+class _LoopContext:
+    """Aktif bir lexical loop'un kontrol aktarım hedeflerini taşır."""
+
+    loop_node_id: int
+    continue_target_id: int
+    break_paths: list[tuple[int, str | None]] = field(
+        default_factory=list,
+    )
+
+
 class ControlFlowGraphBuilder:
     """Python fonksiyonlarÄ±ndan kontrol akÄ±ÅŸ grafiÄŸi Ã¼retir."""
 
     def __init__(self) -> None:
         self._node_counter = 0
         self._graph: ControlFlowGraph | None = None
+        self._loop_context_stack: list[_LoopContext] = []
 
     def build_from_file(
         self,
@@ -82,6 +94,7 @@ class ControlFlowGraphBuilder:
     ) -> ControlFlowGraph:
         """Tek bir fonksiyon iÃ§in CFG oluÅŸturur."""
         self._node_counter = 0
+        self._loop_context_stack = []
         self._graph = ControlFlowGraph(
             function_name=function_node.name,
         )
@@ -117,7 +130,6 @@ class ControlFlowGraphBuilder:
         statements: list[ast.stmt],
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
-        continue_target_id: int | None = None,
     ) -> list[tuple[int, str | None]]:
         """
         Bir kod bloÄŸundaki ifadeleri sÄ±rayla CFG'ye ekler.
@@ -136,7 +148,6 @@ class ControlFlowGraphBuilder:
                     statement=statement,
                     incoming_paths=current_paths,
                     end_node_id=end_node_id,
-                    continue_target_id=continue_target_id,
                 )
                 continue
 
@@ -161,12 +172,13 @@ class ControlFlowGraphBuilder:
                     statement=statement,
                     incoming_paths=current_paths,
                     end_node_id=end_node_id,
-                    continue_target_id=continue_target_id,
                 )
                 continue
 
             if isinstance(statement, ast.Continue):
-                if continue_target_id is None:
+                loop_context = self._current_loop_context()
+
+                if loop_context is None:
                     raise ValueError(
                         "continue ifadesi bir döngü dışında "
                         "kullanılamaz."
@@ -185,10 +197,36 @@ class ControlFlowGraphBuilder:
 
                 self._add_edge(
                     source_id=continue_node.node_id,
-                    target_id=continue_target_id,
+                    target_id=loop_context.continue_target_id,
                     label="Continue",
                 )
 
+                current_paths = []
+                continue
+
+            if isinstance(statement, ast.Break):
+                loop_context = self._current_loop_context()
+
+                if loop_context is None:
+                    raise ValueError(
+                        "break ifadesi bir döngü dışında "
+                        "kullanılamaz."
+                    )
+
+                break_node = self._create_node(
+                    label="break",
+                    node_type="break",
+                    line_number=statement.lineno,
+                )
+
+                self._connect_paths(
+                    incoming_paths=current_paths,
+                    target_id=break_node.node_id,
+                )
+
+                loop_context.break_paths.append(
+                    (break_node.node_id, "Break")
+                )
                 current_paths = []
                 continue
 
@@ -232,7 +270,6 @@ class ControlFlowGraphBuilder:
         statement: ast.If,
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
-        continue_target_id: int | None = None,
     ) -> list[tuple[int, str | None]]:
         """Bir if ifadesinin True ve False yollarÄ±nÄ± oluÅŸturur."""
         condition_node = self._create_node(
@@ -250,7 +287,6 @@ class ControlFlowGraphBuilder:
             statements=statement.body,
             incoming_paths=[(condition_node.node_id, "True")],
             end_node_id=end_node_id,
-            continue_target_id=continue_target_id,
         )
 
         if statement.orelse:
@@ -258,7 +294,6 @@ class ControlFlowGraphBuilder:
                 statements=statement.orelse,
                 incoming_paths=[(condition_node.node_id, "False")],
                 end_node_id=end_node_id,
-                continue_target_id=continue_target_id,
             )
         else:
             false_paths = [
@@ -285,14 +320,26 @@ class ControlFlowGraphBuilder:
             target_id=condition_node.node_id,
         )
 
-        body_paths = self._build_block(
-            statements=statement.body,
-            incoming_paths=[
-                (condition_node.node_id, "True")
-            ],
-            end_node_id=end_node_id,
+        loop_context = _LoopContext(
+            loop_node_id=condition_node.node_id,
             continue_target_id=condition_node.node_id,
         )
+        self._loop_context_stack.append(loop_context)
+
+        try:
+            body_paths = self._build_block(
+                statements=statement.body,
+                incoming_paths=[
+                    (condition_node.node_id, "True")
+                ],
+                end_node_id=end_node_id,
+            )
+        finally:
+            popped_context = self._loop_context_stack.pop()
+            if popped_context is not loop_context:
+                raise RuntimeError(
+                    "Loop context stack sırası bozuldu."
+                )
 
         for source_id, _ in body_paths:
             self._add_edge(
@@ -302,7 +349,7 @@ class ControlFlowGraphBuilder:
             )
 
         if statement.orelse:
-            return self._build_block(
+            completion_paths = self._build_block(
                 statements=statement.orelse,
                 incoming_paths=[
                     (condition_node.node_id, "False")
@@ -310,9 +357,11 @@ class ControlFlowGraphBuilder:
                 end_node_id=end_node_id,
             )
 
+            return completion_paths + loop_context.break_paths
+
         return [
             (condition_node.node_id, "False")
-        ]
+        ] + loop_context.break_paths
 
     def _build_for_statement(
         self,
@@ -337,14 +386,26 @@ class ControlFlowGraphBuilder:
             target_id=loop_node.node_id,
         )
 
-        body_paths = self._build_block(
-            statements=statement.body,
-            incoming_paths=[
-                (loop_node.node_id, "Iterate")
-            ],
-            end_node_id=end_node_id,
+        loop_context = _LoopContext(
+            loop_node_id=loop_node.node_id,
             continue_target_id=loop_node.node_id,
         )
+        self._loop_context_stack.append(loop_context)
+
+        try:
+            body_paths = self._build_block(
+                statements=statement.body,
+                incoming_paths=[
+                    (loop_node.node_id, "Iterate")
+                ],
+                end_node_id=end_node_id,
+            )
+        finally:
+            popped_context = self._loop_context_stack.pop()
+            if popped_context is not loop_context:
+                raise RuntimeError(
+                    "Loop context stack sırası bozuldu."
+                )
 
         for source_id, _ in body_paths:
             self._add_edge(
@@ -354,7 +415,7 @@ class ControlFlowGraphBuilder:
             )
 
         if statement.orelse:
-            return self._build_block(
+            completion_paths = self._build_block(
                 statements=statement.orelse,
                 incoming_paths=[
                     (loop_node.node_id, "Complete")
@@ -362,16 +423,17 @@ class ControlFlowGraphBuilder:
                 end_node_id=end_node_id,
             )
 
+            return completion_paths + loop_context.break_paths
+
         return [
             (loop_node.node_id, "Complete")
-        ]
+        ] + loop_context.break_paths
 
     def _build_try_statement(
         self,
         statement: ast.Try,
         incoming_paths: list[tuple[int, str | None]],
         end_node_id: int,
-        continue_target_id: int | None = None,
     ) -> list[tuple[int, str | None]]:
         """
         Try/except yapısının kontrol akışını oluşturur.
@@ -400,7 +462,6 @@ class ControlFlowGraphBuilder:
                 (try_node.node_id, "Success")
             ],
             end_node_id=end_node_id,
-            continue_target_id=continue_target_id,
         )
 
         body_end_node_id = self._node_counter
@@ -442,7 +503,6 @@ class ControlFlowGraphBuilder:
                     (handler_node.node_id, None)
                 ],
                 end_node_id=end_node_id,
-                continue_target_id=continue_target_id,
             )
 
             exception_paths.extend(handler_paths)
@@ -452,7 +512,6 @@ class ControlFlowGraphBuilder:
                 statements=statement.orelse,
                 incoming_paths=normal_paths,
                 end_node_id=end_node_id,
-                continue_target_id=continue_target_id,
             )
 
         combined_paths = normal_paths + exception_paths
@@ -462,7 +521,6 @@ class ControlFlowGraphBuilder:
                 statements=statement.finalbody,
                 incoming_paths=combined_paths,
                 end_node_id=end_node_id,
-                continue_target_id=continue_target_id,
             )
 
         return combined_paths
@@ -504,9 +562,18 @@ class ControlFlowGraphBuilder:
             "try",
             "except",
             "Pass",
+            "break",
+            "continue",
         }
 
         return node.node_type not in non_raising_node_types
+
+    def _current_loop_context(self) -> _LoopContext | None:
+        """Lexical olarak en içteki aktif loop context'ini döndürür."""
+        if not self._loop_context_stack:
+            return None
+
+        return self._loop_context_stack[-1]
 
     def _create_node(
         self,

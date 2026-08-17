@@ -4956,3 +4956,58 @@ def evaluate(left, right):
 
     assert result.status == FeasibilityStatus.UNKNOWN
     assert any("derived" in item for item in result.unsupported_conditions)
+
+
+def test_break_edge_closes_only_innermost_for_constraint_scope(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "break_feasibility.py"
+    source_file.write_text(
+        """
+def evaluate(rows, flag):
+    for row in rows:
+        while flag:
+            if row < -10:
+                break
+        if row == 0:
+            break
+    if row != 0:
+        return "non-empty"
+    return "empty"
+""".strip(),
+        encoding="utf-8",
+    )
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    path = next(
+        path
+        for path in CFGPathAnalyzer().find_paths(
+            graph,
+            max_visits_per_node=2,
+        )
+        if path.edge_labels.count("Break") == 2
+        and any(
+            step.node_label == "return 'non-empty'"
+            for step in path.steps
+        )
+    )
+
+    extraction = PathFeasibilityAnalyzer().extract_constraints(path)
+
+    assert all(
+        "Break" not in condition
+        for condition in extraction.unsupported_conditions
+    )
+    assert any(
+        constraint.variable_name == "row"
+        and constraint.operator == "!="
+        and constraint.value == 0
+        for constraint in extraction.constraints
+    )
+    assert all(
+        not any(
+            constraint.operator == "!="
+            and constraint.value == 0
+            for constraint in group.constraints
+        )
+        for group in extraction.iteration_constraint_groups
+    )

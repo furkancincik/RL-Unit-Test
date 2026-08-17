@@ -411,3 +411,355 @@ def process(items: list[int]) -> int:
         and edge.label == "Continue"
         for edge in graph.edges
     )
+
+
+def _build_inline_graph(
+    tmp_path: Path,
+    source: str,
+    function_name: str = "process",
+):
+    source_file = tmp_path / f"{function_name}.py"
+    source_file.write_text(source.strip(), encoding="utf-8")
+
+    return next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == function_name
+    )
+
+
+@pytest.mark.parametrize(
+    ("loop_source", "loop_type", "back_edge_label"),
+    [
+        (
+            "for value in values:",
+            "for",
+            "Next",
+        ),
+        (
+            "while values:",
+            "while",
+            "Loop",
+        ),
+    ],
+)
+def test_break_skips_remaining_loop_body_and_reaches_post_loop_statement(
+    tmp_path: Path,
+    loop_source: str,
+    loop_type: str,
+    back_edge_label: str,
+) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        f"""
+def process(values):
+    {loop_source}
+        break
+        values.append(1)
+
+    return "finished"
+""",
+    )
+
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    loop_node = next(node for node in graph.nodes if node.node_type == loop_type)
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+
+    assert break_node.label == "break"
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and (
+            edge.target_id == loop_node.node_id
+            or edge.label == back_edge_label
+        )
+        for edge in graph.edges
+    )
+    assert all(node.label != "values.append(1)" for node in graph.nodes)
+
+
+def test_break_inside_if_uses_enclosing_loop_exit(tmp_path: Path) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        """
+def process(values):
+    for value in values:
+        if value == 0:
+            break
+
+        value += 1
+
+    return "finished"
+""",
+    )
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    update_node = next(node for node in graph.nodes if node.node_type == "AugAssign")
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == update_node.node_id
+        for edge in graph.edges
+    )
+
+
+def test_inner_break_exits_only_inner_loop_and_outer_loop_can_continue(
+    tmp_path: Path,
+) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        """
+def process(rows):
+    for row in rows:
+        for value in row:
+            if value == 0:
+                break
+
+        row.append(1)
+
+    return rows
+""",
+    )
+    loops = {node.label: node for node in graph.nodes if node.node_type == "for"}
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    after_inner = next(node for node in graph.nodes if node.label == "row.append(1)")
+
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == after_inner.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.source_id == after_inner.node_id
+        and edge.target_id == loops["row in rows"].node_id
+        and edge.label == "Next"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == loops["row in rows"].node_id
+        for edge in graph.edges
+    )
+
+
+def test_outer_break_exits_outer_loop(tmp_path: Path) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        """
+def process(rows):
+    for row in rows:
+        for value in row:
+            value += 1
+
+        if not row:
+            break
+
+        row.append(1)
+
+    return rows
+""",
+    )
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+    after_break = next(node for node in graph.nodes if node.label == "row.append(1)")
+
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == after_break.node_id
+        for edge in graph.edges
+    )
+
+
+def test_sequential_loops_keep_break_exits_separate(tmp_path: Path) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        """
+def process(first, second):
+    for value in first:
+        break
+
+    first_done = True
+
+    for value in second:
+        break
+
+    return first_done
+""",
+    )
+    break_nodes = sorted(
+        (node for node in graph.nodes if node.node_type == "break"),
+        key=lambda node: node.line_number or 0,
+    )
+    first_done = next(node for node in graph.nodes if node.label == "first_done = True")
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+
+    assert any(
+        edge.source_id == break_nodes[0].node_id
+        and edge.target_id == first_done.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.source_id == break_nodes[1].node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+
+
+def test_continue_and_break_keep_distinct_loop_edges(tmp_path: Path) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        """
+def process(values):
+    for value in values:
+        if value < 0:
+            continue
+        if value == 0:
+            break
+
+    return "finished"
+""",
+    )
+    loop_node = next(node for node in graph.nodes if node.node_type == "for")
+    continue_node = next(node for node in graph.nodes if node.node_type == "continue")
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+
+    assert any(
+        edge.source_id == continue_node.node_id
+        and edge.target_id == loop_node.node_id
+        and edge.label == "Continue"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+
+
+@pytest.mark.parametrize("loop_kind", ["for", "while"])
+def test_break_skips_loop_else_but_normal_completion_enters_it(
+    tmp_path: Path,
+    loop_kind: str,
+) -> None:
+    loop_header = "for value in values:" if loop_kind == "for" else "while values:"
+    graph = _build_inline_graph(
+        tmp_path,
+        f"""
+def process(values):
+    {loop_header}
+        break
+    else:
+        values.append("else")
+
+    return "finished"
+""",
+    )
+    loop_node = next(node for node in graph.nodes if node.node_type == loop_kind)
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    else_node = next(node for node in graph.nodes if node.label == "values.append('else')")
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+    completion_label = "Complete" if loop_kind == "for" else "False"
+
+    assert any(
+        edge.source_id == loop_node.node_id
+        and edge.target_id == else_node.node_id
+        and edge.label == completion_label
+        for edge in graph.edges
+    )
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == else_node.node_id
+        for edge in graph.edges
+    )
+
+
+def test_break_inside_try_uses_enclosing_loop_exit(tmp_path: Path) -> None:
+    graph = _build_inline_graph(
+        tmp_path,
+        """
+def process(values):
+    for value in values:
+        try:
+            if value == 0:
+                break
+        except ValueError:
+            value += 1
+
+        value += 2
+
+    return "finished"
+""",
+    )
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    return_node = next(node for node in graph.nodes if node.node_type == "return")
+
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == return_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and edge.label == "Exception"
+        for edge in graph.edges
+    )
+
+
+def test_robustness_break_has_structural_loop_exit() -> None:
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(
+            Path("datasets/sample_robustness_code.py")
+        )
+        if graph.function_name == "analyze_transactions"
+    )
+    break_node = next(node for node in graph.nodes if node.node_type == "break")
+    post_loop_node = next(
+        node for node in graph.nodes if node.label == "amount > category_limit"
+    )
+    decrement_nodes = {
+        node.node_id
+        for node in graph.nodes
+        if node.label in {"amount -= 10", "remaining_attempts -= 1"}
+    }
+
+    assert any(
+        edge.source_id == break_node.node_id
+        and edge.target_id == post_loop_node.node_id
+        and edge.label == "Break"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.source_id == break_node.node_id
+        and edge.target_id in decrement_nodes
+        for edge in graph.edges
+    )

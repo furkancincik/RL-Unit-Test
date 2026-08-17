@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from cfg.path_analyzer import ExecutionPath
+from cfg.control_flow_graph import ControlFlowGraphBuilder
+from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
 from cfg.path_state_analyzer import (
     PathStateAnalyzer,
 )
@@ -891,3 +892,34 @@ def sample(items, delta):
     assert condition_state is not None
     assert condition_state.get_variable("count") is None
     assert condition_state.unsupported_variables == ("count",)
+
+
+def test_break_path_does_not_apply_skipped_loop_update(tmp_path) -> None:
+    source = """
+def process(values):
+    total = 0
+    for value in values:
+        if value == 0:
+            break
+        total += 1
+    return total
+""".strip()
+    source_file = tmp_path / "break_state.py"
+    source_file.write_text(source, encoding="utf-8")
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    path = next(
+        path
+        for path in CFGPathAnalyzer().find_paths(graph)
+        if "Break" in path.edge_labels
+    )
+
+    state = PathStateAnalyzer().analyze_source(
+        source=source,
+        function_name="process",
+        path=path,
+    )
+    total = state.get_variable("total")
+
+    assert all(step.node_type != "AugAssign" for step in path.steps)
+    assert total is not None
+    assert total.exact_value == 0

@@ -236,3 +236,98 @@ def test_find_paths_rejects_zero_max_visits(
             graph,
             max_visits_per_node=0,
         )
+
+
+def test_break_path_preserves_metadata_and_execution_order(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "break_path.py"
+    source_file.write_text(
+        """
+def process(values: list[int]) -> str:
+    for value in values:
+        if value == 0:
+            break
+
+        value += 1
+
+    return "finished"
+""".strip(),
+        encoding="utf-8",
+    )
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+    break_path = next(
+        path
+        for path in paths
+        if any(step.node_type == "break" for step in path.steps)
+    )
+    break_index = next(
+        index
+        for index, step in enumerate(break_path.steps)
+        if step.node_type == "break"
+    )
+
+    assert break_path.steps[break_index].outgoing_edge_label == "Break"
+    assert break_path.steps[break_index + 1].node_type == "return"
+    assert all(
+        step.node_type != "AugAssign"
+        for step in break_path.steps[break_index + 1 :]
+    )
+    assert all(
+        step.node_type != "for"
+        for step in break_path.steps[break_index + 1 :]
+    )
+    assert break_path.loop_iteration_count == 0
+    assert not break_path.is_zero_iteration_loop_path
+
+
+def test_break_and_normal_completion_paths_remain_distinct(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "break_completion.py"
+    source_file.write_text(
+        """
+def process(values):
+    for value in values:
+        if value == 0:
+            break
+
+    return "finished"
+""".strip(),
+        encoding="utf-8",
+    )
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+
+    assert any("Break" in path.edge_labels for path in paths)
+    assert any("Complete" in path.edge_labels for path in paths)
+
+
+def test_return_inside_loop_does_not_become_break_exit(tmp_path: Path) -> None:
+    source_file = tmp_path / "return_and_break.py"
+    source_file.write_text(
+        """
+def process(values):
+    for value in values:
+        if value < 0:
+            return "negative"
+        if value == 0:
+            break
+
+    return "finished"
+""".strip(),
+        encoding="utf-8",
+    )
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+
+    return_path = next(
+        path
+        for path in paths
+        if any(step.node_label == "return 'negative'" for step in path.steps)
+    )
+    break_path = next(path for path in paths if "Break" in path.edge_labels)
+
+    assert "Break" not in return_path.edge_labels
+    assert any(step.node_label == "return 'finished'" for step in break_path.steps)

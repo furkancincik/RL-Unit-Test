@@ -197,7 +197,10 @@ class ExecutionPath:
         """
         return (
             self.contains_loop
-            and self.loop_iteration_count == 0
+            and not any(
+                step.outgoing_edge_label in {"True", "Iterate"}
+                for step in self.loop_steps
+            )
         )
 
     @property
