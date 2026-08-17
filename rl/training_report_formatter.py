@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from models.coverage_reachability_result import (
+    FunctionCoverageReachabilityResult,
+)
 from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
@@ -70,13 +73,18 @@ class TrainingReportFormatter:
         coverage_result: (
             CoverageResult | FunctionCoverageResult | None
         ) = None,
+        reachability_result: (
+            FunctionCoverageReachabilityResult | None
+        ) = None,
     ) -> str:
         """
         Çok episode içeren eğitim oturumunun ayrıntılı raporunu üretir.
 
         ``coverage_result`` verilirse hedef fonksiyon ve dosya geneli
-        coverage değerleri ayrı başlıklarla rapora eklenir. Parametre
-        verilmezse eski kullanım korunur.
+        coverage değerleri ayrı başlıklarla rapora eklenir.
+        ``reachability_result`` verilirse doğrulanmış senaryo havuzunun
+        coverage sonucu ile bounded path analizi ayrıca raporlanır.
+        Parametreler verilmezse eski kullanım korunur.
         """
         self._validate_result(result)
         self._validate_statistics(statistics)
@@ -86,6 +94,11 @@ class TrainingReportFormatter:
         )
         self._validate_function_name(function_name)
         self._validate_coverage_result(coverage_result)
+        self._validate_reachability_result(
+            reachability_result=reachability_result,
+            coverage_result=coverage_result,
+            function_name=function_name,
+        )
 
         sections: list[str] = [
             "RL EĞİTİM OTURUMU",
@@ -165,7 +178,99 @@ class TrainingReportFormatter:
                 )
             )
 
+        if reachability_result is not None:
+            sections.extend(
+                (
+                    "-" * 48,
+                    "SENARYO HAVUZU VE BOUNDED PATH ÖZETİ",
+                    *self._format_reachability_summary(
+                        reachability_result
+                    ),
+                )
+            )
+
         return "\n".join(sections)
+
+    @classmethod
+    def _format_reachability_summary(
+        cls,
+        reachability_result: FunctionCoverageReachabilityResult,
+    ) -> tuple[str, ...]:
+        """Senaryo havuzu coverage ve bounded path sonucunu biçimlendirir."""
+        metadata_text = (
+            "Tam"
+            if reachability_result.path_metadata_complete
+            else "Eksik"
+        )
+        classification_text = (
+            "Evet"
+            if reachability_result.classification_complete
+            else "Hayır"
+        )
+
+        return (
+            (
+                "Senaryo havuzu satır coverage : "
+                f"%{reachability_result.observed_line_coverage_percent:.2f}"
+            ),
+            (
+                "Analiz edilen bounded path    : "
+                f"{reachability_result.analyzed_path_count}"
+            ),
+            (
+                "Düğüm ziyaret sınırı          : "
+                f"{reachability_result.max_visits_per_node}"
+            ),
+            (
+                "Path metadata durumu          : "
+                f"{metadata_text}"
+            ),
+            cls._format_line_group(
+                label="Kapsanan satırlar",
+                lines=reachability_result.covered_lines,
+            ),
+            cls._format_line_group(
+                label="FEASIBLE fakat kapsanmayan",
+                lines=(
+                    reachability_result
+                    .feasible_uncovered_lines
+                ),
+            ),
+            cls._format_line_group(
+                label="Yalnızca bounded INFEASIBLE",
+                lines=reachability_result.infeasible_only_lines,
+            ),
+            cls._format_line_group(
+                label="Çözümlenemeyen satırlar",
+                lines=reachability_result.unresolved_lines,
+            ),
+            (
+                "Bounded sınıflandırma tamam mı : "
+                f"{classification_text}"
+            ),
+            (
+                "Not: INFEASIBLE_ONLY yalnızca analiz edilen "
+                "bounded path kümesi için geçerlidir."
+            ),
+        )
+
+    @staticmethod
+    def _format_line_group(
+        *,
+        label: str,
+        lines: tuple[int, ...],
+    ) -> str:
+        """Satır grubunu sayı ve satır numaralarıyla biçimlendirir."""
+        line_text = (
+            ", ".join(str(line) for line in lines)
+            if lines
+            else "Yok"
+        )
+
+        return (
+            f"{label:<31}: {len(lines)} "
+            f"({line_text})"
+        )
 
     @staticmethod
     def _format_coverage_summary(
@@ -318,6 +423,68 @@ class TrainingReportFormatter:
             raise TypeError(
                 "coverage_result bir CoverageResult, "
                 "FunctionCoverageResult veya None olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_reachability_result(
+        *,
+        reachability_result: (
+            FunctionCoverageReachabilityResult | None
+        ),
+        coverage_result: (
+            CoverageResult | FunctionCoverageResult | None
+        ),
+        function_name: str | None,
+    ) -> None:
+        """Erişilebilirlik özetinin rapor bağlamıyla uyumunu doğrular."""
+        if reachability_result is None:
+            return
+
+        if not isinstance(
+            reachability_result,
+            FunctionCoverageReachabilityResult,
+        ):
+            raise TypeError(
+                "reachability_result bir "
+                "FunctionCoverageReachabilityResult veya None "
+                "olmalıdır."
+            )
+
+        reachability_coverage = (
+            reachability_result.coverage_result
+        )
+
+        if (
+            function_name is not None
+            and function_name
+            != reachability_coverage.function_name
+        ):
+            raise ValueError(
+                "reachability_result farklı bir hedef "
+                "fonksiyona aittir."
+            )
+
+        if coverage_result is None:
+            return
+
+        if not isinstance(
+            coverage_result,
+            FunctionCoverageResult,
+        ):
+            raise ValueError(
+                "reachability_result yalnızca fonksiyon bazlı "
+                "coverage raporuyla birlikte kullanılabilir."
+            )
+
+        if (
+            coverage_result.source_file
+            != reachability_coverage.source_file
+            or coverage_result.function_name
+            != reachability_coverage.function_name
+        ):
+            raise ValueError(
+                "coverage_result ile reachability_result aynı "
+                "kaynak fonksiyona ait olmalıdır."
             )
 
     @staticmethod

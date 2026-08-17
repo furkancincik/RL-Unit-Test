@@ -5,6 +5,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from models.coverage_reachability_result import (
+    FunctionCoverageReachabilityResult,
+    LineReachabilityEvidence,
+    LineReachabilityStatus,
+)
 from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
@@ -37,6 +42,9 @@ from rl.training_statistics import (
     EpisodeStatistics,
     TrainingStatistics,
 )
+from services.coverage_reachability_service import (
+    CoverageReachabilityService,
+)
 from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
@@ -66,7 +74,9 @@ def create_function_analysis() -> Mock:
 
     function.name = "calculate_score"
     function.parameters = ["score"]
-    function.parameter_types = {}
+    function.parameter_types = {
+        "score": "int",
+    }
     function.branch_count = 1
     function.line_number = 1
     function.end_line_number = 4
@@ -203,6 +213,38 @@ def create_function_coverage_result(
     )
 
 
+def create_reachability_result(
+    coverage_result: FunctionCoverageResult,
+) -> FunctionCoverageReachabilityResult:
+    """Coverage sonucu için kontrollü erişilebilirlik sonucu oluşturur."""
+    covered_lines = set(
+        coverage_result.covered_lines
+    )
+
+    line_evidence = tuple(
+        LineReachabilityEvidence(
+            line_number=line_number,
+            status=(
+                LineReachabilityStatus.COVERED
+                if line_number in covered_lines
+                else LineReachabilityStatus.UNRESOLVED
+            ),
+        )
+        for line_number in sorted(
+            covered_lines
+            | set(coverage_result.missing_lines)
+        )
+    )
+
+    return FunctionCoverageReachabilityResult(
+        coverage_result=coverage_result,
+        line_evidence=line_evidence,
+        analyzed_path_count=1,
+        max_visits_per_node=3,
+        path_metadata_complete=True,
+    )
+
+
 @pytest.fixture(autouse=True)
 def provide_mock_transition_coverage(
     monkeypatch: pytest.MonkeyPatch,
@@ -242,6 +284,7 @@ def create_dependencies() -> tuple[
     Mock,
     Mock,
     Mock,
+    Mock,
 ]:
     """RealRLTrainingService için mock bağımlılıklar oluşturur."""
     analyzer = Mock(spec=PythonAnalyzer)
@@ -254,6 +297,9 @@ def create_dependencies() -> tuple[
     dqm = Mock(spec=DecisionQualityMatrix)
     scenario_generator = Mock(spec=ScenarioGenerator)
     report_formatter = Mock(spec=TrainingReportFormatter)
+    coverage_reachability_service = Mock(
+        spec=CoverageReachabilityService,
+    )
 
     function = create_function_analysis()
     graph = create_graph()
@@ -291,6 +337,11 @@ def create_dependencies() -> tuple[
     dqm.evaluate_paths.return_value = [score]
     scenario_generator.generate.return_value = [scenario]
     report_formatter.format_session.return_value = "RL EĞİTİM OTURUMU"
+    coverage_reachability_service.analyze.side_effect = (
+        lambda **kwargs: create_reachability_result(
+            kwargs["coverage_result"]
+        )
+    )
 
     return (
         analyzer,
@@ -303,6 +354,7 @@ def create_dependencies() -> tuple[
         dqm,
         scenario_generator,
         report_formatter,
+        coverage_reachability_service,
     )
 
 
@@ -324,6 +376,7 @@ def create_service() -> tuple[
         dqm=dependencies[7],
         scenario_generator=dependencies[8],
         report_formatter=dependencies[9],
+        coverage_reachability_service=dependencies[10],
     )
 
     return service, dependencies
@@ -362,6 +415,10 @@ def test_run_returns_real_rl_training_result(
     assert result.file_coverage.line_coverage_percent == 100.0
     assert result.has_full_function_coverage is True
     assert result.has_full_file_coverage is True
+    assert isinstance(
+        result.reachability_result,
+        FunctionCoverageReachabilityResult,
+    )
 
 
 @patch.object(
@@ -412,6 +469,7 @@ def test_run_executes_analysis_pipeline(
     path_state_analyzer = dependencies[4]
     path_feasibility_analyzer = dependencies[5]
     input_candidate_generator = dependencies[6]
+    coverage_reachability_service = dependencies[10]
 
     data_flow_analyzer.analyze_file.assert_called_once()
     path_state_analyzer.analyze_file.assert_called_once()
@@ -419,6 +477,37 @@ def test_run_executes_analysis_pipeline(
     input_candidate_generator.generate.assert_called_once()
 
     dqm.evaluate_paths.assert_called_once()
+
+    feasibility_call = (
+        path_feasibility_analyzer
+        .analyze_paths
+        .call_args
+        .kwargs
+    )
+
+    assert feasibility_call["parameter_types"] == {
+        "score": "int",
+    }
+
+    reachability_call = (
+        coverage_reachability_service.analyze
+        .call_args
+        .kwargs
+    )
+
+    assert isinstance(
+        reachability_call["coverage_result"],
+        FunctionCoverageResult,
+    )
+    assert reachability_call["paths"] == (
+        path_analyzer.find_paths.return_value[0],
+    )
+    assert reachability_call["feasibility_results"] is (
+        path_feasibility_analyzer
+        .analyze_paths
+        .return_value
+    )
+    assert reachability_call["max_visits_per_node"] == 3
 
 
 @patch.object(
@@ -456,6 +545,9 @@ def test_run_generates_scenarios_with_parameters(
     assert call_arguments["parameter_names"] == (
         "score",
     )
+    assert call_arguments["parameter_types"] == {
+        "score": "int",
+    }
     assert call_arguments["candidate_values_by_path"] == {
         1: {
             "score": 50,
@@ -525,6 +617,14 @@ def test_run_formats_training_report(
     assert isinstance(
         call_kwargs["coverage_result"],
         FunctionCoverageResult,
+    )
+    assert isinstance(
+        call_kwargs["reachability_result"],
+        FunctionCoverageReachabilityResult,
+    )
+    assert (
+        call_kwargs["reachability_result"]
+        is result.reachability_result
     )
 
     assert result.report == "RL EĞİTİM OTURUMU"
@@ -907,7 +1007,7 @@ def test_run_rejects_invalid_function_name(
     TrainingSession,
     "run",
 )
-def test_run_uses_reachable_baseline_as_environment_target(
+def test_run_uses_scenario_pool_baseline_as_environment_target(
     mock_run: Mock,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -964,7 +1064,7 @@ def test_run_uses_reachable_baseline_as_environment_target(
     TrainingSession,
     "run",
 )
-def test_run_accepts_non_full_reachable_coverage_target(
+def test_run_accepts_non_full_scenario_pool_coverage_target(
     mock_run: Mock,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1007,7 +1107,7 @@ def test_run_accepts_non_full_reachable_coverage_target(
     TrainingSession,
     "run",
 )
-def test_run_rejects_zero_reachable_coverage_before_training(
+def test_run_rejects_zero_scenario_pool_coverage_before_training(
     mock_run: Mock,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1029,8 +1129,8 @@ def test_run_rejects_zero_reachable_coverage_before_training(
     with pytest.raises(
         RuntimeError,
         match=(
-            "pozitif bir reachable "
-            "coverage hedefi üretemedi"
+            "pozitif bir coverage "
+            "hedefi üretemedi"
         ),
     ):
         service.run(

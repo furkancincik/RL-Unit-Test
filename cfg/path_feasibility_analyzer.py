@@ -8,7 +8,7 @@ from enum import Enum
 from typing import TypeAlias
 
 from cfg.data_flow_analyzer import DataFlowAnalysisResult
-from cfg.path_analyzer import ExecutionPath
+from cfg.path_analyzer import ExecutionPath, PathStep
 from cfg.path_state_analyzer import PathSymbolicState
 
 
@@ -309,6 +309,36 @@ class PathConstraintExtractionResult:
         RelationalConstraint,
         ...
     ] = ()
+    iteration_constraint_groups: tuple[
+        "_IterationConstraintGroup",
+        ...
+    ] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _IterationConstraintGroup:
+    """Tek bir dinamik ``for`` iterasyonuna ait literal kısıtlar."""
+
+    loop_node_id: int
+    activation_id: int
+    parent_context: tuple[tuple[int, int, int], ...]
+    iteration_index: int
+    target_name: str
+    constraints: tuple[PathConstraint, ...]
+
+
+@dataclass(slots=True)
+class _ForLoopActivation:
+    """Sıralı path ziyareti sırasında aktif olan ``for`` binding'i."""
+
+    node_id: int
+    activation_id: int
+    parent_context: tuple[tuple[int, int, int], ...]
+    target_name: str
+    iteration_index: int = -1
+    iteration_constraints: dict[int, list[PathConstraint]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +541,14 @@ class PathFeasibilityAnalyzer:
             RelationalConstraint
         ] = []
 
+        active_for_loops: list[
+            _ForLoopActivation
+        ] = []
+        for_loop_activations: list[
+            _ForLoopActivation
+        ] = []
+        next_activation_id = 0
+
         unsupported_conditions: list[str] = []
 
         # Path içinde local olarak atanıp daha sonra güncellenen bir değişkeni
@@ -523,7 +561,81 @@ class PathFeasibilityAnalyzer:
             )
         )
 
-        for step in path.condition_steps:
+        for step in path.steps:
+            if step.node_type == "for":
+                active_index = (
+                    self._find_active_for_loop_index(
+                        active_for_loops=active_for_loops,
+                        node_id=step.node_id,
+                    )
+                )
+
+                if step.outgoing_edge_label == "Iterate":
+                    target_name = self._extract_for_target_name(
+                        step
+                    )
+
+                    if target_name is None:
+                        unsupported_conditions.append(
+                            self._format_unsupported_condition(
+                                condition=step.node_label,
+                                reason=(
+                                    "for hedefi tek bir değişken olarak "
+                                    "çözümlenemedi"
+                                ),
+                            )
+                        )
+                        continue
+
+                    if active_index is None:
+                        next_activation_id += 1
+                        activation = _ForLoopActivation(
+                            node_id=step.node_id,
+                            activation_id=next_activation_id,
+                            parent_context=tuple(
+                                (
+                                    active.node_id,
+                                    active.activation_id,
+                                    active.iteration_index,
+                                )
+                                for active in active_for_loops
+                            ),
+                            target_name=target_name,
+                        )
+                        active_for_loops.append(activation)
+                        for_loop_activations.append(activation)
+                    else:
+                        del active_for_loops[active_index + 1:]
+                        activation = active_for_loops[active_index]
+
+                        if activation.target_name != target_name:
+                            unsupported_conditions.append(
+                                self._format_unsupported_condition(
+                                    condition=step.node_label,
+                                    reason=(
+                                        "aynı for düğümünün hedef binding'i "
+                                        "path boyunca değişiyor"
+                                    ),
+                                )
+                            )
+                            continue
+
+                    activation.iteration_index += 1
+                    activation.iteration_constraints.setdefault(
+                        activation.iteration_index,
+                        [],
+                    )
+                    continue
+
+                if step.outgoing_edge_label == "Complete":
+                    if active_index is not None:
+                        del active_for_loops[active_index:]
+
+                continue
+
+            if step.node_type not in {"if", "while"}:
+                continue
+
             edge_label = (
                 step.outgoing_edge_label
             )
@@ -563,9 +675,23 @@ class PathFeasibilityAnalyzer:
             )
 
             if relational_constraint is not None:
-                relational_constraints.append(
-                    relational_constraint
-                )
+                if self._relational_uses_active_for_target(
+                    relational_constraint=relational_constraint,
+                    active_for_loops=active_for_loops,
+                ):
+                    unsupported_conditions.append(
+                        self._format_unsupported_condition(
+                            condition=step.node_label,
+                            reason=(
+                                "for iterasyonuna bağlı değişkenler arası "
+                                "ilişki henüz scope edilemiyor"
+                            ),
+                        )
+                    )
+                else:
+                    relational_constraints.append(
+                        relational_constraint
+                    )
                 continue
 
             (
@@ -597,14 +723,50 @@ class PathFeasibilityAnalyzer:
                 clauses
             )
 
-            mandatory_constraints.extend(
-                common_constraints
-            )
+            for constraint in common_constraints:
+                activation = self._find_active_for_loop_for_target(
+                    active_for_loops=active_for_loops,
+                    target_name=constraint.variable_name,
+                )
+
+                if activation is None:
+                    mandatory_constraints.append(constraint)
+                    continue
+
+                if activation.iteration_index < 0:
+                    unsupported_conditions.append(
+                        self._format_unsupported_condition(
+                            condition=step.node_label,
+                            reason=(
+                                "for hedefi için aktif iterasyon "
+                                "bulunamadı"
+                            ),
+                        )
+                    )
+                    continue
+
+                activation.iteration_constraints[
+                    activation.iteration_index
+                ].append(constraint)
 
             if alternative_group is not None:
-                alternative_groups.append(
-                    alternative_group
-                )
+                if self._alternative_uses_active_for_target(
+                    alternative_group=alternative_group,
+                    active_for_loops=active_for_loops,
+                ):
+                    unsupported_conditions.append(
+                        self._format_unsupported_condition(
+                            condition=step.node_label,
+                            reason=(
+                                "for iterasyonuna bağlı alternatif koşul "
+                                "henüz scope edilemiyor"
+                            ),
+                        )
+                    )
+                else:
+                    alternative_groups.append(
+                        alternative_group
+                    )
 
         return PathConstraintExtractionResult(
             constraints=tuple(
@@ -625,6 +787,22 @@ class PathFeasibilityAnalyzer:
                     relational_constraints
                 )
             ),
+            iteration_constraint_groups=tuple(
+                _IterationConstraintGroup(
+                    loop_node_id=activation.node_id,
+                    activation_id=activation.activation_id,
+                    parent_context=activation.parent_context,
+                    iteration_index=iteration_index,
+                    target_name=activation.target_name,
+                    constraints=tuple(
+                        self._deduplicate_constraints(constraints)
+                    ),
+                )
+                for activation in for_loop_activations
+                for iteration_index, constraints
+                in activation.iteration_constraints.items()
+                if constraints
+            ),
         )
 
     def analyze_path(
@@ -632,6 +810,7 @@ class PathFeasibilityAnalyzer:
         path: ExecutionPath,
         data_flow_result: DataFlowAnalysisResult | None = None,
         path_state: PathSymbolicState | None = None,
+        parameter_types: dict[str, str] | None = None,
     ) -> PathFeasibilityResult:
         """
         ExecutionPath'i zorunlu, alternatif ve relational constraint'lerle
@@ -705,6 +884,72 @@ class PathFeasibilityAnalyzer:
                 ),
             )
 
+        for iteration_group in extraction.iteration_constraint_groups:
+            iteration_result = self.analyze_constraints(
+                iteration_group.constraints
+            )
+
+            if not iteration_result.is_infeasible:
+                continue
+
+            context = (
+                f"for node {iteration_group.loop_node_id}, "
+                f"activation {iteration_group.activation_id}, "
+                f"iteration {iteration_group.iteration_index}"
+            )
+            return PathFeasibilityResult(
+                status=FeasibilityStatus.INFEASIBLE,
+                constraints=extraction.constraints,
+                conflicts=tuple(
+                    f"{context}: {conflict}"
+                    for conflict in iteration_result.conflicts
+                ),
+                unsupported_conditions=(
+                    extraction.unsupported_conditions
+                ),
+                alternative_groups=(
+                    extraction.alternative_groups
+                ),
+                relational_constraints=(
+                    extraction.relational_constraints
+                ),
+            )
+
+        (
+            exception_status,
+            exception_conflicts,
+            exception_unsupported,
+        ) = self._analyze_exception_paths(
+            path=path,
+            constraints=extraction.constraints,
+            parameter_types=parameter_types,
+        )
+
+        if (
+            exception_status
+            == FeasibilityStatus.INFEASIBLE
+        ):
+            return PathFeasibilityResult(
+                status=FeasibilityStatus.INFEASIBLE,
+                constraints=extraction.constraints,
+                conflicts=exception_conflicts,
+                unsupported_conditions=tuple(
+                    self._deduplicate_strings(
+                        [
+                            *extraction.unsupported_conditions,
+                            *local_while_unsupported,
+                            *exception_unsupported,
+                        ]
+                    )
+                ),
+                alternative_groups=(
+                    extraction.alternative_groups
+                ),
+                relational_constraints=(
+                    extraction.relational_constraints
+                ),
+            )
+
         (
             alternatives_status,
             alternative_conflicts,
@@ -754,6 +999,7 @@ class PathFeasibilityAnalyzer:
         unsupported_conditions = [
             *extraction.unsupported_conditions,
             *local_while_unsupported,
+            *exception_unsupported,
         ]
 
         if alternative_limit_reached:
@@ -834,6 +1080,602 @@ class PathFeasibilityAnalyzer:
                 extraction.relational_constraints
             ),
         )
+
+    def _analyze_exception_paths(
+        self,
+        *,
+        path: ExecutionPath,
+        constraints: tuple[PathConstraint, ...],
+        parameter_types: dict[str, str] | None,
+    ) -> tuple[
+        FeasibilityStatus,
+        tuple[str, ...],
+        tuple[str, ...],
+    ]:
+        """
+        Exception kenarlarının gerekli önkoşullarını güvenli biçimde inceler.
+
+        Yalnızca AST ve mevcut path constraint'leriyle kanıtlanabilen
+        ``ZeroDivisionError`` ve ``IndexError`` durumları kesin olarak
+        sınıflandırılır. Kanıt üretilemeyen exception yolları FEASIBLE kabul
+        edilmez; yanlış kesinlikten kaçınmak için UNKNOWN sonucuna taşınır.
+        """
+        self._validate_parameter_types(
+            parameter_types
+        )
+
+        if not path.has_node_metadata:
+            return (
+                FeasibilityStatus.FEASIBLE,
+                (),
+                (),
+            )
+
+        statuses: list[FeasibilityStatus] = []
+        conflicts: list[str] = []
+        unsupported: list[str] = []
+
+        for step_index, step in enumerate(
+            path.steps
+        ):
+            if step.outgoing_edge_label != "Exception":
+                continue
+
+            if step_index + 1 >= len(path.steps):
+                statuses.append(
+                    FeasibilityStatus.UNKNOWN
+                )
+                unsupported.append(
+                    "Exception kenarı için except handler "
+                    "metadata'sı bulunamadı."
+                )
+                continue
+
+            handler_step = path.steps[
+                step_index + 1
+            ]
+
+            if handler_step.node_type != "except":
+                statuses.append(
+                    FeasibilityStatus.UNKNOWN
+                )
+                unsupported.append(
+                    "Exception kenarının hedefi except düğümü "
+                    "değil: "
+                    f"{handler_step.node_label!r}."
+                )
+                continue
+
+            exception_names = (
+                self._extract_exception_names(
+                    handler_step.node_label
+                )
+            )
+
+            if len(exception_names) != 1:
+                statuses.append(
+                    FeasibilityStatus.UNKNOWN
+                )
+                unsupported.append(
+                    "Exception handler türü tek ve desteklenen "
+                    "bir exception olarak çözümlenemedi: "
+                    f"{handler_step.node_label!r}."
+                )
+                continue
+
+            exception_name = exception_names[0]
+            expression = (
+                self._extract_exception_source_expression(
+                    step.node_label
+                )
+            )
+
+            if expression is None:
+                statuses.append(
+                    FeasibilityStatus.UNKNOWN
+                )
+                unsupported.append(
+                    "Exception kaynağı güvenli biçimde "
+                    "ayrıştırılamadı: "
+                    f"{step.node_label!r}."
+                )
+                continue
+
+            if exception_name == "ZeroDivisionError":
+                (
+                    status,
+                    reason,
+                ) = self._analyze_zero_division_exception(
+                    expression=expression,
+                    constraints=constraints,
+                )
+            elif exception_name == "IndexError":
+                (
+                    status,
+                    reason,
+                ) = self._analyze_index_exception(
+                    expression=expression,
+                    constraints=constraints,
+                    parameter_types=parameter_types,
+                )
+            else:
+                status = FeasibilityStatus.UNKNOWN
+                reason = (
+                    "Exception türü için güvenli feasibility "
+                    "kuralı bulunmuyor: "
+                    f"{exception_name}."
+                )
+
+            statuses.append(status)
+
+            if status == FeasibilityStatus.INFEASIBLE:
+                conflicts.append(reason)
+            elif status == FeasibilityStatus.UNKNOWN:
+                unsupported.append(reason)
+
+        if not statuses:
+            return (
+                FeasibilityStatus.FEASIBLE,
+                (),
+                (),
+            )
+
+        if FeasibilityStatus.INFEASIBLE in statuses:
+            return (
+                FeasibilityStatus.INFEASIBLE,
+                tuple(
+                    self._deduplicate_strings(
+                        conflicts
+                    )
+                ),
+                tuple(
+                    self._deduplicate_strings(
+                        unsupported
+                    )
+                ),
+            )
+
+        if FeasibilityStatus.UNKNOWN in statuses:
+            return (
+                FeasibilityStatus.UNKNOWN,
+                (),
+                tuple(
+                    self._deduplicate_strings(
+                        unsupported
+                    )
+                ),
+            )
+
+        return (
+            FeasibilityStatus.FEASIBLE,
+            (),
+            (),
+        )
+
+    @classmethod
+    def _analyze_zero_division_exception(
+        cls,
+        *,
+        expression: ast.expr,
+        constraints: tuple[PathConstraint, ...],
+    ) -> tuple[FeasibilityStatus, str]:
+        """Bölme/mod işlemlerinin sıfır bölen kanıtını değerlendirir."""
+        divisors = tuple(
+            node.right
+            for node in ast.walk(expression)
+            if (
+                isinstance(node, ast.BinOp)
+                and isinstance(
+                    node.op,
+                    (
+                        ast.Div,
+                        ast.FloorDiv,
+                        ast.Mod,
+                    ),
+                )
+            )
+        )
+
+        if not divisors:
+            return (
+                FeasibilityStatus.UNKNOWN,
+                "ZeroDivisionError handler'ına giden ifadede "
+                "desteklenen bir bölen bulunamadı.",
+            )
+
+        divisor_states = tuple(
+            cls._numeric_zero_state(
+                expression=divisor,
+                constraints=constraints,
+            )
+            for divisor in divisors
+        )
+
+        if True in divisor_states:
+            return (
+                FeasibilityStatus.FEASIBLE,
+                "En az bir bölenin sıfır olduğu kanıtlandı.",
+            )
+
+        if all(
+            state is False
+            for state in divisor_states
+        ):
+            return (
+                FeasibilityStatus.INFEASIBLE,
+                "ZeroDivisionError yolu bütün bölenlerin "
+                "sıfırdan farklı olmasını gerektiren path "
+                "constraint'leriyle çelişiyor.",
+            )
+
+        return (
+            FeasibilityStatus.UNKNOWN,
+            "ZeroDivisionError yolu için bölenin sıfır "
+            "olduğu kanıtlanamadı.",
+        )
+
+    @classmethod
+    def _numeric_zero_state(
+        cls,
+        *,
+        expression: ast.expr,
+        constraints: tuple[PathConstraint, ...],
+    ) -> bool | None:
+        """İfade kesin sıfırsa True, kesin nonzero ise False döndürür."""
+        literal = cls._numeric_ast_literal(
+            expression
+        )
+
+        if literal is not None:
+            return literal == 0
+
+        if not isinstance(expression, ast.Name):
+            return None
+
+        variable_constraints = tuple(
+            constraint
+            for constraint in constraints
+            if constraint.variable_name == expression.id
+        )
+
+        if any(
+            constraint.operator == "=="
+            and constraint.value == 0
+            for constraint in variable_constraints
+        ):
+            return True
+
+        if any(
+            constraint.operator == "!="
+            and constraint.value == 0
+            for constraint in variable_constraints
+        ):
+            return False
+
+        lower_bound: float | None = None
+        upper_bound: float | None = None
+
+        for constraint in variable_constraints:
+            if not isinstance(
+                constraint.value,
+                (int, float),
+            ) or isinstance(
+                constraint.value,
+                bool,
+            ):
+                continue
+
+            value = float(constraint.value)
+
+            if constraint.operator == ">":
+                lower_bound = max(
+                    lower_bound
+                    if lower_bound is not None
+                    else -math.inf,
+                    math.nextafter(value, math.inf),
+                )
+            elif constraint.operator == ">=":
+                lower_bound = max(
+                    lower_bound
+                    if lower_bound is not None
+                    else -math.inf,
+                    value,
+                )
+            elif constraint.operator == "<":
+                upper_bound = min(
+                    upper_bound
+                    if upper_bound is not None
+                    else math.inf,
+                    math.nextafter(value, -math.inf),
+                )
+            elif constraint.operator == "<=":
+                upper_bound = min(
+                    upper_bound
+                    if upper_bound is not None
+                    else math.inf,
+                    value,
+                )
+
+        if (
+            lower_bound is not None
+            and lower_bound > 0
+        ) or (
+            upper_bound is not None
+            and upper_bound < 0
+        ):
+            return False
+
+        return None
+
+    @classmethod
+    def _analyze_index_exception(
+        cls,
+        *,
+        expression: ast.expr,
+        constraints: tuple[PathConstraint, ...],
+        parameter_types: dict[str, str] | None,
+    ) -> tuple[FeasibilityStatus, str]:
+        """Sabit indeksli built-in sequence erişimini değerlendirir."""
+        subscript_nodes = tuple(
+            node
+            for node in ast.walk(expression)
+            if isinstance(node, ast.Subscript)
+        )
+
+        if len(subscript_nodes) != 1:
+            return (
+                FeasibilityStatus.UNKNOWN,
+                "IndexError yolu tek bir subscript işlemi olarak "
+                "çözümlenemedi.",
+            )
+
+        subscript = subscript_nodes[0]
+
+        if not isinstance(subscript.value, ast.Name):
+            return (
+                FeasibilityStatus.UNKNOWN,
+                "IndexError subscript tabanı basit bir isim değil.",
+            )
+
+        variable_name = subscript.value.id
+        parameter_type = (
+            parameter_types.get(variable_name)
+            if parameter_types is not None
+            else None
+        )
+
+        if not cls._is_builtin_sequence_type(
+            parameter_type
+        ):
+            return (
+                FeasibilityStatus.UNKNOWN,
+                "IndexError yolu için indekslenen değişkenin "
+                "built-in sequence tipi kanıtlanamadı: "
+                f"{variable_name}.",
+            )
+
+        index_value = cls._integer_subscript_index(
+            subscript.slice
+        )
+
+        if index_value not in {0, -1}:
+            return (
+                FeasibilityStatus.UNKNOWN,
+                "Sequence doğruluk bilgisi yalnızca 0 ve -1 "
+                "indekslerinin güvenliğini kanıtlayabilir.",
+            )
+
+        truthiness = cls._constraint_truthiness(
+            variable_name=variable_name,
+            constraints=constraints,
+        )
+
+        if truthiness is True:
+            return (
+                FeasibilityStatus.INFEASIBLE,
+                "IndexError yolu truthy built-in sequence üzerinde "
+                f"{index_value} indeks erişimiyle çelişiyor: "
+                f"{variable_name}.",
+            )
+
+        if truthiness is False:
+            return (
+                FeasibilityStatus.FEASIBLE,
+                "Boş built-in sequence üzerinde indeks erişimi "
+                "IndexError üretir.",
+            )
+
+        return (
+            FeasibilityStatus.UNKNOWN,
+            "IndexError yolu için sequence boşluk durumu "
+            "kanıtlanamadı: "
+            f"{variable_name}.",
+        )
+
+    @staticmethod
+    def _extract_exception_source_expression(
+        statement_text: str,
+    ) -> ast.expr | None:
+        """Exception kenarının kaynak düğümündeki çalıştırılan ifadeyi alır."""
+        try:
+            module = ast.parse(statement_text)
+        except SyntaxError:
+            return None
+
+        if len(module.body) != 1:
+            return None
+
+        statement = module.body[0]
+
+        if isinstance(statement, ast.Assign):
+            return statement.value
+
+        if isinstance(statement, ast.AnnAssign):
+            return statement.value
+
+        if isinstance(statement, ast.AugAssign):
+            return statement.value
+
+        if isinstance(statement, ast.Expr):
+            return statement.value
+
+        if isinstance(statement, ast.Return):
+            return statement.value
+
+        return None
+
+    @staticmethod
+    def _extract_exception_names(
+        handler_label: str,
+    ) -> tuple[str, ...]:
+        """``except X`` etiketindeki exception isimlerini döndürür."""
+        prefix = "except "
+
+        if not handler_label.startswith(prefix):
+            return ()
+
+        expression_text = handler_label[
+            len(prefix):
+        ].strip()
+
+        try:
+            expression = ast.parse(
+                expression_text,
+                mode="eval",
+            ).body
+        except SyntaxError:
+            return ()
+
+        if isinstance(expression, ast.Tuple):
+            candidates = expression.elts
+        else:
+            candidates = [expression]
+
+        names: list[str] = []
+
+        for candidate in candidates:
+            if isinstance(candidate, ast.Name):
+                names.append(candidate.id)
+            elif isinstance(candidate, ast.Attribute):
+                names.append(candidate.attr)
+            else:
+                return ()
+
+        return tuple(names)
+
+    @staticmethod
+    def _integer_subscript_index(
+        expression: ast.expr,
+    ) -> int | None:
+        """Sabit integer subscript indeksini güvenli biçimde döndürür."""
+        try:
+            value = ast.literal_eval(expression)
+        except (
+            ValueError,
+            TypeError,
+        ):
+            return None
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+
+        return value
+
+    @staticmethod
+    def _constraint_truthiness(
+        *,
+        variable_name: str,
+        constraints: tuple[PathConstraint, ...],
+    ) -> bool | None:
+        """Path constraint'lerinden kesin truthy/falsy durumunu çıkarır."""
+        truthy = any(
+            constraint.variable_name == variable_name
+            and constraint.operator == "truthy"
+            for constraint in constraints
+        )
+        falsy = any(
+            constraint.variable_name == variable_name
+            and constraint.operator == "falsy"
+            for constraint in constraints
+        )
+
+        if truthy and not falsy:
+            return True
+
+        if falsy and not truthy:
+            return False
+
+        return None
+
+    @classmethod
+    def _is_builtin_sequence_type(
+        cls,
+        annotation: str | None,
+    ) -> bool:
+        """Annotation'ın güvenli built-in sequence türü olup olmadığını bulur."""
+        if annotation is None:
+            return False
+
+        normalized = annotation.replace(
+            " ",
+            "",
+        ).replace(
+            "typing.",
+            "",
+        )
+
+        if normalized.startswith("Optional[") and normalized.endswith("]"):
+            normalized = normalized[9:-1]
+
+        union_parts = tuple(
+            part
+            for part in normalized.split("|")
+            if part not in {"None", "NoneType"}
+        )
+
+        if len(union_parts) != 1:
+            return False
+
+        normalized = union_parts[0]
+
+        return (
+            normalized in {
+                "list",
+                "tuple",
+                "str",
+                "bytes",
+                "bytearray",
+                "Sequence",
+            }
+            or normalized.startswith("list[")
+            or normalized.startswith("tuple[")
+            or normalized.startswith("Sequence[")
+        )
+
+    @staticmethod
+    def _validate_parameter_types(
+        parameter_types: dict[str, str] | None,
+    ) -> None:
+        if parameter_types is None:
+            return
+
+        if not isinstance(parameter_types, dict):
+            raise TypeError(
+                "parameter_types bir string-string dict'i veya "
+                "None olmalıdır."
+            )
+
+        if any(
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(annotation, str)
+            or not annotation.strip()
+            for name, annotation in parameter_types.items()
+        ):
+            raise TypeError(
+                "parameter_types yalnızca boş olmayan string "
+                "anahtar ve değerler içermelidir."
+            )
 
     def _analyze_local_while_paths(
         self,
@@ -1178,6 +2020,91 @@ class PathFeasibilityAnalyzer:
                 )
 
         return result
+
+    @staticmethod
+    def _find_active_for_loop_index(
+        *,
+        active_for_loops: list[_ForLoopActivation],
+        node_id: int,
+    ) -> int | None:
+        """Aktif stack'teki en içteki aynı CFG ``for`` düğümünü bulur."""
+        for index in range(len(active_for_loops) - 1, -1, -1):
+            if active_for_loops[index].node_id == node_id:
+                return index
+
+        return None
+
+    @staticmethod
+    def _extract_for_target_name(step: PathStep) -> str | None:
+        """``target in iterable`` CFG etiketinden basit target adını çıkarır."""
+        try:
+            expression = ast.parse(
+                step.node_label,
+                mode="eval",
+            ).body
+        except SyntaxError:
+            return None
+
+        if (
+            not isinstance(expression, ast.Compare)
+            or len(expression.ops) != 1
+            or not isinstance(expression.ops[0], ast.In)
+            or not isinstance(expression.left, ast.Name)
+        ):
+            return None
+
+        return expression.left.id
+
+    @staticmethod
+    def _find_active_for_loop_for_target(
+        *,
+        active_for_loops: list[_ForLoopActivation],
+        target_name: str,
+    ) -> _ForLoopActivation | None:
+        """Aynı target adını gölgeleyen en içteki aktif binding'i döndürür."""
+        for activation in reversed(active_for_loops):
+            if activation.target_name == target_name:
+                return activation
+
+        return None
+
+    @classmethod
+    def _relational_uses_active_for_target(
+        cls,
+        *,
+        relational_constraint: RelationalConstraint,
+        active_for_loops: list[_ForLoopActivation],
+    ) -> bool:
+        """Relational koşulun dinamik bir loop binding'ine bağlılığını bulur."""
+        return any(
+            cls._find_active_for_loop_for_target(
+                active_for_loops=active_for_loops,
+                target_name=variable_name,
+            )
+            is not None
+            for variable_name in (
+                relational_constraint.left_variable,
+                relational_constraint.right_variable,
+            )
+        )
+
+    @classmethod
+    def _alternative_uses_active_for_target(
+        cls,
+        *,
+        alternative_group: ConstraintAlternativeGroup,
+        active_for_loops: list[_ForLoopActivation],
+    ) -> bool:
+        """Alternatif grubun scope edilemeyen loop target'ı içerdiğini bulur."""
+        return any(
+            cls._find_active_for_loop_for_target(
+                active_for_loops=active_for_loops,
+                target_name=constraint.variable_name,
+            )
+            is not None
+            for alternative in alternative_group.alternatives
+            for constraint in alternative
+        )
 
     @staticmethod
     def _extract_simple_annassignment_target(
@@ -1605,6 +2532,7 @@ class PathFeasibilityAnalyzer:
         paths: tuple[ExecutionPath, ...],
         data_flow_result: DataFlowAnalysisResult | None = None,
         path_states: tuple[PathSymbolicState, ...] | None = None,
+        parameter_types: dict[str, str] | None = None,
     ) -> tuple[PathFeasibilityResult, ...]:
         """
         Birden fazla ExecutionPath nesnesini giriş sırasını koruyarak
@@ -1646,6 +2574,7 @@ class PathFeasibilityAnalyzer:
                     if path_states is not None
                     else None
                 ),
+                parameter_types=parameter_types,
             )
             for index, path in enumerate(paths)
         )

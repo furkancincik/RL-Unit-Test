@@ -1,6 +1,6 @@
 
 import ast
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from cfg.path_analyzer import ExecutionPath, PathStep
@@ -57,6 +57,21 @@ class _VariableConstraint:
 
     forbidden_values: tuple[Any, ...] = ()
     allowed_values: tuple[Any, ...] | None = None
+
+
+@dataclass(slots=True)
+class _ForLoopActivation:
+    """Tek bir dinamik ``for`` aktivasyonunun yol üzerindeki durumu."""
+
+    node_id: int
+    activation_id: int
+    parent_context: tuple[tuple[int, int], ...]
+    target_name: str
+    iterable_name: str
+    iteration_index: int = -1
+    iteration_constraints: dict[int, _VariableConstraint] = field(
+        default_factory=dict
+    )
 
 
 class PathInputGenerator:
@@ -142,8 +157,6 @@ class PathInputGenerator:
             )
         )
 
-        constraints: dict[str, _VariableConstraint] = {}
-
         direct_values = self._initialize_candidate_values(
             candidate_values=candidate_values,
             parameter_names=parameter_names,
@@ -161,14 +174,18 @@ class PathInputGenerator:
             direct_values=direct_values,
         )
 
-        for condition_step in path.condition_steps:
-            if condition_step.node_id in handled_loop_node_ids:
-                continue
-
-            self._apply_condition_step(
-                step=condition_step,
-                constraints=constraints,
+        constraints, loop_activations = (
+            self._collect_iteration_scoped_constraints(
+                path=path,
+                parameter_names=parameter_names,
+                handled_loop_node_ids=handled_loop_node_ids,
             )
+        )
+
+        self._resize_for_loop_iterables(
+            loop_activations=loop_activations,
+            direct_values=direct_values,
+        )
 
         self._apply_local_alias_constraints(
             path=path,
@@ -179,10 +196,8 @@ class PathInputGenerator:
         )
 
         self._apply_loop_variable_constraints(
-            path=path,
-            parameter_names=parameter_names,
             parameter_types=normalized_parameter_types,
-            constraints=constraints,
+            loop_activations=loop_activations,
             direct_values=direct_values,
         )
 
@@ -1788,13 +1803,193 @@ class PathInputGenerator:
                 "Belirlenen aralık geçerli bir değer içermiyor."
             )
 
-    def _apply_loop_variable_constraints(
+    def _collect_iteration_scoped_constraints(
         self,
         *,
         path: ExecutionPath,
         parameter_names: tuple[str, ...],
-        parameter_types: dict[str, str],
+        handled_loop_node_ids: set[int],
+    ) -> tuple[
+        dict[str, _VariableConstraint],
+        list[_ForLoopActivation],
+    ]:
+        """
+        Yol koşullarını normal ve ``for``-iterasyon kısıtlarına ayırır.
+
+        Aktif döngüler sıralı ``PathStep`` ziyaretlerinden çıkarılır.
+        Aynı CFG düğümünün her ``Iterate`` ziyareti mevcut aktivasyonun
+        sonraki elemanını, bir inner loop tamamlandıktan sonraki yeni
+        ziyaret ise parent bağlamı altında yeni bir aktivasyonu temsil eder.
+        """
+        constraints: dict[str, _VariableConstraint] = {}
+        active_loops: list[_ForLoopActivation] = []
+        loop_activations: list[_ForLoopActivation] = []
+        next_activation_id = 0
+
+        for step in path.steps:
+            if step.node_type == "for":
+                binding = self._extract_for_loop_binding(
+                    step=step,
+                    parameter_names=parameter_names,
+                )
+
+                if binding is None:
+                    continue
+
+                matching_index = self._find_active_loop_index(
+                    active_loops=active_loops,
+                    node_id=step.node_id,
+                )
+
+                if step.outgoing_edge_label == "Iterate":
+                    if matching_index is None:
+                        next_activation_id += 1
+                        loop_variable, iterable_name = binding
+                        activation = _ForLoopActivation(
+                            node_id=step.node_id,
+                            activation_id=next_activation_id,
+                            parent_context=tuple(
+                                (
+                                    active_loop.node_id,
+                                    active_loop.activation_id,
+                                )
+                                for active_loop in active_loops
+                            ),
+                            target_name=loop_variable,
+                            iterable_name=iterable_name,
+                        )
+                        active_loops.append(activation)
+                        loop_activations.append(activation)
+                    else:
+                        del active_loops[matching_index + 1:]
+                        activation = active_loops[matching_index]
+
+                    activation.iteration_index += 1
+                    activation.iteration_constraints.setdefault(
+                        activation.iteration_index,
+                        _VariableConstraint(),
+                    )
+                    continue
+
+                if (
+                    step.outgoing_edge_label == "Complete"
+                    and matching_index is not None
+                ):
+                    del active_loops[matching_index:]
+
+                continue
+
+            if (
+                step.node_type not in {"if", "while"}
+                or step.node_id in handled_loop_node_ids
+            ):
+                continue
+
+            self._apply_scoped_condition_step(
+                step=step,
+                constraints=constraints,
+                active_loops=active_loops,
+            )
+
+        return constraints, loop_activations
+
+    @staticmethod
+    def _find_active_loop_index(
+        *,
+        active_loops: list[_ForLoopActivation],
+        node_id: int,
+    ) -> int | None:
+        """Aktif stack içindeki en içteki eşleşen CFG loop'unu bulur."""
+        for index in range(len(active_loops) - 1, -1, -1):
+            if active_loops[index].node_id == node_id:
+                return index
+
+        return None
+
+    def _apply_scoped_condition_step(
+        self,
+        *,
+        step: PathStep,
         constraints: dict[str, _VariableConstraint],
+        active_loops: list[_ForLoopActivation],
+    ) -> None:
+        """Koşulu aktif loop target'ları için ilgili iterasyona yönlendirir."""
+        routed_constraints = dict(constraints)
+
+        for activation in active_loops:
+            if activation.iteration_index < 0:
+                continue
+
+            routed_constraints[activation.target_name] = (
+                activation.iteration_constraints[
+                    activation.iteration_index
+                ]
+            )
+
+        self._apply_condition_step(
+            step=step,
+            constraints=routed_constraints,
+        )
+
+        for variable_name, constraint in routed_constraints.items():
+            activation = self._find_active_loop_for_target(
+                active_loops=active_loops,
+                target_name=variable_name,
+            )
+
+            if activation is None:
+                constraints[variable_name] = constraint
+                continue
+
+            activation.iteration_constraints[
+                activation.iteration_index
+            ] = constraint
+
+    @staticmethod
+    def _find_active_loop_for_target(
+        *,
+        active_loops: list[_ForLoopActivation],
+        target_name: str,
+    ) -> _ForLoopActivation | None:
+        """Aynı adı gölgeleyen loop'larda en içteki binding'i döndürür."""
+        for activation in reversed(active_loops):
+            if activation.target_name == target_name:
+                return activation
+
+        return None
+
+    @staticmethod
+    def _resize_for_loop_iterables(
+        *,
+        loop_activations: list[_ForLoopActivation],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """Iterable uzunluğunu aktivasyon başına en yüksek iterasyona ayarlar."""
+        required_lengths: dict[str, int] = {}
+
+        for activation in loop_activations:
+            required_lengths[activation.iterable_name] = max(
+                required_lengths.get(activation.iterable_name, 0),
+                activation.iteration_index + 1,
+            )
+
+        for iterable_name, required_length in required_lengths.items():
+            existing_value = direct_values.get(iterable_name)
+
+            if isinstance(existing_value, tuple):
+                direct_values[iterable_name] = tuple(
+                    list(existing_value)[:required_length]
+                )
+            elif isinstance(existing_value, list):
+                direct_values[iterable_name] = list(existing_value)[
+                    :required_length
+                ]
+
+    def _apply_loop_variable_constraints(
+        self,
+        *,
+        parameter_types: dict[str, str],
+        loop_activations: list[_ForLoopActivation],
         direct_values: dict[str, Any],
     ) -> None:
         """
@@ -1802,31 +1997,33 @@ class PathInputGenerator:
         üzerinde çıkarılan kısıtları iterable parametresinin
         elemanlarına geri yansıtır.
         """
-        processed_loop_nodes: set[int] = set()
+        element_constraints: dict[
+            tuple[str, int],
+            _VariableConstraint,
+        ] = {}
 
-        for step in path.loop_steps:
-            if (
-                step.node_type != "for"
-                or step.node_id in processed_loop_nodes
+        for activation in loop_activations:
+            for iteration_index, loop_constraint in (
+                activation.iteration_constraints.items()
             ):
-                continue
+                element_key = (
+                    activation.iterable_name,
+                    iteration_index,
+                )
+                element_constraints[element_key] = (
+                    self._combine_variable_constraints(
+                        current=element_constraints.get(
+                            element_key,
+                            _VariableConstraint(),
+                        ),
+                        additional=loop_constraint,
+                    )
+                )
 
-            processed_loop_nodes.add(step.node_id)
-
-            binding = self._extract_for_loop_binding(
-                step=step,
-                parameter_names=parameter_names,
-            )
-
-            if binding is None:
-                continue
-
-            loop_variable, iterable_name = binding
-            loop_constraint = constraints.get(loop_variable)
-
-            if loop_constraint is None:
-                continue
-
+        for (
+            iterable_name,
+            iteration_index,
+        ), loop_constraint in element_constraints.items():
             existing_value = direct_values.get(iterable_name)
 
             if existing_value is None:
@@ -1850,21 +2047,81 @@ class PathInputGenerator:
             )
 
             element_value = self._create_parameter_value(
-                parameter_name=loop_variable,
+                parameter_name=(
+                    f"{iterable_name}[{iteration_index}]"
+                ),
                 constraint=loop_constraint,
                 parameter_type=element_type,
             )
 
-            iterable_values = [
-                element_value
-                for _ in iterable_values
-            ]
+            if iteration_index >= len(iterable_values):
+                raise UnreachablePathError(
+                    "For döngüsü iterasyon indeksi üretilen "
+                    "koleksiyonda bulunmuyor: "
+                    f"{iterable_name}[{iteration_index}]"
+                )
+
+            iterable_values[iteration_index] = element_value
 
             direct_values[iterable_name] = (
                 tuple(iterable_values)
                 if restore_as_tuple
                 else iterable_values
             )
+
+    def _combine_variable_constraints(
+        self,
+        *,
+        current: _VariableConstraint,
+        additional: _VariableConstraint,
+    ) -> _VariableConstraint:
+        """Aynı somut koleksiyon elemanına ait kısıtları birleştirir."""
+        result = current
+
+        if additional.has_equal_value:
+            result = self._merge_constraint(
+                current=result,
+                operator=ast.Eq(),
+                value=additional.equal_value,
+            )
+
+        for forbidden_value in additional.forbidden_values:
+            result = self._merge_constraint(
+                current=result,
+                operator=ast.NotEq(),
+                value=forbidden_value,
+            )
+
+        if additional.allowed_values is not None:
+            result = self._merge_constraint(
+                current=result,
+                operator=ast.In(),
+                value=additional.allowed_values,
+            )
+
+        if additional.minimum is not None:
+            result = self._merge_constraint(
+                current=result,
+                operator=(
+                    ast.GtE()
+                    if additional.minimum_inclusive
+                    else ast.Gt()
+                ),
+                value=additional.minimum,
+            )
+
+        if additional.maximum is not None:
+            result = self._merge_constraint(
+                current=result,
+                operator=(
+                    ast.LtE()
+                    if additional.maximum_inclusive
+                    else ast.Lt()
+                ),
+                value=additional.maximum,
+            )
+
+        return result
 
     @staticmethod
     def _extract_for_loop_binding(

@@ -25,6 +25,9 @@ from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
 )
+from models.coverage_reachability_result import (
+    FunctionCoverageReachabilityResult,
+)
 from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
@@ -49,6 +52,9 @@ from rl.training_session import (
     TrainingSessionResult,
 )
 from rl.training_statistics import TrainingStatistics
+from services.coverage_reachability_service import (
+    CoverageReachabilityService,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +88,10 @@ class RealRLTrainingResult:
             Eğitim sonunda elde edilen son başarılı dosya veya
             fonksiyon bazlı coverage sonucu.
 
+        reachability_result:
+            Senaryo havuzu coverage sonucu ile bounded execution path
+            feasibility analizinin satır bazlı sınıflandırması.
+
         report:
             Terminalde veya dosyada kullanılabilecek eğitim raporu.
     """
@@ -95,6 +105,9 @@ class RealRLTrainingResult:
     q_table_state_count: int
     final_coverage_result: CoverageResult | FunctionCoverageResult
     report: str
+    reachability_result: (
+        FunctionCoverageReachabilityResult | None
+    ) = None
 
     @property
     def success(self) -> bool:
@@ -203,6 +216,9 @@ class RealRLTrainingService:
         dqm: DecisionQualityMatrix | None = None,
         scenario_generator: ScenarioGenerator | None = None,
         report_formatter: TrainingReportFormatter | None = None,
+        coverage_reachability_service: (
+            CoverageReachabilityService | None
+        ) = None,
     ) -> None:
         """Servisin analiz ve raporlama bağımlılıklarını hazırlar."""
         self._analyzer = analyzer or PythonAnalyzer()
@@ -232,6 +248,10 @@ class RealRLTrainingService:
         )
         self._report_formatter = (
             report_formatter or TrainingReportFormatter()
+        )
+        self._coverage_reachability_service = (
+            coverage_reachability_service
+            or CoverageReachabilityService()
         )
 
     def run(
@@ -442,6 +462,7 @@ class RealRLTrainingService:
                 tuple(paths),
                 data_flow_result=data_flow_result,
                 path_states=path_states,
+                parameter_types=function.parameter_types,
             )
         )
 
@@ -543,14 +564,32 @@ class RealRLTrainingService:
             )
         )
 
-        reachable_target_coverage = (
+        if not isinstance(
+            baseline_coverage_result,
+            FunctionCoverageResult,
+        ):
+            raise RuntimeError(
+                "Fonksiyon bazlı senaryo havuzu coverage "
+                "sonucu üretilemedi."
+            )
+
+        reachability_result = (
+            self._coverage_reachability_service.analyze(
+                coverage_result=baseline_coverage_result,
+                paths=tuple(paths),
+                feasibility_results=feasibility_results,
+                max_visits_per_node=max_visits_per_node,
+            )
+        )
+
+        scenario_pool_target_coverage = (
             baseline_coverage_result.line_coverage_percent
         )
 
-        if reachable_target_coverage <= 0.0:
+        if scenario_pool_target_coverage <= 0.0:
             raise RuntimeError(
-                "Geçerli senaryo paketi pozitif bir reachable "
-                "coverage hedefi üretemedi."
+                "Geçerli senaryo havuzu pozitif bir coverage "
+                "hedefi üretemedi."
             )
 
         transition_adapter = ScenarioTransitionAdapter(
@@ -569,7 +608,7 @@ class RealRLTrainingService:
             transition_function=transition_adapter,
             episode_reset_callback=suite_transition.reset,
             target_coverage_percentage=(
-                reachable_target_coverage
+                scenario_pool_target_coverage
             ),
         )
 
@@ -630,6 +669,7 @@ class RealRLTrainingService:
             statistics=statistics,
             function_name=normalized_function_name,
             coverage_result=final_coverage_result,
+            reachability_result=reachability_result,
         )
 
         return RealRLTrainingResult(
@@ -642,6 +682,7 @@ class RealRLTrainingService:
             q_table_state_count=len(q_table),
             final_coverage_result=final_coverage_result,
             report=report,
+            reachability_result=reachability_result,
         )
 
     def _build_candidate_values_by_path(

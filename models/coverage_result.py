@@ -283,6 +283,16 @@ class FunctionCoverageResult:
 
         file_coverage:
             Aynı test çalıştırmasına ait dosya geneli coverage sonucu.
+
+        covered_branches:
+            Coverage.py tarafından çalıştırıldığı bildirilen branch
+            uçları. Her kayıt ``(kaynak_satır, hedef_satır)`` biçimindedir.
+            Eski çağrılarla uyumluluk için ayrıntı sağlanmadığında None'dır.
+
+        missing_branches:
+            Coverage.py tarafından eksik bildirilen branch uçları.
+            Her kayıt ``(kaynak_satır, hedef_satır)`` biçimindedir.
+            Eski çağrılarla uyumluluk için ayrıntı sağlanmadığında None'dır.
     """
 
     source_file: Path
@@ -299,6 +309,8 @@ class FunctionCoverageResult:
     test_exit_code: int
     duration_seconds: float
     file_coverage: CoverageResult
+    covered_branches: tuple[tuple[int, int], ...] | None = None
+    missing_branches: tuple[tuple[int, int], ...] | None = None
 
     def __post_init__(self) -> None:
         """Fonksiyon coverage alanlarının geçerliliğini doğrular."""
@@ -340,6 +352,8 @@ class FunctionCoverageResult:
             field_name="Fonksiyon eksik branch sayısı",
             value=self.missing_branch_count,
         )
+
+        self._validate_branch_details()
 
         CoverageResult._validate_exit_code(
             self.test_exit_code,
@@ -398,6 +412,20 @@ class FunctionCoverageResult:
         return (
             self.covered_branch_count
             + self.missing_branch_count
+        )
+
+    @property
+    def has_branch_details(self) -> bool:
+        """
+        Coverage sonucunda branch uçları saklanmışsa True döndürür.
+
+        ``False`` değeri branch bulunmadığı anlamına gelmez; yalnızca
+        sonucu oluşturan eski bir çağrının ayrıntılı branch verisi
+        sağlamadığını belirtir.
+        """
+        return (
+            self.covered_branches is not None
+            and self.missing_branches is not None
         )
 
     @property
@@ -531,6 +559,104 @@ class FunctionCoverageResult:
             )
 
         if tuple(sorted(lines)) != lines:
+            raise ValueError(
+                f"{field_name} artan sırada olmalıdır."
+            )
+
+    def _validate_branch_details(self) -> None:
+        """İsteğe bağlı ayrıntılı branch koleksiyonlarını doğrular."""
+        if (
+            self.covered_branches is None
+            and self.missing_branches is None
+        ):
+            return
+
+        if (
+            self.covered_branches is None
+            or self.missing_branches is None
+        ):
+            raise ValueError(
+                "covered_branches ve missing_branches "
+                "birlikte verilmelidir."
+            )
+
+        self._validate_branch_collection(
+            field_name="covered_branches",
+            branches=self.covered_branches,
+        )
+
+        self._validate_branch_collection(
+            field_name="missing_branches",
+            branches=self.missing_branches,
+        )
+
+        if (
+            set(self.covered_branches)
+            & set(self.missing_branches)
+        ):
+            raise ValueError(
+                "Çalıştırılan ve eksik branchler kesişemez."
+            )
+
+        if len(self.covered_branches) != self.covered_branch_count:
+            raise ValueError(
+                "covered_branches uzunluğu, çalıştırılan branch "
+                "sayısına eşit olmalıdır."
+            )
+
+        if len(self.missing_branches) != self.missing_branch_count:
+            raise ValueError(
+                "missing_branches uzunluğu, eksik branch "
+                "sayısına eşit olmalıdır."
+            )
+
+    def _validate_branch_collection(
+        self,
+        *,
+        field_name: str,
+        branches: tuple[tuple[int, int], ...],
+    ) -> None:
+        """Kaynak ve hedef satır çiftlerinden oluşan koleksiyonu doğrular."""
+        if not isinstance(branches, tuple):
+            raise TypeError(
+                f"{field_name} bir tuple olmalıdır."
+            )
+
+        for branch in branches:
+            if (
+                not isinstance(branch, tuple)
+                or len(branch) != 2
+            ):
+                raise TypeError(
+                    f"{field_name} yalnızca iki elemanlı "
+                    "tuple değerler içermelidir."
+                )
+
+            source_line, target_line = branch
+
+            if (
+                isinstance(source_line, bool)
+                or not isinstance(source_line, int)
+                or isinstance(target_line, bool)
+                or not isinstance(target_line, int)
+            ):
+                raise TypeError(
+                    f"{field_name} yalnızca tam sayı satır "
+                    "çiftleri içermelidir."
+                )
+
+            if not self.start_line <= source_line <= self.end_line:
+                raise ValueError(
+                    f"{field_name} branch kaynak satırları "
+                    "fonksiyon aralığında olmalıdır."
+                )
+
+        if len(set(branches)) != len(branches):
+            raise ValueError(
+                f"{field_name} tekrar eden branch içeremez."
+            )
+
+        if tuple(sorted(branches)) != branches:
             raise ValueError(
                 f"{field_name} artan sırada olmalıdır."
             )

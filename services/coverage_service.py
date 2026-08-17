@@ -282,6 +282,8 @@ class CoverageService:
             missing_lines=function_missing_lines,
             covered_branch_count=covered_branch_count,
             missing_branch_count=missing_branch_count,
+            covered_branches=function_covered_branches,
+            missing_branches=function_missing_branches,
             test_exit_code=test_exit_code,
             duration_seconds=duration_seconds,
             file_coverage=file_coverage,

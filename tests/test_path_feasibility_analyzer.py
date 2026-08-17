@@ -1,4 +1,8 @@
+from pathlib import Path
+
 import pytest
+
+from cfg.control_flow_graph import ControlFlowGraphBuilder
 
 from cfg.data_flow_analyzer import (
     DataFlowAnalyzer,
@@ -6,8 +10,9 @@ from cfg.data_flow_analyzer import (
     InferredNumericRange,
 )
 
-from cfg.path_analyzer import ExecutionPath
+from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
 from cfg.path_state_analyzer import (
+    PathStateAnalyzer,
     PathSymbolicState,
     SymbolicVariableState,
 )
@@ -18,6 +23,10 @@ from cfg.path_feasibility_analyzer import (
     PathFeasibilityAnalyzer,
     RelationalConstraint,
 )
+from evaluator.dqm import DQMScore
+from generator.path_input_generator import PathInputGenerator
+from generator.scenario_generator import ScenarioGenerator
+from services.real_rl_training_service import RealRLTrainingService
 
 
 def create_execution_path(
@@ -48,6 +57,41 @@ def create_execution_path(
                 10 + node_count,
             )
         ),
+    )
+
+
+def create_exception_execution_path(
+    *,
+    condition_label: str,
+    condition_edge: str,
+    source_label: str,
+    exception_name: str,
+) -> ExecutionPath:
+    """Koşuldan sonra exception handler'a geçen örnek path oluşturur."""
+    return create_execution_path(
+        node_labels=[
+            "START",
+            condition_label,
+            source_label,
+            f"except {exception_name}",
+            "return None",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            condition_edge,
+            "Exception",
+            None,
+            None,
+        ],
     )
 
 
@@ -3754,3 +3798,731 @@ def test_local_constant_while_zero_iteration_is_infeasible() -> None:
     result = PathFeasibilityAnalyzer().analyze_path(path)
 
     assert result.status == FeasibilityStatus.INFEASIBLE
+
+
+def test_zero_division_exception_with_nonzero_divisor_is_infeasible(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="divisor == 0",
+        condition_edge="False",
+        source_label="result = total / divisor",
+        exception_name="ZeroDivisionError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+    assert any(
+        "ZeroDivisionError yolu" in conflict
+        for conflict in result.conflicts
+    )
+
+
+def test_zero_division_exception_with_zero_divisor_is_feasible(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="divisor == 0",
+        condition_edge="True",
+        source_label="result = total / divisor",
+        exception_name="ZeroDivisionError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_zero_division_exception_without_zero_proof_is_unknown(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="enabled",
+        condition_edge="True",
+        source_label="result = total / divisor",
+        exception_name="ZeroDivisionError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+    assert any(
+        "bölenin sıfır olduğu kanıtlanamadı" in condition
+        for condition in result.unsupported_conditions
+    )
+
+
+def test_index_exception_for_truthy_typed_list_is_infeasible(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="False",
+        source_label="first_item = items[0]",
+        exception_name="IndexError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(
+        path,
+        parameter_types={
+            "items": "list[int]",
+        },
+    )
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+    assert any(
+        "truthy built-in sequence" in conflict
+        for conflict in result.conflicts
+    )
+
+
+def test_index_exception_for_falsy_typed_list_is_feasible(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="True",
+        source_label="first_item = items[0]",
+        exception_name="IndexError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(
+        path,
+        parameter_types={
+            "items": "list[int]",
+        },
+    )
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_index_exception_without_type_information_is_unknown(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="False",
+        source_label="first_item = items[0]",
+        exception_name="IndexError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+    assert any(
+        "built-in sequence tipi kanıtlanamadı" in condition
+        for condition in result.unsupported_conditions
+    )
+
+
+def test_index_exception_for_non_boundary_index_is_unknown(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="False",
+        source_label="value = items[1]",
+        exception_name="IndexError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(
+        path,
+        parameter_types={
+            "items": "list[int]",
+        },
+    )
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+
+
+def test_optional_sequence_type_can_prove_safe_zero_index(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="False",
+        source_label="first_item = items[0]",
+        exception_name="IndexError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(
+        path,
+        parameter_types={
+            "items": "list[int] | None",
+        },
+    )
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+
+
+def test_unsupported_exception_type_is_unknown() -> None:
+    path = create_exception_execution_path(
+        condition_label="enabled",
+        condition_edge="True",
+        source_label="result = parse(payload)",
+        exception_name="ValueError",
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+    assert any(
+        "ValueError" in condition
+        for condition in result.unsupported_conditions
+    )
+
+
+def test_analyze_paths_propagates_parameter_types_to_exception_analysis(
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="False",
+        source_label="first_item = items[0]",
+        exception_name="IndexError",
+    )
+
+    results = PathFeasibilityAnalyzer().analyze_paths(
+        (path,),
+        parameter_types={
+            "items": "tuple[int, ...]",
+        },
+    )
+
+    assert results[0].status == FeasibilityStatus.INFEASIBLE
+
+
+@pytest.mark.parametrize(
+    "parameter_types",
+    (
+        [],
+        {"items": 1},
+        {"": "list[int]"},
+    ),
+)
+def test_exception_analysis_rejects_invalid_parameter_types(
+    parameter_types: object,
+) -> None:
+    path = create_exception_execution_path(
+        condition_label="not items",
+        condition_edge="False",
+        source_label="first_item = items[0]",
+        exception_name="IndexError",
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="parameter_types",
+    ):
+        PathFeasibilityAnalyzer().analyze_path(
+            path,
+            parameter_types=parameter_types,  # type: ignore[arg-type]
+        )
+
+
+# ============================================================
+# Iteration-scoped for-loop feasibility tests
+# ============================================================
+
+
+def create_repeated_for_path(
+    *,
+    condition_edges: tuple[str, ...],
+) -> ExecutionPath:
+    """Gerçek CFG gibi aynı for/condition node id'lerini tekrarlar."""
+    node_ids = [1]
+    edge_labels: list[str | None] = [None]
+    node_labels = ["START"]
+    node_types = ["start"]
+
+    for edge in condition_edges:
+        node_ids.extend((2, 3, 4))
+        edge_labels.extend(("Iterate", edge, "Next"))
+        node_labels.extend(
+            (
+                "entry in entries",
+                "entry < 0",
+                "consume(entry)",
+            )
+        )
+        node_types.extend(("for", "if", "Expr"))
+
+    node_ids.extend((2, 5, 6))
+    edge_labels[-1] = "Next"
+    edge_labels.extend(("Complete", None))
+    node_labels.extend(
+        (
+            "entry in entries",
+            "return 'done'",
+            "END",
+        )
+    )
+    node_types.extend(("for", "return", "end"))
+
+    return ExecutionPath(
+        node_ids=node_ids,
+        edge_labels=edge_labels,
+        node_labels=node_labels,
+        node_types=node_types,
+        line_numbers=list(range(1, len(node_ids) + 1)),
+    )
+
+
+@pytest.mark.parametrize(
+    "condition_edges",
+    (
+        ("False", "True"),
+        ("True", "False"),
+    ),
+)
+def test_for_constraints_from_different_iterations_are_feasible(
+    condition_edges: tuple[str, ...],
+) -> None:
+    result = PathFeasibilityAnalyzer().analyze_path(
+        create_repeated_for_path(
+            condition_edges=condition_edges,
+        )
+    )
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+    assert all(
+        constraint.variable_name != "entry"
+        for constraint in result.constraints
+    )
+
+
+def test_for_constraints_conflicting_in_same_iteration_are_infeasible(
+) -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 2, 6, 7],
+        edge_labels=[
+            None,
+            "Iterate",
+            "True",
+            "True",
+            "Next",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "entry in entries",
+            "entry >= 0",
+            "entry < 0",
+            "consume(entry)",
+            "entry in entries",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "if",
+            "if",
+            "Expr",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 9)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+    assert any("entry" in conflict for conflict in result.conflicts)
+
+
+def test_three_for_iterations_use_separate_constraint_domains() -> None:
+    result = PathFeasibilityAnalyzer().analyze_path(
+        create_repeated_for_path(
+            condition_edges=("False", "True", "False"),
+        )
+    )
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_different_for_nodes_do_not_merge_same_target_name() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 2, 4, 5, 6, 5, 7, 8],
+        edge_labels=[
+            None,
+            "Iterate",
+            "True",
+            "Complete",
+            None,
+            "Iterate",
+            "False",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "entry in left_entries",
+            "entry < 0",
+            "entry in left_entries",
+            "between = 1",
+            "entry in right_entries",
+            "entry < 0",
+            "entry in right_entries",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "if",
+            "for",
+            "Assign",
+            "for",
+            "if",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 11)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_nested_for_shadowing_keeps_target_domains_separate() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 4, 2, 6, 7],
+        edge_labels=[
+            None,
+            "Iterate",
+            "True",
+            "Iterate",
+            "True",
+            "Complete",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "value in outer_values",
+            "value >= 0",
+            "value in inner_values",
+            "value < 0",
+            "value in inner_values",
+            "value in outer_values",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "if",
+            "for",
+            "if",
+            "for",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 10)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_inner_for_iteration_restarts_for_each_outer_activation() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 4, 6, 2, 3, 4, 5, 4, 6, 2, 7, 8],
+        edge_labels=[
+            None,
+            "Iterate",
+            "True",
+            "Iterate",
+            "False",
+            "Complete",
+            "Next",
+            "Iterate",
+            "True",
+            "Iterate",
+            "True",
+            "Complete",
+            "Next",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "row in rows",
+            "row",
+            "value in row",
+            "value < 0",
+            "value in row",
+            "consume(row)",
+            "row in rows",
+            "row",
+            "value in row",
+            "value < 0",
+            "value in row",
+            "consume(row)",
+            "row in rows",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "if",
+            "for",
+            "if",
+            "for",
+            "Expr",
+            "for",
+            "if",
+            "for",
+            "if",
+            "for",
+            "Expr",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 17)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_same_name_outside_for_remains_a_global_constraint() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 3, 2, 4, 2, 5, 6],
+        edge_labels=[None, "True", None, "Iterate", "Complete", None],
+        node_labels=[
+            "START",
+            "entry >= 0",
+            "setup = 1",
+            "entry in entries",
+            "entry in entries",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "if",
+            "Assign",
+            "for",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 8)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+    assert PathConstraint(
+        variable_name="entry",
+        operator=">=",
+        value=0,
+    ) in result.constraints
+
+
+def test_iteration_scoping_preserves_local_while_analysis() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 4, 7, 8, 4, 9, 10],
+        edge_labels=[
+            None,
+            None,
+            "False",
+            "Iterate",
+            "False",
+            "Next",
+            "Iterate",
+            "True",
+            "Continue",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "counter = 1",
+            "counter > 0",
+            "entry in entries",
+            "entry < 0",
+            "consume(entry)",
+            "entry in entries",
+            "entry < 0",
+            "continue",
+            "entry in entries",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "while",
+            "for",
+            "if",
+            "Expr",
+            "for",
+            "if",
+            "continue",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 13)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+    assert any("counter" in conflict for conflict in result.conflicts)
+
+
+def test_ambiguous_for_target_is_not_silently_marked_feasible() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 2, 4, 5],
+        edge_labels=[None, "Iterate", "Next", "Complete", None],
+        node_labels=[
+            "START",
+            "left, right in pairs",
+            "consume(left, right)",
+            "left, right in pairs",
+            "return 'done'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "for",
+            "Expr",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 7)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+    assert any(
+        "for hedefi" in condition
+        for condition in result.unsupported_conditions
+    )
+
+
+def test_real_cfg_mixed_for_path_reaches_scenario_and_concrete_validation(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "mixed_loop_source.py"
+    source_file.write_text(
+        """
+def evaluate(entries: list[int]) -> str:
+    first_entry = entries[0]
+    if first_entry < 0:
+        return "invalid"
+
+    accepted_count = 0
+    for entry in entries:
+        if entry < 0:
+            continue
+        accepted_count += 1
+
+    return "done"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "evaluate"
+    )
+    paths = CFGPathAnalyzer().find_paths(
+        graph,
+        max_visits_per_node=3,
+    )
+    mixed_path = next(
+        path
+        for path in paths
+        if tuple(
+            step.outgoing_edge_label
+            for step in path.steps
+            if step.line_number == 8
+        ) == ("False", "True")
+    )
+    data_flow = DataFlowAnalyzer().analyze_file(
+        source_file=source_file,
+        function_name="evaluate",
+    )
+    path_state = PathStateAnalyzer().analyze_file(
+        source_file=source_file,
+        function_name="evaluate",
+        path=mixed_path,
+    )
+    feasibility = PathFeasibilityAnalyzer().analyze_path(
+        mixed_path,
+        data_flow_result=data_flow,
+        path_state=path_state,
+        parameter_types={"entries": "list[int]"},
+    )
+
+    assert feasibility.status == FeasibilityStatus.FEASIBLE, feasibility
+    training_service = RealRLTrainingService()
+    candidate_values_by_path = (
+        training_service._build_candidate_values_by_path(
+            paths=[mixed_path],
+            feasibility_results=(feasibility,),
+            path_states=(path_state,),
+            data_flow_result=data_flow,
+        )
+    )
+    assert 1 in candidate_values_by_path
+
+    generated = PathInputGenerator().generate(
+        path=mixed_path,
+        parameter_names=("entries",),
+        parameter_types={"entries": "list[int]"},
+        candidate_values=candidate_values_by_path[1],
+    )
+    assert generated.keyword_argument_dict["entries"][0] >= 0
+    assert generated.keyword_argument_dict["entries"][1] < 0
+
+    scenario_generator = ScenarioGenerator()
+    scenarios = scenario_generator.generate(
+        function_name="evaluate",
+        paths=[mixed_path],
+        scores=[
+            DQMScore(
+                path_index=1,
+                path_length=len(mixed_path.node_ids),
+                decision_edge_count=4,
+                contains_loop=True,
+                contains_exception=False,
+                raw_score=1.0,
+                normalized_score=1.0,
+                priority_level="High",
+            )
+        ],
+        parameter_names=("entries",),
+        parameter_types={"entries": "list[int]"},
+        candidate_values_by_path={
+            1: candidate_values_by_path[1],
+        },
+    )
+
+    assert scenario_generator.skipped_path_indices == ()
+    assert len(scenarios) == 1
+
+    namespace: dict[str, object] = {}
+    exec(
+        compile(
+            source_file.read_text(encoding="utf-8"),
+            str(source_file),
+            "exec",
+        ),
+        namespace,
+    )
+    target_function = namespace["evaluate"]
+    assert callable(target_function)
+    assert RealRLTrainingService._scenario_matches_execution(
+        target_function=target_function,
+        scenario=scenarios[0],
+    )

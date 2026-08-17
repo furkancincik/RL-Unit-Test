@@ -152,6 +152,87 @@ def test_generate_supports_tuple_subscript_alias(
     assert values[0] == "VIP"
 
 
+def test_generate_preserves_alias_across_later_loop_iteration(
+) -> None:
+    """
+    İlk eleman alias kısıtını sağlarken sonraki iterasyonun farklı
+    bir koleksiyon elemanı üzerinde negatif olabilmesini doğrular.
+    """
+    path = ExecutionPath(
+        node_ids=[
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            4,
+            5,
+            7,
+            4,
+            8,
+            9,
+        ],
+        edge_labels=[
+            None,
+            None,
+            "False",
+            "Iterate",
+            "False",
+            "Next",
+            "Iterate",
+            "True",
+            "Continue",
+            "Complete",
+            None,
+        ],
+        node_labels=[
+            "START",
+            "first_item = items[0]",
+            "first_item < 0",
+            "item in items",
+            "item < 0",
+            "valid_item_count += 1",
+            "item in items",
+            "item < 0",
+            "continue",
+            "item in items",
+            "return 'Tamamlandı'",
+            "END",
+        ],
+        node_types=[
+            "start",
+            "Assign",
+            "if",
+            "for",
+            "if",
+            "AugAssign",
+            "for",
+            "if",
+            "continue",
+            "for",
+            "return",
+            "end",
+        ],
+        line_numbers=list(range(1, 13)),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("items",),
+        parameter_types={
+            "items": "list[int]",
+        },
+    )
+
+    items = result.keyword_argument_dict["items"]
+
+    assert len(items) == 2
+    assert items[0] >= 0
+    assert items[1] < 0
+    assert result.expected_result == "Tamamlandı"
+
+
 def test_generate_rejects_conflict_between_alias_and_loop_item(
 ) -> None:
     """

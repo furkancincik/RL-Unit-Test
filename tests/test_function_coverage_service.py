@@ -260,6 +260,13 @@ def test_measure_function_filters_branches_by_source_line(
     assert result.missing_branch_count == 1
     assert result.total_branch_count == 2
     assert result.branch_coverage_percent == 50.0
+    assert result.has_branch_details is True
+    assert result.covered_branches == (
+        (2, 3),
+    )
+    assert result.missing_branches == (
+        (2, 4),
+    )
 
 
 @patch(

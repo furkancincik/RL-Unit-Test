@@ -116,6 +116,58 @@ def test_function_coverage_result_calculates_branch_count() -> None:
     assert result.total_branch_count == 8
 
 
+def test_function_coverage_result_preserves_legacy_branch_counts() -> None:
+    result = create_function_coverage(
+        covered_branch_count=6,
+        missing_branch_count=2,
+    )
+
+    assert result.has_branch_details is False
+    assert result.covered_branches is None
+    assert result.missing_branches is None
+
+
+def test_function_coverage_result_stores_branch_details() -> None:
+    result = create_function_coverage(
+        covered_branch_count=2,
+        missing_branch_count=1,
+        covered_branches=(
+            (10, 12),
+            (12, 13),
+        ),
+        missing_branches=(
+            (10, 15),
+        ),
+    )
+
+    assert result.has_branch_details is True
+    assert result.covered_branches == (
+        (10, 12),
+        (12, 13),
+    )
+    assert result.missing_branches == (
+        (10, 15),
+    )
+
+
+def test_function_coverage_result_accepts_special_branch_target() -> None:
+    result = create_function_coverage(
+        covered_branch_count=1,
+        missing_branch_count=1,
+        covered_branches=(
+            (10, -1),
+        ),
+        missing_branches=(
+            (10, 12),
+        ),
+    )
+
+    assert result.has_branch_details is True
+    assert result.covered_branches == (
+        (10, -1),
+    )
+
+
 def test_function_coverage_result_success() -> None:
     result = create_function_coverage(
         test_exit_code=0,
@@ -242,6 +294,146 @@ def test_function_coverage_result_rejects_overlapping_lines() -> None:
         create_function_coverage(
             covered_lines=(4, 5, 6),
             missing_lines=(6, 7),
+        )
+
+
+def test_function_coverage_result_requires_both_branch_details() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "covered_branches ve missing_branches "
+            "birlikte verilmelidir"
+        ),
+    ):
+        create_function_coverage(
+            covered_branch_count=1,
+            missing_branch_count=0,
+            covered_branches=((10, 12),),
+        )
+
+
+def test_function_coverage_result_rejects_invalid_branch_record() -> None:
+    with pytest.raises(
+        TypeError,
+        match=(
+            "covered_branches yalnızca iki elemanlı "
+            "tuple değerler içermelidir"
+        ),
+    ):
+        create_function_coverage(
+            covered_branch_count=1,
+            missing_branch_count=0,
+            covered_branches=((10, 12, 13),),
+            missing_branches=(),
+        )
+
+
+def test_function_coverage_result_rejects_branch_source_outside_range() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "covered_branches branch kaynak satırları "
+            "fonksiyon aralığında olmalıdır"
+        ),
+    ):
+        create_function_coverage(
+            covered_branch_count=1,
+            missing_branch_count=0,
+            covered_branches=((3, 10),),
+            missing_branches=(),
+        )
+
+
+def test_function_coverage_result_rejects_duplicate_branches() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "covered_branches tekrar eden branch "
+            "içeremez"
+        ),
+    ):
+        create_function_coverage(
+            covered_branch_count=2,
+            missing_branch_count=0,
+            covered_branches=(
+                (10, 12),
+                (10, 12),
+            ),
+            missing_branches=(),
+        )
+
+
+def test_function_coverage_result_rejects_unsorted_branches() -> None:
+    with pytest.raises(
+        ValueError,
+        match="covered_branches artan sırada olmalıdır",
+    ):
+        create_function_coverage(
+            covered_branch_count=2,
+            missing_branch_count=0,
+            covered_branches=(
+                (12, 13),
+                (10, 12),
+            ),
+            missing_branches=(),
+        )
+
+
+def test_function_coverage_result_rejects_overlapping_branches() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Çalıştırılan ve eksik branchler "
+            "kesişemez"
+        ),
+    ):
+        create_function_coverage(
+            covered_branch_count=1,
+            missing_branch_count=1,
+            covered_branches=((10, 12),),
+            missing_branches=((10, 12),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        (
+            {
+                "covered_branch_count": 2,
+                "missing_branch_count": 0,
+                "covered_branches": ((10, 12),),
+                "missing_branches": (),
+            },
+            (
+                "covered_branches uzunluğu, çalıştırılan "
+                "branch sayısına eşit olmalıdır"
+            ),
+        ),
+        (
+            {
+                "covered_branch_count": 0,
+                "missing_branch_count": 2,
+                "covered_branches": (),
+                "missing_branches": ((10, 12),),
+            },
+            (
+                "missing_branches uzunluğu, eksik branch "
+                "sayısına eşit olmalıdır"
+            ),
+        ),
+    ),
+)
+def test_function_coverage_result_rejects_branch_count_mismatch(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=message,
+    ):
+        create_function_coverage(
+            **overrides,
         )
 
 
