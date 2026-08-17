@@ -3343,3 +3343,338 @@ def test_robustness_remaining_attempts_affine_initialization_is_accepted() -> No
     )
 
     assert result.keyword_argument_dict == {"retry_count": 0}
+
+
+@pytest.mark.parametrize(
+    ("condition", "edge_label", "expected_dict"),
+    [
+        ("isinstance(value, dict)", "True", True),
+        ("isinstance(value, dict)", "False", False),
+        ("not isinstance(value, dict)", "True", False),
+        ("not isinstance(value, dict)", "False", True),
+    ],
+)
+def test_generate_applies_safe_isinstance_parameter_constraint(
+    condition: str,
+    edge_label: str,
+    expected_dict: bool,
+) -> None:
+    path = create_execution_path(
+        node_labels=["START", condition, "return 0", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, edge_label, None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("value",),
+        parameter_types={"value": "dict[str, int]"},
+    )
+
+    assert isinstance(result.keyword_argument_dict["value"], dict) is expected_dict
+
+
+def test_generate_applies_isinstance_to_loop_iteration_element() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 2, 5, 6],
+        edge_labels=[None, "Iterate", "True", "Continue", "Complete", None],
+        node_labels=[
+            "START", "item in values", "not isinstance(item, dict)",
+            "continue", "item in values", "return 0", "END",
+        ],
+        node_types=[
+            "start", "for", "if", "continue", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 8)),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[dict[str, int]]"},
+    )
+
+    assert len(result.keyword_argument_dict["values"]) == 1
+    assert not isinstance(result.keyword_argument_dict["values"][0], dict)
+
+
+@pytest.mark.parametrize(
+    ("type_name", "expected_type"),
+    [
+        ("int", int),
+        ("float", float),
+        ("str", str),
+        ("bool", bool),
+        ("list", list),
+        ("tuple", tuple),
+        ("set", set),
+        ("dict", dict),
+    ],
+)
+def test_generate_supports_each_safe_isinstance_type(
+    type_name: str,
+    expected_type: type[object],
+) -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", f"isinstance(value, {type_name})", "return 0", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    value = PathInputGenerator().generate(path, ("value",)).keyword_argument_dict[
+        "value"
+    ]
+
+    assert type(value) is expected_type
+
+
+@pytest.mark.parametrize("edge_label", ["True", "False"])
+def test_generate_supports_isinstance_type_tuple(edge_label: str) -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "isinstance(value, (int, str))", "return 0", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, edge_label, None],
+    )
+
+    value = PathInputGenerator().generate(path, ("value",)).keyword_argument_dict[
+        "value"
+    ]
+
+    assert isinstance(value, (int, str)) is (edge_label == "True")
+
+
+def test_generate_keeps_isinstance_constraints_iteration_scoped() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 2, 5, 6, 2, 7, 8],
+        edge_labels=[
+            None, "Iterate", "True", "Continue", "Iterate",
+            "True", "Next", "Complete", None,
+        ],
+        node_labels=[
+            "START", "item in values", "not isinstance(item, dict)",
+            "continue", "item in values", "isinstance(item, dict)",
+            "seen = 1", "item in values", "return 0", "END",
+        ],
+        node_types=[
+            "start", "for", "if", "continue", "for", "if",
+            "Assign", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 11)),
+    )
+
+    values = PathInputGenerator().generate(
+        path,
+        ("values",),
+        {"values": "list[dict[str, int]]"},
+    ).keyword_argument_dict["values"]
+
+    assert len(values) == 2
+    assert not isinstance(values[0], dict)
+    assert isinstance(values[1], dict)
+
+
+def test_generate_routes_isinstance_to_innermost_nested_loop_binding() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 3, 5, 2, 6, 7],
+        edge_labels=[
+            None, "Iterate", "Iterate", "True", "Complete",
+            "True", "Complete", None,
+        ],
+        node_labels=[
+            "START", "item in outer_values", "item in inner_values",
+            "isinstance(item, str)", "item in inner_values",
+            "isinstance(item, dict)", "item in outer_values", "return 0", "END",
+        ],
+        node_types=[
+            "start", "for", "for", "if", "for", "if", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 10)),
+    )
+
+    values = PathInputGenerator().generate(
+        path,
+        ("outer_values", "inner_values"),
+    ).keyword_argument_dict
+
+    assert isinstance(values["outer_values"][0], dict)
+    assert isinstance(values["inner_values"][0], str)
+
+
+def test_generate_propagates_isinstance_through_direct_local_alias() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "alias = value", "isinstance(alias, tuple)",
+            "return 0", "END",
+        ],
+        node_types=["start", "Assign", "if", "return", "end"],
+        edge_labels=[None, None, "True", None],
+    )
+
+    value = PathInputGenerator().generate(path, ("value",)).keyword_argument_dict[
+        "value"
+    ]
+
+    assert isinstance(value, tuple)
+
+
+def test_generate_propagates_isinstance_through_static_subscript_alias() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "alias = values[0]", "isinstance(alias, set)",
+            "return 0", "END",
+        ],
+        node_types=["start", "Assign", "if", "return", "end"],
+        edge_labels=[None, None, "True", None],
+    )
+
+    values = PathInputGenerator().generate(
+        path,
+        ("values",),
+        {"values": "list[int]"},
+    ).keyword_argument_dict["values"]
+
+    assert isinstance(values[0], set)
+
+
+def test_generate_runtime_predicate_selects_union_compatible_alternative() -> None:
+    path = create_execution_path(
+        node_labels=["START", "isinstance(value, str)", "return 0", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    value = PathInputGenerator().generate(
+        path,
+        ("value",),
+        {"value": "int | str"},
+    ).keyword_argument_dict["value"]
+
+    assert isinstance(value, str)
+
+
+def test_generate_combines_isinstance_with_truthiness() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "isinstance(value, str)", "value", "return 0", "END",
+        ],
+        node_types=["start", "if", "if", "return", "end"],
+        edge_labels=[None, "True", "True", None],
+    )
+
+    value = PathInputGenerator().generate(path, ("value",)).keyword_argument_dict[
+        "value"
+    ]
+
+    assert isinstance(value, str)
+    assert value
+
+
+def test_generate_combines_isinstance_with_numeric_range() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "isinstance(value, int)", "value > 5", "return 0", "END",
+        ],
+        node_types=["start", "if", "if", "return", "end"],
+        edge_labels=[None, "True", "True", None],
+    )
+
+    value = PathInputGenerator().generate(path, ("value",)).keyword_argument_dict[
+        "value"
+    ]
+
+    assert isinstance(value, int)
+    assert value > 5
+
+
+def test_generate_rejects_contradictory_isinstance_constraints() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "isinstance(value, dict)", "isinstance(value, dict)",
+            "return 0", "END",
+        ],
+        node_types=["start", "if", "if", "return", "end"],
+        edge_labels=[None, "True", "False", None],
+    )
+
+    with pytest.raises(UnreachablePathError, match="type kısıtları"):
+        PathInputGenerator().generate(path, ("value",))
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "isinstance(value, CustomClass)",
+        "isinstance(value, module.CustomClass)",
+        "isinstance(value, dynamic_type)",
+        "isinstance(value)",
+        "isinstance(value, dict, str)",
+        "isinstance(value=value, class_or_tuple=dict)",
+        "isinstance(*values)",
+        "obj.isinstance(value, dict)",
+        "module.isinstance(value, dict)",
+    ],
+)
+def test_generate_rejects_unsafe_isinstance_call_shapes(condition: str) -> None:
+    path = create_execution_path(
+        node_labels=["START", condition, "return 0", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError):
+        PathInputGenerator().generate(path, ("value", "values"))
+
+
+@pytest.mark.parametrize(
+    ("prefix_labels", "prefix_types", "parameter_names"),
+    [
+        ((), (), ("isinstance", "value")),
+        (("isinstance = predicate",), ("Assign",), ("value", "predicate")),
+        (("from helpers import isinstance",), ("ImportFrom",), ("value",)),
+        (("isinstance in predicates",), ("for",), ("value", "predicates")),
+    ],
+)
+def test_generate_rejects_shadowed_isinstance(
+    prefix_labels: tuple[str, ...],
+    prefix_types: tuple[str, ...],
+    parameter_names: tuple[str, ...],
+) -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", *prefix_labels, "isinstance(value, dict)", "return 0", "END",
+        ],
+        node_types=["start", *prefix_types, "if", "return", "end"],
+        edge_labels=[None] * (len(prefix_labels) + 1) + ["True", None],
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="gölgeleniyor"):
+        PathInputGenerator().generate(path, parameter_names)
+
+
+def test_robustness_transaction_predicate_overrides_element_annotation() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 2, 5, 6],
+        edge_labels=[None, "Iterate", "True", "Continue", "Complete", None],
+        node_labels=[
+            "START", "transaction in transactions",
+            "not isinstance(transaction, dict)", "continue",
+            "transaction in transactions", "return 0", "END",
+        ],
+        node_types=[
+            "start", "for", "if", "continue", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 8)),
+    )
+
+    transactions = PathInputGenerator().generate(
+        path,
+        ("transactions",),
+        {"transactions": "list[dict[str, int | str]]"},
+    ).keyword_argument_dict["transactions"]
+
+    assert len(transactions) == 1
+    assert not isinstance(transactions[0], dict)

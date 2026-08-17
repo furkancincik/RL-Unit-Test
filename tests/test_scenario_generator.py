@@ -1229,3 +1229,106 @@ def test_robustness_category_usage_round_scenarios_match_execution() -> None:
         target(**scenario.keyword_argument_dict) == scenario.expected_result
         for scenario in dynamic_scenarios
     )
+
+
+def test_generate_isolates_unsupported_safe_predicate_path() -> None:
+    unsupported_path = ExecutionPath(
+        node_ids=[1, 2, 3, 4],
+        edge_labels=[None, "True", None],
+        node_labels=[
+            "START", "isinstance(value, CustomClass)", "return 1", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4],
+    )
+    supported_path = ExecutionPath(
+        node_ids=[5, 6, 7, 8],
+        edge_labels=[None, "True", None],
+        node_labels=[
+            "START", "isinstance(value, dict)", "return 2", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4],
+    )
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=[unsupported_path, supported_path],
+        scores=[create_mock_score(1, 100.0), create_mock_score(2, 90.0)],
+        parameter_names=("value",),
+    )
+
+    assert [scenario.path_index for scenario in scenarios] == [2]
+    assert generator.skipped_path_indices == (1,)
+    rejection = generator.rejections[0]
+    assert rejection.category is ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+    assert rejection.exception_type == "UnsupportedInputSynthesisError"
+
+
+def test_safe_predicate_rejection_state_resets_on_next_generate() -> None:
+    generator = ScenarioGenerator()
+    unsupported_path = ExecutionPath(
+        node_ids=[1, 2, 3, 4],
+        edge_labels=[None, "True", None],
+        node_labels=[
+            "START", "isinstance(value, CustomClass)", "return 1", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4],
+    )
+
+    assert generator.generate(
+        function_name="evaluate",
+        paths=[unsupported_path],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("value",),
+    ) == []
+    assert len(generator.rejections) == 1
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=[create_mock_path(1)],
+        scores=[create_mock_score(1, 100.0)],
+    )
+
+    assert len(scenarios) == 1
+    assert generator.rejections == ()
+
+
+def test_real_cfg_safe_isinstance_scenarios_are_concrete_valid(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "safe_predicate.py"
+    source_file.write_text(
+        """
+def classify(value: dict[str, int]) -> str:
+    if isinstance(value, dict):
+        return "dict"
+    return "other"
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="classify",
+        paths=paths,
+        scores=scores,
+        parameter_names=("value",),
+        parameter_types=function.parameter_types,
+    )
+    target = runpy.run_path(str(source_file))["classify"]
+
+    assert {scenario.expected_result for scenario in scenarios} == {
+        "dict", "other",
+    }
+    assert all(
+        target(**scenario.keyword_argument_dict) == scenario.expected_result
+        for scenario in scenarios
+    )
+    assert generator.rejections == ()

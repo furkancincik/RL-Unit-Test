@@ -13,6 +13,16 @@ from generator.derived_value_input_synthesizer import (
 
 _SHADOWED_SAFE_CALL = object()
 
+_RUNTIME_TYPE_ALLOWLIST: dict[str, type[Any]] = {
+    "int": int,
+    "float": float,
+    "str": str,
+    "bool": bool,
+    "list": list,
+    "tuple": tuple,
+    "set": set,
+    "dict": dict,
+}
 
 class UnreachablePathError(ValueError):
     """Bir yürütme yolundaki kısıtlar çelişkili olduğunda oluşur."""
@@ -91,6 +101,8 @@ class _VariableConstraint:
 
     forbidden_values: tuple[Any, ...] = ()
     allowed_values: tuple[Any, ...] | None = None
+    required_runtime_type_groups: tuple[tuple[str, ...], ...] = ()
+    forbidden_runtime_types: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -229,9 +241,22 @@ class PathInputGenerator:
             direct_values=direct_values,
         )
 
+        self._apply_direct_name_alias_constraints(
+            path=path,
+            parameter_names=parameter_names,
+            constraints=constraints,
+        )
+
         self._apply_loop_variable_constraints(
             parameter_types=normalized_parameter_types,
             loop_activations=loop_activations,
+            direct_values=direct_values,
+        )
+
+        self._apply_runtime_type_overrides(
+            parameter_names=parameter_names,
+            parameter_types=normalized_parameter_types,
+            constraints=constraints,
             direct_values=direct_values,
         )
 
@@ -258,34 +283,35 @@ class PathInputGenerator:
             constraints=constraints,
         )
 
-        keyword_arguments = tuple(
-            (
-                parameter_name,
-                self._coerce_value_to_parameter_type(
-                    value=(
-                        direct_values[parameter_name]
-                        if parameter_name in direct_values
-                        else self._create_parameter_value(
-                            parameter_name=parameter_name,
-                            constraint=constraints.get(
-                                parameter_name
-                            ),
-                            parameter_type=(
-                                normalized_parameter_types.get(
-                                    parameter_name
-                                )
-                            ),
-                        )
-                    ),
-                    parameter_type=(
-                        normalized_parameter_types.get(
-                            parameter_name
-                        )
-                    ),
-                ),
+        keyword_argument_values: list[tuple[str, Any]] = []
+
+        for parameter_name in parameter_names:
+            constraint = constraints.get(parameter_name)
+            parameter_type = normalized_parameter_types.get(parameter_name)
+            value = (
+                direct_values[parameter_name]
+                if parameter_name in direct_values
+                else self._create_parameter_value(
+                    parameter_name=parameter_name,
+                    constraint=constraint,
+                    parameter_type=parameter_type,
+                )
             )
-            for parameter_name in parameter_names
-        )
+            keyword_argument_values.append(
+                (
+                    parameter_name,
+                    self._coerce_value_to_parameter_type(
+                        value=value,
+                        parameter_type=(
+                            None
+                            if self._has_runtime_type_constraint(constraint)
+                            else parameter_type
+                        ),
+                    ),
+                )
+            )
+
+        keyword_arguments = tuple(keyword_argument_values)
 
         expected_exception = self._extract_expected_exception(path)
 
@@ -1240,6 +1266,7 @@ class PathInputGenerator:
         self,
         step: PathStep,
         constraints: dict[str, _VariableConstraint],
+        shadowed_safe_calls: frozenset[str] = frozenset(),
     ) -> None:
         """
         Bir CFG koşul adımını değişken kısıtına dönüştürür.
@@ -1265,6 +1292,7 @@ class PathInputGenerator:
             ),
             constraints=constraints,
             original_expression=step.node_label,
+            shadowed_safe_calls=shadowed_safe_calls,
         )
 
     def _apply_expression(
@@ -1274,6 +1302,7 @@ class PathInputGenerator:
         desired_result: bool,
         constraints: dict[str, _VariableConstraint],
         original_expression: str,
+        shadowed_safe_calls: frozenset[str],
     ) -> None:
         """
         Bir koşul AST ifadesini istenen Boolean sonuca göre uygular.
@@ -1295,6 +1324,7 @@ class PathInputGenerator:
                 desired_result=not desired_result,
                 constraints=constraints,
                 original_expression=original_expression,
+                shadowed_safe_calls=shadowed_safe_calls,
             )
             return
 
@@ -1304,6 +1334,17 @@ class PathInputGenerator:
                 desired_result=desired_result,
                 constraints=constraints,
                 original_expression=original_expression,
+                shadowed_safe_calls=shadowed_safe_calls,
+            )
+            return
+
+        if isinstance(expression, ast.Call):
+            self._apply_safe_predicate_constraint(
+                expression=expression,
+                desired_result=desired_result,
+                constraints=constraints,
+                original_expression=original_expression,
+                shadowed_safe_calls=shadowed_safe_calls,
             )
             return
 
@@ -1340,6 +1381,7 @@ class PathInputGenerator:
         desired_result: bool,
         constraints: dict[str, _VariableConstraint],
         original_expression: str,
+        shadowed_safe_calls: frozenset[str],
     ) -> None:
         """
         ``and`` ve ``or`` ifadelerini kısıtlara dönüştürür.
@@ -1363,6 +1405,7 @@ class PathInputGenerator:
                     desired_result=desired_result,
                     constraints=constraints,
                     original_expression=original_expression,
+                    shadowed_safe_calls=shadowed_safe_calls,
                 )
             return
 
@@ -1377,6 +1420,7 @@ class PathInputGenerator:
                     desired_result=desired_result,
                     constraints=candidate_constraints,
                     original_expression=original_expression,
+                    shadowed_safe_calls=shadowed_safe_calls,
                 )
             except UnreachablePathError as error:
                 last_error = error
@@ -1390,6 +1434,112 @@ class PathInputGenerator:
             "Bileşik koşul için geçerli bir alternatif "
             f"bulunamadı: {original_expression}"
         ) from last_error
+
+    def _apply_safe_predicate_constraint(
+        self,
+        *,
+        expression: ast.Call,
+        desired_result: bool,
+        constraints: dict[str, _VariableConstraint],
+        original_expression: str,
+        shadowed_safe_calls: frozenset[str],
+    ) -> None:
+        """Allowlist içindeki ``isinstance`` çağrısını type constraint'e çevirir."""
+        if (
+            not isinstance(expression.func, ast.Name)
+            or expression.func.id != "isinstance"
+        ):
+            raise UnsupportedInputSynthesisError(
+                "Yalnızca doğrudan güvenli isinstance predicate çağrısı "
+                f"desteklenir: {original_expression}"
+            )
+
+        if "isinstance" in shadowed_safe_calls:
+            raise UnsupportedInputSynthesisError(
+                "isinstance adı parametre, yerel binding veya import "
+                f"tarafından gölgeleniyor: {original_expression}"
+            )
+
+        if expression.keywords or len(expression.args) != 2:
+            raise UnsupportedInputSynthesisError(
+                "isinstance tam olarak iki positional argüman ve sıfır "
+                f"keyword içermelidir: {original_expression}"
+            )
+
+        if any(isinstance(argument, ast.Starred) for argument in expression.args):
+            raise UnsupportedInputSynthesisError(
+                f"isinstance starred argüman desteklemez: {original_expression}"
+            )
+
+        subject, type_expression = expression.args
+        if not isinstance(subject, ast.Name):
+            raise UnsupportedInputSynthesisError(
+                "isinstance subject'i isim tabanlı parametre, loop hedefi "
+                f"veya alias olmalıdır: {original_expression}"
+            )
+
+        type_names = self._parse_runtime_type_tokens(
+            expression=type_expression,
+            original_expression=original_expression,
+        )
+        current = constraints.get(subject.id, _VariableConstraint())
+
+        if desired_result:
+            updated = replace(
+                current,
+                required_runtime_type_groups=(
+                    *current.required_runtime_type_groups,
+                    type_names,
+                ),
+            )
+        else:
+            updated = replace(
+                current,
+                forbidden_runtime_types=tuple(
+                    dict.fromkeys(
+                        (*current.forbidden_runtime_types, *type_names)
+                    )
+                ),
+            )
+
+        if not self._runtime_type_constraint_has_candidate(updated):
+            raise UnreachablePathError(
+                "Runtime type kısıtları birbiriyle çelişiyor: "
+                f"{original_expression}"
+            )
+
+        constraints[subject.id] = updated
+
+    @staticmethod
+    def _parse_runtime_type_tokens(
+        *,
+        expression: ast.expr,
+        original_expression: str,
+    ) -> tuple[str, ...]:
+        candidates = (
+            expression.elts
+            if isinstance(expression, ast.Tuple)
+            else (expression,)
+        )
+
+        if not candidates:
+            raise UnsupportedInputSynthesisError(
+                f"isinstance type tuple boş olamaz: {original_expression}"
+            )
+
+        type_names: list[str] = []
+        for candidate in candidates:
+            if (
+                not isinstance(candidate, ast.Name)
+                or candidate.id not in _RUNTIME_TYPE_ALLOWLIST
+            ):
+                raise UnsupportedInputSynthesisError(
+                    "isinstance type argümanı yalnız güvenli built-in "
+                    f"allowlist token'larını içerebilir: {original_expression}"
+                )
+            type_names.append(candidate.id)
+
+        return tuple(dict.fromkeys(type_names))
 
     def _apply_comparison(
         self,
@@ -1886,6 +2036,10 @@ class PathInputGenerator:
         active_loops: list[_ForLoopActivation] = []
         loop_activations: list[_ForLoopActivation] = []
         next_activation_id = 0
+        shadowed_safe_calls = self._find_shadowed_condition_safe_calls(
+            path=path,
+            parameter_names=parameter_names,
+        )
 
         for step in path.steps:
             if step.node_type == "for":
@@ -1950,9 +2104,72 @@ class PathInputGenerator:
                 step=step,
                 constraints=constraints,
                 active_loops=active_loops,
+                shadowed_safe_calls=shadowed_safe_calls,
             )
 
         return constraints, loop_activations
+
+    @staticmethod
+    def _find_shadowed_condition_safe_calls(
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+    ) -> frozenset[str]:
+        """Path metadata'sında güvenli predicate adını bağlayan isimleri bulur."""
+        shadowed: set[str] = set(parameter_names) & {"isinstance"}
+
+        for step in path.steps:
+            if step.node_type in {"Import", "ImportFrom"}:
+                try:
+                    statement = ast.parse(step.node_label).body[0]
+                except (SyntaxError, IndexError):
+                    continue
+                aliases = getattr(statement, "names", ())
+                if any(
+                    (alias.asname or alias.name.split(".", maxsplit=1)[0])
+                    == "isinstance"
+                    for alias in aliases
+                ):
+                    shadowed.add("isinstance")
+                continue
+
+            if step.node_type == "for":
+                try:
+                    target_text = step.node_label.split(" in ", maxsplit=1)[0]
+                    target = ast.parse(target_text, mode="eval").body
+                except (SyntaxError, ValueError):
+                    continue
+                if any(
+                    isinstance(node, ast.Name) and node.id == "isinstance"
+                    for node in ast.walk(target)
+                ):
+                    shadowed.add("isinstance")
+                continue
+
+            if step.node_type not in {"Assign", "AnnAssign"}:
+                continue
+
+            try:
+                statement = ast.parse(step.node_label).body[0]
+            except (SyntaxError, IndexError):
+                continue
+
+            targets: tuple[ast.expr, ...]
+            if isinstance(statement, ast.Assign):
+                targets = tuple(statement.targets)
+            elif isinstance(statement, ast.AnnAssign):
+                targets = (statement.target,)
+            else:
+                continue
+
+            if any(
+                isinstance(node, ast.Name) and node.id == "isinstance"
+                for target in targets
+                for node in ast.walk(target)
+            ):
+                shadowed.add("isinstance")
+
+        return frozenset(shadowed)
 
     @staticmethod
     def _find_active_loop_index(
@@ -1973,6 +2190,7 @@ class PathInputGenerator:
         step: PathStep,
         constraints: dict[str, _VariableConstraint],
         active_loops: list[_ForLoopActivation],
+        shadowed_safe_calls: frozenset[str],
     ) -> None:
         """Koşulu aktif loop target'ları için ilgili iterasyona yönlendirir."""
         routed_constraints = dict(constraints)
@@ -1990,6 +2208,7 @@ class PathInputGenerator:
         self._apply_condition_step(
             step=step,
             constraints=routed_constraints,
+            shadowed_safe_calls=shadowed_safe_calls,
         )
 
         for variable_name, constraint in routed_constraints.items():
@@ -2182,6 +2401,33 @@ class PathInputGenerator:
                 value=additional.maximum,
             )
 
+        for required_group in additional.required_runtime_type_groups:
+            result = replace(
+                result,
+                required_runtime_type_groups=(
+                    *result.required_runtime_type_groups,
+                    required_group,
+                ),
+            )
+
+        if additional.forbidden_runtime_types:
+            result = replace(
+                result,
+                forbidden_runtime_types=tuple(
+                    dict.fromkeys(
+                        (
+                            *result.forbidden_runtime_types,
+                            *additional.forbidden_runtime_types,
+                        )
+                    )
+                ),
+            )
+
+        if not self._runtime_type_constraint_has_candidate(result):
+            raise UnreachablePathError(
+                "Aynı değer için çıkarılan runtime type kısıtları çelişiyor."
+            )
+
         return result
 
     @staticmethod
@@ -2320,6 +2566,93 @@ class PathInputGenerator:
                 tuple(collection_values)
                 if restore_as_tuple
                 else collection_values
+            )
+
+    def _apply_direct_name_alias_constraints(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        constraints: dict[str, _VariableConstraint],
+    ) -> None:
+        """``local = parameter`` alias kısıtlarını gerçek parametreye taşır."""
+        parameter_set = set(parameter_names)
+        aliases: dict[str, str] = {}
+
+        for step in path.steps:
+            if step.node_type not in {"Assign", "AnnAssign"}:
+                continue
+            try:
+                statement = ast.parse(step.node_label).body[0]
+            except (SyntaxError, IndexError):
+                continue
+
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                target = statement.targets[0]
+                value = statement.value
+            elif (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+                and statement.value is not None
+            ):
+                target = statement.target
+                value = statement.value
+            else:
+                continue
+
+            if not isinstance(value, ast.Name):
+                aliases.pop(target.id, None)
+                continue
+
+            source_name = (
+                value.id
+                if value.id in parameter_set
+                else aliases.get(value.id)
+            )
+            if source_name is None:
+                aliases.pop(target.id, None)
+            else:
+                aliases[target.id] = source_name
+
+        for local_name, parameter_name in aliases.items():
+            local_constraint = constraints.get(local_name)
+            if local_constraint is None:
+                continue
+            constraints[parameter_name] = self._combine_variable_constraints(
+                current=constraints.get(parameter_name, _VariableConstraint()),
+                additional=local_constraint,
+            )
+
+    def _apply_runtime_type_overrides(
+        self,
+        *,
+        parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str],
+        constraints: dict[str, _VariableConstraint],
+        direct_values: dict[str, Any],
+    ) -> None:
+        """Explicit runtime predicate'i candidate/type-hint seed'inden üstün tutar."""
+        for parameter_name in parameter_names:
+            constraint = constraints.get(parameter_name)
+            if not self._has_runtime_type_constraint(constraint):
+                continue
+            existing = direct_values.get(parameter_name)
+            if (
+                existing is not None
+                and self._value_satisfies_constraint(
+                    value=existing,
+                    constraint=constraint,
+                )
+            ):
+                continue
+            direct_values[parameter_name] = self._create_parameter_value(
+                parameter_name=parameter_name,
+                constraint=constraint,
+                parameter_type=parameter_types.get(parameter_name),
             )
 
     @staticmethod
@@ -2551,7 +2884,65 @@ class PathInputGenerator:
             ):
                 return False
 
+        if not cls._value_satisfies_runtime_type_constraint(
+            value=value,
+            constraint=constraint,
+        ):
+            return False
+
         return True
+
+    @staticmethod
+    def _has_runtime_type_constraint(
+        constraint: _VariableConstraint | None,
+    ) -> bool:
+        return bool(
+            constraint is not None
+            and (
+                constraint.required_runtime_type_groups
+                or constraint.forbidden_runtime_types
+            )
+        )
+
+    @staticmethod
+    def _value_satisfies_runtime_type_constraint(
+        *,
+        value: Any,
+        constraint: _VariableConstraint,
+    ) -> bool:
+        for required_group in constraint.required_runtime_type_groups:
+            if not isinstance(
+                value,
+                tuple(
+                    _RUNTIME_TYPE_ALLOWLIST[type_name]
+                    for type_name in required_group
+                ),
+            ):
+                return False
+
+        if constraint.forbidden_runtime_types and isinstance(
+            value,
+            tuple(
+                _RUNTIME_TYPE_ALLOWLIST[type_name]
+                for type_name in constraint.forbidden_runtime_types
+            ),
+        ):
+            return False
+
+        return True
+
+    @classmethod
+    def _runtime_type_constraint_has_candidate(
+        cls,
+        constraint: _VariableConstraint,
+    ) -> bool:
+        return any(
+            cls._value_satisfies_runtime_type_constraint(
+                value=value,
+                constraint=constraint,
+            )
+            for value in cls._deterministic_runtime_type_values()
+        )
 
     def _validate_direct_values_against_constraints(
         self,
@@ -2630,6 +3021,16 @@ class PathInputGenerator:
                         f"{variable_name}={direct_value!r}"
                     )
 
+            if not self._value_satisfies_runtime_type_constraint(
+                value=direct_value,
+                constraint=constraint,
+            ):
+                raise UnreachablePathError(
+                    "Doğrudan üretilen değer runtime type "
+                    "kısıtını sağlamıyor: "
+                    f"{variable_name}={direct_value!r}"
+                )
+
     def _create_parameter_value(
         self,
         parameter_name: str,
@@ -2642,6 +3043,12 @@ class PathInputGenerator:
         if constraint is None:
             return self._create_default_typed_value(
                 parameter_type
+            )
+
+        if self._has_runtime_type_constraint(constraint):
+            return self._create_runtime_type_value(
+                parameter_name=parameter_name,
+                constraint=constraint,
             )
 
         if constraint.has_equal_value:
@@ -2733,6 +3140,64 @@ class PathInputGenerator:
                 )
 
         return value
+
+    def _create_runtime_type_value(
+        self,
+        *,
+        parameter_name: str,
+        constraint: _VariableConstraint,
+    ) -> Any:
+        """Type ve mevcut value constraint'lerini sağlayan deterministik değer seçer."""
+        candidates: list[Any] = []
+
+        if constraint.has_equal_value:
+            candidates.append(constraint.equal_value)
+        if constraint.allowed_values is not None:
+            candidates.extend(constraint.allowed_values)
+        if constraint.minimum is not None or constraint.maximum is not None:
+            try:
+                numeric = self._select_numeric_value(constraint)
+            except ValueError:
+                numeric = None
+            if numeric is not None:
+                candidates.extend((numeric, float(numeric)))
+
+        candidates.extend(self._deterministic_runtime_type_values())
+
+        for candidate in candidates:
+            if self._value_satisfies_constraint(
+                value=candidate,
+                constraint=constraint,
+            ):
+                return candidate
+
+        raise UnreachablePathError(
+            "Runtime type ve value kısıtlarına uygun input üretilemedi: "
+            f"{parameter_name}"
+        )
+
+    @staticmethod
+    def _deterministic_runtime_type_values() -> tuple[Any, ...]:
+        return (
+            0,
+            1,
+            -1,
+            0.0,
+            1.0,
+            -1.0,
+            "",
+            "value",
+            False,
+            True,
+            [],
+            [0],
+            (),
+            (0,),
+            set(),
+            {0},
+            {},
+            {"key": 0},
+        )
 
     @staticmethod
     def _coerce_value_to_parameter_type(
