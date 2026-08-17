@@ -16,8 +16,45 @@ class SymbolicVariableState:
 
 
 @dataclass(frozen=True, slots=True)
-class PathSymbolicState:
+class PathStepSymbolicState:
+    """Bir path adımı çalışmadan hemen önceki yerel sayısal state."""
+
+    step_index: int
     variables: tuple[SymbolicVariableState, ...]
+    unsupported_variables: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.step_index, bool)
+            or not isinstance(self.step_index, int)
+        ):
+            raise TypeError("step_index bir integer olmalıdır.")
+
+        if self.step_index < 0:
+            raise ValueError("step_index negatif olamaz.")
+
+        if not isinstance(self.variables, tuple):
+            raise TypeError("variables bir tuple olmalıdır.")
+
+        if any(
+            not isinstance(variable, SymbolicVariableState)
+            for variable in self.variables
+        ):
+            raise TypeError(
+                "variables yalnızca SymbolicVariableState içermelidir."
+            )
+
+        if not isinstance(self.unsupported_variables, tuple):
+            raise TypeError("unsupported_variables bir tuple olmalıdır.")
+
+        if any(
+            not isinstance(variable_name, str)
+            or not variable_name
+            for variable_name in self.unsupported_variables
+        ):
+            raise ValueError(
+                "unsupported_variables boş olmayan string içermelidir."
+            )
 
     def get_variable(
         self,
@@ -26,6 +63,33 @@ class PathSymbolicState:
         for variable in self.variables:
             if variable.variable_name == variable_name:
                 return variable
+
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class PathSymbolicState:
+    variables: tuple[SymbolicVariableState, ...]
+    step_states: tuple[PathStepSymbolicState, ...] = ()
+
+    def get_variable(
+        self,
+        variable_name: str,
+    ) -> SymbolicVariableState | None:
+        for variable in self.variables:
+            if variable.variable_name == variable_name:
+                return variable
+
+        return None
+
+    def state_before_step(
+        self,
+        step_index: int,
+    ) -> PathStepSymbolicState | None:
+        """İstenen path adımından hemen önceki snapshot'ı döndürür."""
+        for step_state in self.step_states:
+            if step_state.step_index == step_index:
+                return step_state
 
         return None
 
@@ -153,7 +217,231 @@ class PathStateAnalyzer:
         )
 
         return PathSymbolicState(
-            variables=variables
+            variables=variables,
+            step_states=self._build_ordered_step_states(path),
+        )
+
+    def _build_ordered_step_states(
+        self,
+        path: ExecutionPath,
+    ) -> tuple[PathStepSymbolicState, ...]:
+        """
+        Gerçek ``path.steps`` sırasından condition-time local state üretir.
+
+        Path aynı CFG düğümünü tekrar içeriyorsa her ziyaret ayrı uygulanır.
+        ``continue`` sonrasında çalışmayan statement path'te bulunmadığından
+        state'e eklenmez. Desteklenmeyen bir update yalnızca daha önce
+        sayısal olarak izlenen hedefi belirsiz hâle getirir.
+        """
+        if not path.has_node_metadata:
+            return ()
+
+        states: dict[str, _MutableVariableState] = {}
+        unsupported_variables: set[str] = set()
+        snapshots: list[PathStepSymbolicState] = []
+
+        for step_index, step in enumerate(path.steps):
+            snapshots.append(
+                PathStepSymbolicState(
+                    step_index=step_index,
+                    variables=self._freeze_states(states),
+                    unsupported_variables=tuple(
+                        sorted(unsupported_variables)
+                    ),
+                )
+            )
+
+            if step.node_type not in {
+                "Assign",
+                "AnnAssign",
+                "AugAssign",
+            }:
+                continue
+
+            try:
+                statement = ast.parse(step.node_label).body[0]
+            except (SyntaxError, IndexError):
+                continue
+
+            target_name = self._statement_target_name(statement)
+
+            if target_name is None:
+                continue
+
+            if isinstance(statement, ast.Assign):
+                value = self._evaluate_ordered_assignment(
+                    target_name=target_name,
+                    expression=statement.value,
+                    states=states,
+                )
+                self._store_ordered_value(
+                    target_name=target_name,
+                    value=value,
+                    states=states,
+                    unsupported_variables=unsupported_variables,
+                    mark_unknown=(
+                        not self._is_static_collection_subscript(statement.value)
+                    ),
+                )
+                continue
+
+            if isinstance(statement, ast.AnnAssign):
+                if statement.value is None:
+                    continue
+
+                value = self._evaluate_ordered_assignment(
+                    target_name=target_name,
+                    expression=statement.value,
+                    states=states,
+                )
+                self._store_ordered_value(
+                    target_name=target_name,
+                    value=value,
+                    states=states,
+                    unsupported_variables=unsupported_variables,
+                    mark_unknown=(
+                        not self._is_static_collection_subscript(statement.value)
+                    ),
+                )
+                continue
+
+            assert isinstance(statement, ast.AugAssign)
+            current_state = states.get(target_name)
+
+            if current_state is None or current_state.exact_value is None:
+                continue
+
+            delta = self._extract_numeric_literal(statement.value)
+
+            if delta is None or not isinstance(statement.op, (ast.Add, ast.Sub)):
+                states.pop(target_name, None)
+                unsupported_variables.add(target_name)
+                continue
+
+            effective_delta = delta if isinstance(statement.op, ast.Add) else -delta
+            value = current_state.exact_value + effective_delta
+            states[target_name] = self._exact_mutable_state(value)
+            unsupported_variables.discard(target_name)
+
+        return tuple(snapshots)
+
+    @staticmethod
+    def _statement_target_name(statement: ast.stmt) -> str | None:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            return statement.targets[0].id
+
+        if (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+        ):
+            return statement.target.id
+
+        if (
+            isinstance(statement, ast.AugAssign)
+            and isinstance(statement.target, ast.Name)
+        ):
+            return statement.target.id
+
+        return None
+
+    @staticmethod
+    def _is_static_collection_subscript(expression: ast.expr) -> bool:
+        """Feasibility alias katmanının güvenle eşleyebildiği erişim."""
+        if (
+            not isinstance(expression, ast.Subscript)
+            or not isinstance(expression.value, ast.Name)
+        ):
+            return False
+
+        try:
+            index_value = ast.literal_eval(expression.slice)
+        except (ValueError, TypeError):
+            return False
+
+        return (
+            isinstance(index_value, int)
+            and not isinstance(index_value, bool)
+            and index_value >= 0
+        )
+
+    def _evaluate_ordered_assignment(
+        self,
+        *,
+        target_name: str,
+        expression: ast.expr,
+        states: dict[str, _MutableVariableState],
+    ) -> float | None:
+        literal = self._extract_numeric_literal(expression)
+
+        if literal is not None:
+            return literal
+
+        if (
+            not isinstance(expression, ast.BinOp)
+            or not isinstance(expression.left, ast.Name)
+            or expression.left.id != target_name
+            or not isinstance(expression.op, (ast.Add, ast.Sub))
+        ):
+            return None
+
+        current_state = states.get(target_name)
+        delta = self._extract_numeric_literal(expression.right)
+
+        if (
+            current_state is None
+            or current_state.exact_value is None
+            or delta is None
+        ):
+            return None
+
+        if isinstance(expression.op, ast.Sub):
+            delta = -delta
+
+        return current_state.exact_value + delta
+
+    @classmethod
+    def _store_ordered_value(
+        cls,
+        *,
+        target_name: str,
+        value: float | None,
+        states: dict[str, _MutableVariableState],
+        unsupported_variables: set[str],
+        mark_unknown: bool,
+    ) -> None:
+        if value is None:
+            if mark_unknown:
+                states.pop(target_name, None)
+                unsupported_variables.add(target_name)
+            return
+
+        states[target_name] = cls._exact_mutable_state(value)
+        unsupported_variables.discard(target_name)
+
+    @staticmethod
+    def _exact_mutable_state(value: float) -> _MutableVariableState:
+        return _MutableVariableState(
+            exact_value=value,
+            lower_bound=value,
+            upper_bound=value,
+        )
+
+    @staticmethod
+    def _freeze_states(
+        states: dict[str, _MutableVariableState],
+    ) -> tuple[SymbolicVariableState, ...]:
+        return tuple(
+            SymbolicVariableState(
+                variable_name=variable_name,
+                exact_value=state.exact_value,
+                lower_bound=state.lower_bound,
+                upper_bound=state.upper_bound,
+            )
+            for variable_name, state in sorted(states.items())
         )
 
     @staticmethod

@@ -1,4 +1,6 @@
 import re
+import runpy
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -677,3 +679,90 @@ def test_generate_rejects_empty_candidate_variable_name() -> None:
                 },
             },
         )
+
+
+def test_real_cfg_derived_average_scenario_passes_concrete_validation(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "derived_average.py"
+    source_file.write_text(
+        """
+def evaluate(items: list[int]) -> str:
+    total = 0
+    count = 0
+    for item in items:
+        if item < 0:
+            continue
+        total += item
+        count += 1
+    average = total / count
+    if average >= 50:
+        return "high"
+    return "low"
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "evaluate"
+    )
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    scenarios = ScenarioGenerator().generate(
+        function_name="evaluate",
+        paths=paths,
+        scores=scores,
+        parameter_names=("items",),
+        parameter_types={"items": "list[int]"},
+    )
+    scenario = next(
+        scenario for scenario in scenarios if scenario.expected_result == "high"
+    )
+    target = runpy.run_path(str(source_file))["evaluate"]
+
+    actual = target(**scenario.keyword_argument_dict)
+
+    assert actual == "high"
+    assert actual == scenario.expected_result
+    assert set(scenario.keyword_argument_dict) == {"items"}
+
+
+def test_ultracomplex_derived_value_lines_have_concrete_scenarios() -> None:
+    source_file = Path("datasets/sample_ultracomplex_code.py")
+    function = next(
+        function
+        for function in PythonAnalyzer().analyze_file(source_file).functions
+        if function.name == "process_order"
+    )
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "process_order"
+    )
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    scenarios = ScenarioGenerator().generate(
+        function_name="process_order",
+        paths=paths,
+        scores=scores,
+        parameter_names=(
+            "amount", "stock", "customer_type", "coupon",
+            "failed_attempts", "items",
+        ),
+        parameter_types=function.parameter_types,
+    )
+    target = runpy.run_path(str(source_file))["process_order"]
+    accepted_lines: set[int] = set()
+
+    for scenario in scenarios:
+        path = paths[scenario.path_index - 1]
+        target_lines = {101, 107} & set(path.line_numbers)
+        if not target_lines:
+            continue
+        actual = target(**scenario.keyword_argument_dict)
+        if actual == scenario.expected_result:
+            accepted_lines.update(target_lines)
+
+    assert accepted_lines == {101, 107}

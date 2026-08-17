@@ -4526,3 +4526,433 @@ def evaluate(entries: list[int]) -> str:
         target_function=target_function,
         scenario=scenarios[0],
     )
+
+
+# ============================================================
+# Collection aggregate / sequential local-state tests
+# ============================================================
+
+
+def analyze_sequential_local_path(
+    *,
+    source: str,
+    path: ExecutionPath,
+) -> PathFeasibilityResult:
+    path_state = PathStateAnalyzer().analyze_source(
+        source=source,
+        function_name="evaluate",
+        path=path,
+    )
+    return PathFeasibilityAnalyzer().analyze_path(
+        path,
+        path_state=path_state,
+    )
+
+
+def create_mixed_continue_counter_path(
+    *,
+    final_edge: str,
+) -> ExecutionPath:
+    node_ids = [1, 2, 3, 4, 5]
+    edge_labels: list[str | None] = [None, None, "Iterate", "True"]
+    node_labels = [
+        "START",
+        "counter = 0",
+        "entry in entries",
+        "entry < 0",
+        "continue",
+    ]
+    node_types = ["start", "Assign", "for", "if", "continue"]
+
+    node_ids.extend((3, 4, 6, 3, 7, 8, 9))
+    edge_labels.extend(
+        ("Continue", "Iterate", "False", "Next", "Complete", final_edge, None)
+    )
+    node_labels.extend(
+        (
+            "entry in entries",
+            "entry < 0",
+            "counter += 1",
+            "entry in entries",
+            "counter == 0",
+            "return 'done'",
+            "END",
+        )
+    )
+    node_types.extend(
+        ("for", "if", "AugAssign", "for", "if", "return", "end")
+    )
+
+    return ExecutionPath(
+        node_ids=node_ids,
+        edge_labels=edge_labels,
+        node_labels=node_labels,
+        node_types=node_types,
+        line_numbers=list(range(1, len(node_ids) + 1)),
+    )
+
+
+COUNTER_SOURCE = """
+def evaluate(entries):
+    counter = 0
+    for entry in entries:
+        if entry < 0:
+            continue
+        counter += 1
+    if counter == 0:
+        return "empty"
+    return "done"
+"""
+
+
+def test_post_loop_zero_is_infeasible_after_later_iteration_update() -> None:
+    result = analyze_sequential_local_path(
+        source=COUNTER_SOURCE,
+        path=create_mixed_continue_counter_path(final_edge="True"),
+    )
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+    assert any("counter" in conflict for conflict in result.conflicts)
+
+
+def test_post_loop_nonzero_is_feasible_after_later_iteration_update() -> None:
+    result = analyze_sequential_local_path(
+        source=COUNTER_SOURCE,
+        path=create_mixed_continue_counter_path(final_edge="False"),
+    )
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_post_loop_zero_is_feasible_when_all_iterations_continue() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 3, 4, 5, 3, 6, 7, 8],
+        edge_labels=[
+            None, None, "Iterate", "True", "Continue",
+            "Iterate", "True", "Continue", "Complete", "True", None,
+        ],
+        node_labels=[
+            "START", "counter = 0", "entry in entries", "entry < 0",
+            "continue", "entry in entries", "entry < 0", "continue",
+            "entry in entries", "counter == 0", "return 'empty'", "END",
+        ],
+        node_types=[
+            "start", "Assign", "for", "if", "continue", "for", "if",
+            "continue", "for", "if", "return", "end",
+        ],
+        line_numbers=list(range(1, 13)),
+    )
+
+    result = analyze_sequential_local_path(source=COUNTER_SOURCE, path=path)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+@pytest.mark.parametrize(
+    ("initial_assignment", "updates", "condition", "expected_status"),
+    (
+        ("counter = 0", ("counter += 2",), "counter == 2", FeasibilityStatus.FEASIBLE),
+        ("counter = 2", ("counter -= 1",), "counter == 1", FeasibilityStatus.FEASIBLE),
+        ("counter = 0", ("counter = counter + 1",), "counter == 1", FeasibilityStatus.FEASIBLE),
+        ("counter = 2", ("counter = counter - 1",), "counter == 1", FeasibilityStatus.FEASIBLE),
+        ("counter = 0", ("counter += 2", "counter -= 1"), "counter == 1", FeasibilityStatus.FEASIBLE),
+        ("counter = 0", ("counter += 1", "counter += 1"), "counter == 1", FeasibilityStatus.INFEASIBLE),
+    ),
+)
+def test_sequential_loop_updates_are_applied_once_in_path_order(
+    initial_assignment: str,
+    updates: tuple[str, ...],
+    condition: str,
+    expected_status: FeasibilityStatus,
+) -> None:
+    node_labels = ["START", initial_assignment, "entry in entries", *updates,
+                   "entry in entries", condition, "return 'done'", "END"]
+    node_types = ["start", "Assign", "for", *(
+        "AugAssign" if "+=" in update or "-=" in update else "Assign"
+        for update in updates
+    ), "for", "if", "return", "end"]
+    node_ids = [1, 2, 3, *range(4, 4 + len(updates)), 3, 20, 21, 22]
+    edge_labels: list[str | None] = [None, None, "Iterate"]
+    edge_labels.extend(None for _ in updates[:-1])
+    edge_labels.extend(("Next", "Complete", "True", None))
+    path = ExecutionPath(
+        node_ids=node_ids,
+        edge_labels=edge_labels,
+        node_labels=node_labels,
+        node_types=node_types,
+        line_numbers=list(range(1, len(node_ids) + 1)),
+    )
+    source = f"""
+def evaluate(entries):
+    {initial_assignment}
+    for entry in entries:
+        {chr(10).join('        ' + update for update in updates).lstrip()}
+    if {condition}:
+        return "done"
+    return "other"
+"""
+
+    result = analyze_sequential_local_path(source=source, path=path)
+
+    assert result.status == expected_status
+
+
+def test_update_after_continue_is_not_applied_to_same_iteration() -> None:
+    result = analyze_sequential_local_path(
+        source=COUNTER_SOURCE,
+        path=create_mixed_continue_counter_path(final_edge="False"),
+    )
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_nested_loop_counters_do_not_mix(tmp_path: Path) -> None:
+    source_file = tmp_path / "nested_counters.py"
+    source_file.write_text("""
+def evaluate(rows):
+    outer_count = 0
+    inner_count = 0
+    for row in rows:
+        outer_count += 1
+        for value in row:
+            inner_count += 2
+    if outer_count == 1 and inner_count == 2:
+        return "done"
+    return "other"
+""".strip(), encoding="utf-8")
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "evaluate"
+    )
+    path = next(
+        path
+        for path in CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+        if path.return_step is not None
+        and path.return_step.node_label == "return 'done'"
+        and sum(step.node_label == "outer_count += 1" for step in path.steps) == 1
+        and sum(step.node_label == "inner_count += 2" for step in path.steps) == 1
+    )
+    path_state = PathStateAnalyzer().analyze_file(
+        source_file=source_file, function_name="evaluate", path=path
+    )
+    result = PathFeasibilityAnalyzer().analyze_path(path, path_state=path_state)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_same_counter_name_resets_between_loop_activations(tmp_path: Path) -> None:
+    source_file = tmp_path / "activation_reset.py"
+    source_file.write_text("""
+def evaluate(groups):
+    counter = 0
+    for group in groups:
+        counter = 0
+        for value in group:
+            counter += 1
+    if counter == 1:
+        return "done"
+    return "other"
+""".strip(), encoding="utf-8")
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "evaluate"
+    )
+    path = next(
+        path
+        for path in CFGPathAnalyzer().find_paths(graph, max_visits_per_node=5)
+        if path.return_step is not None
+        and path.return_step.node_label == "return 'done'"
+        and sum(step.node_label == "counter += 1" for step in path.steps) == 2
+        and sum(step.node_label == "counter = 0" for step in path.steps) == 3
+        and max(
+            index
+            for index, step in enumerate(path.steps)
+            if step.node_label == "counter = 0"
+        ) < max(
+            index
+            for index, step in enumerate(path.steps)
+            if step.node_label == "counter += 1"
+        )
+    )
+    path_state = PathStateAnalyzer().analyze_file(
+        source_file=source_file, function_name="evaluate", path=path
+    )
+    result = PathFeasibilityAnalyzer().analyze_path(path, path_state=path_state)
+
+    assert result.status == FeasibilityStatus.FEASIBLE
+
+
+def test_unsupported_update_of_tracked_local_is_unknown() -> None:
+    source = """
+def evaluate(entries, delta):
+    counter = 0
+    for entry in entries:
+        counter += delta
+    if counter == 0:
+        return "done"
+    return "other"
+"""
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 3, 5, 6, 7],
+        edge_labels=[None, None, "Iterate", "Next", "Complete", "True", None],
+        node_labels=[
+            "START", "counter = 0", "entry in entries", "counter += delta",
+            "entry in entries", "counter == 0", "return 'done'", "END",
+        ],
+        node_types=["start", "Assign", "for", "AugAssign", "for", "if", "return", "end"],
+        line_numbers=list(range(1, 9)),
+    )
+
+    result = analyze_sequential_local_path(source=source, path=path)
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+
+
+def test_real_cfg_collection_aggregate_path_is_infeasible(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "aggregate_source.py"
+    source_file.write_text(
+        """
+def evaluate(entries: list[int]) -> str:
+    counter = 0
+    for entry in entries:
+        if entry < 0:
+            continue
+        counter += 1
+    if counter == 0:
+        return "empty"
+    return "done"
+""".strip(),
+        encoding="utf-8",
+    )
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "evaluate"
+    )
+    path = next(
+        path
+        for path in CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+        if path.return_step is not None
+        and path.return_step.node_label == "return 'empty'"
+        and any(step.node_label == "counter += 1" for step in path.steps)
+    )
+    path_state = PathStateAnalyzer().analyze_file(
+        source_file=source_file,
+        function_name="evaluate",
+        path=path,
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path, path_state=path_state)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+
+
+def test_ultracomplex_aggregate_return_paths_are_infeasible() -> None:
+    source_file = Path("datasets/sample_ultracomplex_code.py")
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "process_order"
+    )
+    matching_paths = [
+        path
+        for path in CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+        if 54 in path.line_numbers
+    ]
+
+    assert matching_paths
+    for path in matching_paths:
+        path_state = PathStateAnalyzer().analyze_file(
+            source_file=source_file,
+            function_name="process_order",
+            path=path,
+        )
+        result = PathFeasibilityAnalyzer().analyze_path(path, path_state=path_state)
+        assert result.status == FeasibilityStatus.INFEASIBLE
+
+
+def test_collection_alias_conflicts_with_first_loop_iteration() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 5, 7, 8, 9],
+        edge_labels=[None, None, "False", None, "Iterate", "True",
+                     "Complete", "True", None],
+        node_labels=[
+            "START", "first = entries[0]", "first < 0", "counter = 0",
+            "entry in entries", "entry < 0", "entry in entries",
+            "counter == 0", "return 'empty'", "END",
+        ],
+        node_types=[
+            "start", "Assign", "if", "Assign", "for", "if", "for",
+            "if", "return", "end",
+        ],
+        line_numbers=list(range(1, 11)),
+    )
+    state = PathStateAnalyzer().analyze_source(
+        source="""
+def evaluate(entries):
+    first = entries[0]
+    if first < 0:
+        return "negative"
+    counter = 0
+    for entry in entries:
+        if entry < 0:
+            continue
+    if counter == 0:
+        return "empty"
+""",
+        function_name="evaluate",
+        path=path,
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path, path_state=state)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+
+
+def test_successful_zero_index_alias_requires_first_loop_iteration() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6],
+        edge_labels=[None, None, "Complete", "True", None],
+        node_labels=[
+            "START", "first = entries[0]", "entry in entries",
+            "counter == 0", "return 'empty'", "END",
+        ],
+        node_types=["start", "Assign", "for", "if", "return", "end"],
+        line_numbers=list(range(1, 7)),
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path)
+
+    assert result.status == FeasibilityStatus.INFEASIBLE
+
+
+def test_unsupported_nonlinear_local_condition_is_unknown() -> None:
+    source = """
+def evaluate(left, right):
+    derived = left * right
+    if derived >= 10:
+        return "high"
+    return "low"
+"""
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5],
+        edge_labels=[None, None, "True", None],
+        node_labels=["START", "derived = left * right", "derived >= 10",
+                     "return 'high'", "END"],
+        node_types=["start", "Assign", "if", "return", "end"],
+        line_numbers=[1, 3, 4, 5, 6],
+    )
+    state = PathStateAnalyzer().analyze_source(
+        source=source,
+        function_name="evaluate",
+        path=path,
+    )
+
+    result = PathFeasibilityAnalyzer().analyze_path(path, path_state=state)
+
+    assert result.status == FeasibilityStatus.UNKNOWN
+    assert any("derived" in item for item in result.unsupported_conditions)

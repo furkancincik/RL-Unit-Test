@@ -2424,6 +2424,166 @@ def test_generate_accepts_candidate_for_tighter_upper_bound_path() -> None:
     assert result.expected_result == "Başarısız"
 
 
+# ============================================================
+# Derived-value input synthesis tests
+# ============================================================
+
+
+@pytest.mark.parametrize(
+    ("assignments", "condition", "parameters", "assertion"),
+    (
+        (("derived = amount",), "derived >= 100", ("amount",),
+         lambda values: values["amount"] >= 100),
+        (("derived = amount + fee",), "derived >= 100", ("amount", "fee"),
+         lambda values: values["amount"] + values["fee"] >= 100),
+        (("remaining = stock - required",), "remaining >= 10", ("stock", "required"),
+         lambda values: values["stock"] - values["required"] >= 10),
+        (("derived = amount * 2",), "derived >= 100", ("amount",),
+         lambda values: values["amount"] * 2 >= 100),
+        (("derived = amount / 2",), "derived >= 100", ("amount",),
+         lambda values: values["amount"] / 2 >= 100),
+        (("first = amount + 10", "second = first * 2"), "second >= 100", ("amount",),
+         lambda values: (values["amount"] + 10) * 2 >= 100),
+    ),
+)
+def test_generate_propagates_affine_local_condition_to_parameters(
+    assignments: tuple[str, ...],
+    condition: str,
+    parameters: tuple[str, ...],
+    assertion: object,
+) -> None:
+    path = create_execution_path(
+        node_labels=["START", *assignments, condition, "return 1", "END"],
+        node_types=["start", *("Assign" for _ in assignments), "if", "return", "end"],
+        edge_labels=[None, *(None for _ in assignments), "True", None],
+    )
+
+    generated = PathInputGenerator().generate(path, parameters)
+    values = generated.keyword_argument_dict
+
+    assert assertion(values)  # type: ignore[operator]
+    assert not set(values) - set(parameters)
+
+
+def create_average_path(
+    *,
+    condition: str = "average >= 50",
+) -> ExecutionPath:
+    return ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 4, 5, 6, 4, 7, 8, 9, 10],
+        edge_labels=[None, None, None, "Iterate", None, "Next", "Iterate",
+                     None, "Next", "Complete", None, "True", None],
+        node_labels=[
+            "START", "total = 0", "count = 0", "item in items",
+            "total += item", "count += 1", "item in items", "total += item",
+            "count += 1", "item in items", "average = total / count", condition,
+            "return 1", "END",
+        ],
+        node_types=[
+            "start", "Assign", "Assign", "for", "AugAssign", "AugAssign",
+            "for", "AugAssign", "AugAssign", "for", "Assign", "if", "return", "end",
+        ],
+        line_numbers=list(range(1, 15)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("parameter_type", "expected_type"),
+    (("list[int]", list), ("tuple[int, ...]", tuple)),
+)
+def test_generate_propagates_average_constraint_to_typed_collection(
+    parameter_type: str,
+    expected_type: type,
+) -> None:
+    generated = PathInputGenerator().generate(
+        create_average_path(),
+        ("items",),
+        {"items": parameter_type},
+    )
+    items = generated.keyword_argument_dict["items"]
+
+    assert isinstance(items, expected_type)
+    assert len(items) == 2
+    assert sum(items) / len(items) >= 50
+    assert "average" not in generated.keyword_argument_dict
+    assert "total" not in generated.keyword_argument_dict
+    assert "count" not in generated.keyword_argument_dict
+
+
+def test_generate_excludes_continued_item_from_average() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 4, 5, 7, 8, 4, 9, 10, 11, 12],
+        edge_labels=[None, None, None, "Iterate", "True", "Continue",
+                     "Iterate", "False", None, "Next", "Complete", None,
+                     "True", None],
+        node_labels=[
+            "START", "total = 0", "count = 0", "item in items", "item < 0",
+            "continue", "item in items", "item < 0", "total += item",
+            "count += 1", "item in items", "average = total / count",
+            "average >= 50", "return 1", "END",
+        ],
+        node_types=[
+            "start", "Assign", "Assign", "for", "if", "continue", "for",
+            "if", "AugAssign", "AugAssign", "for", "Assign", "if", "return", "end",
+        ],
+        line_numbers=list(range(1, 16)),
+    )
+
+    generated = PathInputGenerator().generate(
+        path, ("items",), {"items": "list[int]"}
+    )
+    items = generated.keyword_argument_dict["items"]
+
+    assert items[0] < 0
+    assert items[1] >= 50
+
+
+def test_generate_preserves_subscript_alias_while_satisfying_average() -> None:
+    path = create_average_path()
+    path.node_ids.insert(1, 20)
+    path.node_labels.insert(1, "first = items[0]")
+    path.node_types.insert(1, "Assign")
+    path.line_numbers.insert(1, 1)
+    path.edge_labels.insert(1, None)
+    path.node_ids.insert(2, 21)
+    path.node_labels.insert(2, "first < 0")
+    path.node_types.insert(2, "if")
+    path.line_numbers.insert(2, 2)
+    path.edge_labels.insert(2, "False")
+
+    generated = PathInputGenerator().generate(
+        path, ("items",), {"items": "list[int]"}
+    )
+    items = generated.keyword_argument_dict["items"]
+
+    assert items[0] >= 0
+    assert sum(items) / len(items) >= 50
+
+
+@pytest.mark.parametrize(
+    ("assignment", "parameters"),
+    (
+        ("derived = left * right", ("left", "right")),
+        ("derived = amount / divisor", ("amount", "divisor")),
+        ("derived = items[index]", ("items", "index")),
+    ),
+)
+def test_generate_rejects_unsafe_derived_provenance(
+    assignment: str,
+    parameters: tuple[str, ...],
+) -> None:
+    path = create_execution_path(
+        node_labels=["START", assignment, "derived >= 10", "return 1", "END"],
+        node_types=["start", "Assign", "if", "return", "end"],
+        edge_labels=[None, None, "True", None],
+    )
+
+    with pytest.raises(
+        UnreachablePathError,
+        match="desteklenmeyen provenance",
+    ):
+        PathInputGenerator().generate(path, parameters)
+
 def test_generate_defers_name_to_name_comparison() -> None:
     """
     Değişkenler arası ilişki literal olarak yorumlanmamalıdır.

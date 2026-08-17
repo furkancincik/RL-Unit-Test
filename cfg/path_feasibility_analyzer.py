@@ -820,8 +820,40 @@ class PathFeasibilityAnalyzer:
         biçimde çıkarılmış sayısal alt/üst sınırlar relational reasoning
         sırasında ek domain bilgisi olarak kullanılır.
         """
+        if (
+            path_state is not None
+            and not isinstance(path_state, PathSymbolicState)
+        ):
+            raise TypeError(
+                "path_state bir PathSymbolicState örneği olmalıdır."
+            )
+
         extraction = self.extract_constraints(
             path
+        )
+
+        sequential_local_names = (
+            self._sequential_local_variable_names(path_state)
+        )
+        global_constraints = tuple(
+            constraint
+            for constraint in extraction.constraints
+            if constraint.variable_name not in sequential_local_names
+        )
+        global_alternative_groups = tuple(
+            group
+            for group in extraction.alternative_groups
+            if not any(
+                constraint.variable_name in sequential_local_names
+                for alternative in group.alternatives
+                for constraint in alternative
+            )
+        )
+        global_relational_constraints = tuple(
+            relation
+            for relation in extraction.relational_constraints
+            if relation.left_variable not in sequential_local_names
+            and relation.right_variable not in sequential_local_names
         )
 
         (
@@ -856,9 +888,63 @@ class PathFeasibilityAnalyzer:
                 ),
             )
 
+        (
+            sequential_status,
+            sequential_conflicts,
+            sequential_unsupported,
+        ) = self._analyze_sequential_local_state(
+            path=path,
+            path_state=path_state,
+            persistent_constraints=global_constraints,
+        )
+
+        if sequential_status == FeasibilityStatus.INFEASIBLE:
+            return PathFeasibilityResult(
+                status=FeasibilityStatus.INFEASIBLE,
+                constraints=extraction.constraints,
+                conflicts=sequential_conflicts,
+                unsupported_conditions=tuple(
+                    self._deduplicate_strings(
+                        [
+                            *extraction.unsupported_conditions,
+                            *local_while_unsupported,
+                            *sequential_unsupported,
+                        ]
+                    )
+                ),
+                alternative_groups=extraction.alternative_groups,
+                relational_constraints=extraction.relational_constraints,
+            )
+
+        (
+            collection_status,
+            collection_conflicts,
+        ) = self._analyze_collection_element_aliases(
+            path=path,
+            extraction=extraction,
+        )
+
+        if collection_status == FeasibilityStatus.INFEASIBLE:
+            return PathFeasibilityResult(
+                status=FeasibilityStatus.INFEASIBLE,
+                constraints=extraction.constraints,
+                conflicts=collection_conflicts,
+                unsupported_conditions=tuple(
+                    self._deduplicate_strings(
+                        [
+                            *extraction.unsupported_conditions,
+                            *local_while_unsupported,
+                            *sequential_unsupported,
+                        ]
+                    )
+                ),
+                alternative_groups=extraction.alternative_groups,
+                relational_constraints=extraction.relational_constraints,
+            )
+
         mandatory_result = (
             self.analyze_constraints(
-                extraction.constraints
+                global_constraints
             )
         )
 
@@ -956,10 +1042,10 @@ class PathFeasibilityAnalyzer:
             alternative_limit_reached,
         ) = self._analyze_alternative_groups(
             mandatory_constraints=(
-                extraction.constraints
+                global_constraints
             ),
             alternative_groups=(
-                extraction.alternative_groups
+                global_alternative_groups
             ),
         )
 
@@ -968,10 +1054,10 @@ class PathFeasibilityAnalyzer:
             relational_conflicts,
         ) = self._analyze_relational_constraints(
             literal_constraints=(
-                extraction.constraints
+                global_constraints
             ),
             relational_constraints=(
-                extraction.relational_constraints
+                global_relational_constraints
             ),
             data_flow_result=data_flow_result,
             path_state=path_state,
@@ -1000,6 +1086,7 @@ class PathFeasibilityAnalyzer:
             *extraction.unsupported_conditions,
             *local_while_unsupported,
             *exception_unsupported,
+            *sequential_unsupported,
         ]
 
         if alternative_limit_reached:
@@ -1044,6 +1131,8 @@ class PathFeasibilityAnalyzer:
             == FeasibilityStatus.UNKNOWN
             or relational_status
             == FeasibilityStatus.UNKNOWN
+            or sequential_status
+            == FeasibilityStatus.UNKNOWN
         ):
             return PathFeasibilityResult(
                 status=(
@@ -1080,6 +1169,386 @@ class PathFeasibilityAnalyzer:
                 extraction.relational_constraints
             ),
         )
+
+    @staticmethod
+    def _sequential_local_variable_names(
+        path_state: PathSymbolicState | None,
+    ) -> set[str]:
+        """Sıralı snapshot modelinin sahip olduğu yerel adları döndürür."""
+        if path_state is None:
+            return set()
+
+        return {
+            variable.variable_name
+            for step_state in path_state.step_states
+            for variable in step_state.variables
+        } | {
+            variable_name
+            for step_state in path_state.step_states
+            for variable_name in step_state.unsupported_variables
+        }
+
+    def _analyze_sequential_local_state(
+        self,
+        *,
+        path: ExecutionPath,
+        path_state: PathSymbolicState | None,
+        persistent_constraints: tuple[PathConstraint, ...],
+    ) -> tuple[
+        FeasibilityStatus,
+        tuple[str, ...],
+        tuple[str, ...],
+    ]:
+        """
+        Condition'ları çalıştıkları andaki yerel state ile değerlendirir.
+
+        Snapshot'lar ``path.steps`` sırasına bağlıdır; böylece aynı update
+        düğümünün her ziyareti yalnız bir kez uygulanır ve farklı condition
+        zamanları tek bir global değişken domain'inde birleştirilmez.
+        """
+        if path_state is None or not path_state.step_states:
+            return FeasibilityStatus.FEASIBLE, (), ()
+
+        conflicts: list[str] = []
+        unsupported_conditions: list[str] = []
+
+        for step_index, step in enumerate(path.steps):
+            if (
+                step.node_type not in {"if", "while"}
+                or step.outgoing_edge_label not in {"True", "False"}
+            ):
+                continue
+
+            snapshot = path_state.state_before_step(step_index)
+            if snapshot is None:
+                continue
+
+            condition_names = self._condition_name_set(step.node_label)
+            tracked_names = {
+                variable.variable_name
+                for variable in snapshot.variables
+            }
+            unsupported_names = set(snapshot.unsupported_variables)
+
+            if condition_names & unsupported_names:
+                names = ", ".join(sorted(condition_names & unsupported_names))
+                unsupported_conditions.append(
+                    self._format_unsupported_condition(
+                        condition=step.node_label,
+                        reason=(
+                            "sıralı yerel state desteklenmeyen update "
+                            f"sonrasında belirsiz: {names}"
+                        ),
+                    )
+                )
+                continue
+
+            relevant_names = condition_names & tracked_names
+            if not relevant_names:
+                continue
+
+            state_constraints: list[PathConstraint] = []
+            for variable_name in sorted(relevant_names):
+                variable = snapshot.get_variable(variable_name)
+                assert variable is not None
+
+                if variable.exact_value is not None:
+                    state_constraints.append(
+                        PathConstraint(
+                            variable_name=variable_name,
+                            operator="==",
+                            value=variable.exact_value,
+                        )
+                    )
+                    continue
+
+                if variable.lower_bound is not None:
+                    state_constraints.append(
+                        PathConstraint(
+                            variable_name=variable_name,
+                            operator=">=",
+                            value=variable.lower_bound,
+                        )
+                    )
+                if variable.upper_bound is not None:
+                    state_constraints.append(
+                        PathConstraint(
+                            variable_name=variable_name,
+                            operator="<=",
+                            value=variable.upper_bound,
+                        )
+                    )
+
+            relation = self._parse_relational_condition(
+                condition=step.node_label,
+                condition_is_true=(step.outgoing_edge_label == "True"),
+            )
+            if relation is not None:
+                domains = self._build_domains(
+                    tuple([*persistent_constraints, *state_constraints])
+                )
+                truth_value = self._evaluate_relational_truth(
+                    relation=relation,
+                    domains=domains,
+                )
+                if truth_value is False:
+                    conflicts.append(
+                        f"path step {step_index}: "
+                        + self._format_relational_false_conflict(relation)
+                    )
+                elif truth_value is None:
+                    unsupported_conditions.append(
+                        self._format_unsupported_condition(
+                            condition=step.node_label,
+                            reason="sıralı yerel relational koşul çözülemedi",
+                        )
+                    )
+                continue
+
+            clauses, unsupported = self._parse_condition_clauses(
+                condition=step.node_label,
+                condition_is_true=(step.outgoing_edge_label == "True"),
+            )
+            if unsupported:
+                unsupported_conditions.extend(
+                    self._format_unsupported_condition(
+                        condition=condition,
+                        reason=f"sıralı yerel state: {reason}",
+                    )
+                    for condition, reason in unsupported
+                )
+                continue
+
+            clause_conflicts: list[tuple[str, ...]] = []
+            for clause in clauses:
+                combined = tuple(
+                    self._deduplicate_constraints(
+                        [
+                            *persistent_constraints,
+                            *state_constraints,
+                            *clause,
+                        ]
+                    )
+                )
+                current_conflicts = self._find_conflicts(combined)
+                if not current_conflicts:
+                    break
+                clause_conflicts.append(current_conflicts)
+            else:
+                conflicts.extend(
+                    f"path step {step_index}: {conflict}"
+                    for current_conflicts in clause_conflicts
+                    for conflict in current_conflicts
+                )
+
+        if conflicts:
+            return (
+                FeasibilityStatus.INFEASIBLE,
+                tuple(self._deduplicate_strings(conflicts)),
+                tuple(self._deduplicate_strings(unsupported_conditions)),
+            )
+
+        if unsupported_conditions:
+            return (
+                FeasibilityStatus.UNKNOWN,
+                (),
+                tuple(self._deduplicate_strings(unsupported_conditions)),
+            )
+
+        return FeasibilityStatus.FEASIBLE, (), ()
+
+    def _analyze_collection_element_aliases(
+        self,
+        *,
+        path: ExecutionPath,
+        extraction: PathConstraintExtractionResult,
+    ) -> tuple[FeasibilityStatus, tuple[str, ...]]:
+        """
+        ``local = collection[index]`` ile aynı koleksiyonun ``for``
+        iterasyonlarını ortak eleman domain'inde değerlendirir.
+
+        Yalnızca sabit, negatif olmayan indeksler ve basit isimlerden oluşan
+        binding'ler kullanılır. Bir yerel ad veya CFG loop düğümü path içinde
+        farklı binding'lere sahipse güvenli tarafta kalınarak eşleme atlanır.
+        """
+        alias_candidates: dict[str, set[tuple[str, int]]] = {}
+        loop_candidates: dict[int, set[tuple[str, str]]] = {}
+
+        for step in path.steps:
+            alias = self._extract_collection_alias(step)
+            if alias is not None:
+                local_name, collection_name, index_value = alias
+                alias_candidates.setdefault(local_name, set()).add(
+                    (collection_name, index_value)
+                )
+
+            loop_binding = self._extract_collection_loop_binding(step)
+            if loop_binding is not None:
+                loop_candidates.setdefault(step.node_id, set()).add(
+                    loop_binding
+                )
+
+        aliases = {
+            local_name: next(iter(bindings))
+            for local_name, bindings in alias_candidates.items()
+            if len(bindings) == 1
+        }
+        loop_bindings = {
+            node_id: next(iter(bindings))
+            for node_id, bindings in loop_candidates.items()
+            if len(bindings) == 1
+        }
+
+        if not aliases:
+            return FeasibilityStatus.FEASIBLE, ()
+
+        element_constraints: list[PathConstraint] = []
+        for constraint in extraction.constraints:
+            binding = aliases.get(constraint.variable_name)
+            if binding is None:
+                continue
+            collection_name, index_value = binding
+            element_constraints.append(
+                PathConstraint(
+                    variable_name=f"{collection_name}[{index_value}]",
+                    operator=constraint.operator,
+                    value=constraint.value,
+                )
+            )
+
+        for group in extraction.iteration_constraint_groups:
+            loop_binding = loop_bindings.get(group.loop_node_id)
+            if loop_binding is None:
+                continue
+            target_name, collection_name = loop_binding
+            if target_name != group.target_name:
+                continue
+            element_constraints.extend(
+                PathConstraint(
+                    variable_name=(
+                        f"{collection_name}[{group.iteration_index}]"
+                    ),
+                    operator=constraint.operator,
+                    value=constraint.value,
+                )
+                for constraint in group.constraints
+            )
+
+        conflicts = list(
+            self._find_conflicts(tuple(element_constraints))
+        )
+
+        required_last_indices: dict[str, int] = {}
+        for collection_name, index_value in aliases.values():
+            required_last_indices[collection_name] = max(
+                required_last_indices.get(collection_name, -1),
+                index_value,
+            )
+
+        iteration_counts: dict[int, int] = {}
+        for step in path.steps:
+            loop_binding = loop_bindings.get(step.node_id)
+            if loop_binding is None:
+                continue
+            _, collection_name = loop_binding
+
+            if step.outgoing_edge_label == "Iterate":
+                iteration_counts[step.node_id] = (
+                    iteration_counts.get(step.node_id, 0) + 1
+                )
+                continue
+
+            if step.outgoing_edge_label != "Complete":
+                continue
+
+            required_last_index = required_last_indices.get(collection_name)
+            iteration_count = iteration_counts.pop(step.node_id, 0)
+            if (
+                required_last_index is not None
+                and iteration_count <= required_last_index
+            ):
+                conflicts.append(
+                    f"{collection_name}: başarılı indeks erişimi "
+                    f"{collection_name}[{required_last_index}] ile "
+                    f"{iteration_count} iterasyonlu tamamlanmış for akışı "
+                    "çelişiyor."
+                )
+
+        if not conflicts:
+            return FeasibilityStatus.FEASIBLE, ()
+
+        return (
+            FeasibilityStatus.INFEASIBLE,
+            tuple(self._deduplicate_strings(conflicts)),
+        )
+
+    @staticmethod
+    def _extract_collection_alias(
+        step: PathStep,
+    ) -> tuple[str, str, int] | None:
+        if step.node_type not in {"Assign", "AnnAssign"}:
+            return None
+
+        try:
+            statement = ast.parse(step.node_label).body[0]
+        except (SyntaxError, IndexError):
+            return None
+
+        if isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1:
+                return None
+            target = statement.targets[0]
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target = statement.target
+            value = statement.value
+        else:
+            return None
+
+        if (
+            not isinstance(target, ast.Name)
+            or not isinstance(value, ast.Subscript)
+            or not isinstance(value.value, ast.Name)
+        ):
+            return None
+
+        try:
+            index_value = ast.literal_eval(value.slice)
+        except (ValueError, TypeError):
+            return None
+
+        if (
+            isinstance(index_value, bool)
+            or not isinstance(index_value, int)
+            or index_value < 0
+        ):
+            return None
+
+        return target.id, value.value.id, index_value
+
+    @staticmethod
+    def _extract_collection_loop_binding(
+        step: PathStep,
+    ) -> tuple[str, str] | None:
+        if step.node_type != "for":
+            return None
+
+        try:
+            expression = ast.parse(step.node_label, mode="eval").body
+        except SyntaxError:
+            return None
+
+        if (
+            not isinstance(expression, ast.Compare)
+            or len(expression.ops) != 1
+            or not isinstance(expression.ops[0], ast.In)
+            or not isinstance(expression.left, ast.Name)
+            or len(expression.comparators) != 1
+            or not isinstance(expression.comparators[0], ast.Name)
+        ):
+            return None
+
+        return expression.left.id, expression.comparators[0].id
 
     def _analyze_exception_paths(
         self,

@@ -4,6 +4,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from cfg.path_analyzer import ExecutionPath, PathStep
+from generator.derived_value_input_synthesizer import (
+    DerivedValueInputSynthesizer,
+    DerivedValueSynthesisError,
+)
 
 
 class UnreachablePathError(ValueError):
@@ -200,6 +204,15 @@ class PathInputGenerator:
             loop_activations=loop_activations,
             direct_values=direct_values,
         )
+
+        try:
+            DerivedValueInputSynthesizer().apply(
+                path=path,
+                parameter_names=parameter_names,
+                direct_values=direct_values,
+            )
+        except DerivedValueSynthesisError as error:
+            raise UnreachablePathError(str(error)) from error
 
         self._validate_collection_alias_constraints(
             path=path,

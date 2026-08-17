@@ -821,3 +821,73 @@ def sample():
     assert count.exact_value == 1.0
     assert count.lower_bound == 1.0
     assert count.upper_bound == 1.0
+
+
+def test_ordered_step_state_applies_repeated_updates_per_visit() -> None:
+    source = """
+def sample(items):
+    count = 0
+    for item in items:
+        count += 1
+    if count == 2:
+        return True
+    return False
+"""
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 3, 4, 3, 5, 6, 7],
+        edge_labels=[None, None, "Iterate", "Next", "Iterate", "Next",
+                     "Complete", "True", None],
+        node_labels=[
+            "START", "count = 0", "item in items", "count += 1",
+            "item in items", "count += 1", "item in items", "count == 2",
+            "return True", "END",
+        ],
+        node_types=[
+            "start", "Assign", "for", "AugAssign", "for", "AugAssign",
+            "for", "if", "return", "end",
+        ],
+        line_numbers=[None, 3, 4, 5, 4, 5, 4, 6, 7, None],
+    )
+
+    result = PathStateAnalyzer().analyze_source(
+        source=source, function_name="sample", path=path
+    )
+    condition_state = result.state_before_step(7)
+
+    assert condition_state is not None
+    count = condition_state.get_variable("count")
+    assert count is not None
+    assert count.exact_value == 2.0
+
+
+def test_ordered_step_state_marks_unsupported_tracked_update() -> None:
+    source = """
+def sample(items, delta):
+    count = 0
+    for item in items:
+        count += delta
+    if count == 0:
+        return True
+    return False
+"""
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 3, 5, 6, 7],
+        edge_labels=[None, None, "Iterate", "Next", "Complete", "True", None],
+        node_labels=[
+            "START", "count = 0", "item in items", "count += delta",
+            "item in items", "count == 0", "return True", "END",
+        ],
+        node_types=[
+            "start", "Assign", "for", "AugAssign", "for", "if", "return", "end",
+        ],
+        line_numbers=[None, 3, 4, 5, 4, 6, 7, None],
+    )
+
+    result = PathStateAnalyzer().analyze_source(
+        source=source, function_name="sample", path=path
+    )
+    condition_state = result.state_before_step(5)
+
+    assert condition_state is not None
+    assert condition_state.get_variable("count") is None
+    assert condition_state.unsupported_variables == ("count",)
