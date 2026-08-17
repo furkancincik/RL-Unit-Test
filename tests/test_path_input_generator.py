@@ -2854,3 +2854,152 @@ def test_extract_expected_result_formats_replayed_loop_total() -> None:
     )
 
     assert result == "Total: 7.00"
+
+
+@pytest.mark.parametrize(
+    ("return_expression", "parameter_names", "candidate_values", "expected"),
+    [
+        ("round(value)", ("value",), {"value": 12.5}, 12),
+        ("round(value, 2)", ("value",), {"value": 12.345}, 12.35),
+        ("round(value, 2)", ("value",), {"value": -12.345}, -12.35),
+        ("round(value, -1)", ("value",), {"value": 125}, 120),
+        ("round(value, None)", ("value",), {"value": 12.5}, 12),
+        (
+            "round(current / limit * 100, 2)",
+            ("current", "limit"),
+            {"current": 1, "limit": 3},
+            33.33,
+        ),
+        (
+            "round((value + 1) * (value - 1) / 3, 2)",
+            ("value",),
+            {"value": 4},
+            5.0,
+        ),
+    ],
+)
+def test_generate_replays_allowlisted_round_calls(
+    return_expression: str,
+    parameter_names: tuple[str, ...],
+    candidate_values: dict[str, object],
+    expected: object,
+) -> None:
+    path = create_execution_path(
+        node_labels=["START", f"return {return_expression}", "END"],
+        node_types=["start", "return", "end"],
+        edge_labels=[None, None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=parameter_names,
+        candidate_values=candidate_values,
+    )
+
+    assert result.expected_result == expected
+
+
+def test_generate_replays_round_from_local_arithmetic_assignment() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "percentage = current / limit * 100",
+            "return round(percentage, 2)",
+            "END",
+        ],
+        node_types=["start", "Assign", "return", "end"],
+        edge_labels=[None, None, None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("current", "limit"),
+        candidate_values={"current": 2, "limit": 3},
+    )
+
+    assert result.expected_result == 66.67
+
+
+@pytest.mark.parametrize(
+    "return_expression",
+    [
+        "round()",
+        "round(value, 2, 3)",
+        "unknown(value)",
+        "value.round()",
+        "round(value, ndigits=2)",
+        "round(*values)",
+        "round(unknown(value), 2)",
+        "round(True)",
+        "round(value, True)",
+    ],
+)
+def test_generate_rejects_non_allowlisted_call_shapes(
+    return_expression: str,
+) -> None:
+    path = create_execution_path(
+        node_labels=["START", f"return {return_expression}", "END"],
+        node_types=["start", "return", "end"],
+        edge_labels=[None, None],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Dinamik return ifadesi güvenli biçimde hesaplanamadı",
+    ):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("value", "values"),
+            candidate_values={"value": 12.345, "values": [12.345]},
+        )
+
+
+def test_generate_rejects_round_shadowed_by_parameter() -> None:
+    path = create_execution_path(
+        node_labels=["START", "return round(value)", "END"],
+        node_types=["start", "return", "end"],
+        edge_labels=[None, None],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Dinamik return ifadesi güvenli biçimde hesaplanamadı",
+    ):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("round", "value"),
+            candidate_values={"round": 1, "value": 12.5},
+        )
+
+
+@pytest.mark.parametrize(
+    ("shadow_node_label", "shadow_node_type"),
+    [
+        ("round = 1", "Assign"),
+        ("from helpers import round", "ImportFrom"),
+    ],
+)
+def test_generate_rejects_round_shadowed_in_function_path(
+    shadow_node_label: str,
+    shadow_node_type: str,
+) -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            shadow_node_label,
+            "return round(value)",
+            "END",
+        ],
+        node_types=["start", shadow_node_type, "return", "end"],
+        edge_labels=[None, None, None],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Dinamik return ifadesi güvenli biçimde hesaplanamadı",
+    ):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("value",),
+            candidate_values={"value": 12.5},
+        )

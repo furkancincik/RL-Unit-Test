@@ -14,6 +14,7 @@ from generator.path_input_generator import (
     PathInputGenerator,
     UnreachablePathError,
 )
+from generator.pytest_generator import PytestGenerator
 from generator.scenario_generator import Scenario, ScenarioGenerator
 
 SOURCE_FILE = "datasets/sample_code.py"
@@ -766,3 +767,93 @@ def test_ultracomplex_derived_value_lines_have_concrete_scenarios() -> None:
             accepted_lines.update(target_lines)
 
     assert accepted_lines == {101, 107}
+
+
+def test_real_cfg_round_scenario_matches_execution_and_pytest_assertion(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "round_usage.py"
+    source_file.write_text(
+        """
+def usage(current: int, limit: int) -> float:
+    if current < 0:
+        return 0.0
+    if limit <= 0:
+        return 0.0
+    percentage = current / limit * 100
+    return round(percentage, 2)
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    scenarios = ScenarioGenerator().generate(
+        function_name="usage",
+        paths=paths,
+        scores=scores,
+        parameter_names=tuple(function.parameters),
+        parameter_types=function.parameter_types,
+    )
+    dynamic_path_indices = {
+        index
+        for index, path in enumerate(paths, start=1)
+        if any("return round(" in step.node_label for step in path.steps)
+    }
+    scenario = next(
+        scenario
+        for scenario in scenarios
+        if scenario.path_index in dynamic_path_indices
+    )
+    target = runpy.run_path(str(source_file))["usage"]
+
+    actual = target(**scenario.keyword_argument_dict)
+    generated_pytest = PytestGenerator().generate(
+        module_path="round_usage",
+        function_name="usage",
+        scenarios=[scenario],
+    )
+
+    assert actual == scenario.expected_result
+    assert f"assert result == {scenario.expected_result!r}" in generated_pytest
+
+
+def test_robustness_category_usage_round_scenarios_match_execution() -> None:
+    source_file = Path("datasets/sample_robustness_code.py")
+    function = next(
+        function
+        for function in PythonAnalyzer().analyze_file(source_file).functions
+        if function.name == "calculate_category_usage"
+    )
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == "calculate_category_usage"
+    )
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    scenarios = ScenarioGenerator().generate(
+        function_name=function.name,
+        paths=paths,
+        scores=scores,
+        parameter_names=tuple(function.parameters),
+        parameter_types=function.parameter_types,
+    )
+    dynamic_path_indices = {
+        index
+        for index, path in enumerate(paths, start=1)
+        if any("return round(" in step.node_label for step in path.steps)
+    }
+    target = runpy.run_path(str(source_file))["calculate_category_usage"]
+    dynamic_scenarios = [
+        scenario
+        for scenario in scenarios
+        if scenario.path_index in dynamic_path_indices
+    ]
+
+    assert dynamic_scenarios
+    assert all(
+        target(**scenario.keyword_argument_dict) == scenario.expected_result
+        for scenario in dynamic_scenarios
+    )

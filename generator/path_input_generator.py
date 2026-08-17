@@ -10,6 +10,9 @@ from generator.derived_value_input_synthesizer import (
 )
 
 
+_SHADOWED_SAFE_CALL = object()
+
+
 class UnreachablePathError(ValueError):
     """Bir yürütme yolundaki kısıtlar çelişkili olduğunda oluşur."""
 
@@ -3059,6 +3062,13 @@ class PathInputGenerator:
                 )
                 continue
 
+            if step.node_type in {"Import", "ImportFrom"}:
+                cls._apply_import_shadowing(
+                    statement_text=step.node_label,
+                    environment=environment,
+                )
+                continue
+
             if step.node_type not in {
                 "Assign",
                 "AnnAssign",
@@ -3080,6 +3090,39 @@ class PathInputGenerator:
                 statement=statement,
                 environment=environment,
             )
+
+    @staticmethod
+    def _apply_import_shadowing(
+        *,
+        statement_text: str,
+        environment: dict[str, Any],
+    ) -> None:
+        """Import ile bağlanan isimleri safe-call shadowing ortamına ekler."""
+        try:
+            statement = ast.parse(statement_text).body[0]
+        except (SyntaxError, IndexError) as error:
+            raise ValueError(
+                f"Import ifadesi çözümlenemedi: {statement_text}"
+            ) from error
+
+        if isinstance(statement, ast.Import):
+            bound_names = (
+                alias.asname or alias.name.split(".", maxsplit=1)[0]
+                for alias in statement.names
+            )
+        elif isinstance(statement, ast.ImportFrom):
+            bound_names = (
+                alias.asname or alias.name
+                for alias in statement.names
+                if alias.name != "*"
+            )
+        else:
+            raise ValueError(
+                f"Geçersiz import ifadesi: {statement_text}"
+            )
+
+        for bound_name in bound_names:
+            environment[bound_name] = _SHADOWED_SAFE_CALL
 
     @classmethod
     def _bind_for_iteration_target(
@@ -3440,6 +3483,12 @@ class PathInputGenerator:
             )
             return collection[key]
 
+        if isinstance(expression, ast.Call):
+            return cls._evaluate_safe_call(
+                expression=expression,
+                environment=environment,
+            )
+
         if isinstance(expression, ast.JoinedStr):
             return "".join(
                 cls._evaluate_joined_string_part(
@@ -3459,6 +3508,84 @@ class PathInputGenerator:
             "Desteklenmeyen dinamik expression türü: "
             f"{type(expression).__name__}"
         )
+
+    @classmethod
+    def _evaluate_safe_call(
+        cls,
+        *,
+        expression: ast.Call,
+        environment: dict[str, Any],
+    ) -> int | float:
+        """Allowlist'teki yan etkisiz built-in çağrıyı değerlendirir."""
+        if not (
+            isinstance(expression.func, ast.Name)
+            and expression.func.id == "round"
+        ):
+            raise ValueError(
+                "Desteklenmeyen güvenli çağrı hedefi."
+            )
+
+        if "round" in environment:
+            raise ValueError(
+                "Shadow edilmiş round built-in olarak çağrılamaz."
+            )
+
+        if expression.keywords:
+            raise ValueError(
+                "Güvenli round çağrısında keyword desteklenmiyor."
+            )
+
+        if len(expression.args) not in {1, 2}:
+            raise ValueError(
+                "Güvenli round çağrısı bir veya iki argüman almalıdır."
+            )
+
+        if any(isinstance(argument, ast.Starred) for argument in expression.args):
+            raise ValueError(
+                "Güvenli round çağrısında starred argüman desteklenmiyor."
+            )
+
+        number = cls._evaluate_safe_expression(
+            expression=expression.args[0],
+            environment=environment,
+        )
+
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            raise ValueError(
+                "Güvenli round çağrısının number argümanı sayısal olmalıdır."
+            )
+
+        if len(expression.args) == 1:
+            try:
+                return round(number)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError(
+                    "Güvenli round çağrısı hesaplanamadı."
+                ) from error
+
+        ndigits = cls._evaluate_safe_expression(
+            expression=expression.args[1],
+            environment=environment,
+        )
+
+        if (
+            ndigits is not None
+            and (
+                isinstance(ndigits, bool)
+                or not isinstance(ndigits, int)
+            )
+        ):
+            raise ValueError(
+                "Güvenli round çağrısının ndigits argümanı "
+                "int veya None olmalıdır."
+            )
+
+        try:
+            return round(number, ndigits)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "Güvenli round çağrısı hesaplanamadı."
+            ) from error
 
     @classmethod
     def _evaluate_joined_string_part(
