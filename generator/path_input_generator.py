@@ -17,6 +17,26 @@ class UnreachablePathError(ValueError):
     """Bir yürütme yolundaki kısıtlar çelişkili olduğunda oluşur."""
 
 
+class UnsupportedExpectedResultError(ValueError):
+    """Beklenen sonuç güvenli replay allowlist'iyle çözülemediğinde oluşur."""
+
+    category = "UNSUPPORTED_EXPECTED_RESULT"
+
+    def __init__(
+        self,
+        *,
+        return_expression: str,
+        detail: str,
+    ) -> None:
+        self.return_expression = return_expression
+        self.detail = detail
+        super().__init__(
+            "Dinamik return ifadesi güvenli biçimde "
+            "hesaplanamadı: "
+            f"{return_expression}. Ayrıntı: {detail}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class GeneratedTestInput:
     """
@@ -2984,9 +3004,9 @@ class PathInputGenerator:
                 return_step.node_label,
             ).body[0]
         except SyntaxError as error:
-            raise ValueError(
-                "Return ifadesi çözümlenemedi: "
-                f"{return_step.node_label}"
+            raise UnsupportedExpectedResultError(
+                return_expression=return_step.node_label,
+                detail="Return ifadesi çözümlenemedi.",
             ) from error
 
         if not isinstance(statement, ast.Return):
@@ -3011,22 +3031,21 @@ class PathInputGenerator:
             keyword_arguments
         )
 
-        cls._apply_path_assignments(
-            path=path,
-            return_node_id=return_step.node_id,
-            environment=environment,
-        )
-
         try:
+            cls._apply_path_assignments(
+                path=path,
+                return_node_id=return_step.node_id,
+                environment=environment,
+            )
+
             return cls._evaluate_safe_expression(
                 expression=statement.value,
                 environment=environment,
             )
         except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
-            raise ValueError(
-                "Dinamik return ifadesi güvenli biçimde "
-                "hesaplanamadı: "
-                f"{return_step.node_label}"
+            raise UnsupportedExpectedResultError(
+                return_expression=return_step.node_label,
+                detail=str(error) or type(error).__name__,
             ) from error
 
     @classmethod

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from cfg.path_analyzer import ExecutionPath
@@ -9,7 +10,32 @@ from generator.path_input_generator import (
     GeneratedTestInput,
     PathInputGenerator,
     UnreachablePathError,
+    UnsupportedExpectedResultError,
 )
+
+
+class ScenarioRejectionStage(str, Enum):
+    """Scenario üretiminde domain rejection oluşan aşama."""
+
+    PATH_INPUT_GENERATION = "PATH_INPUT_GENERATION"
+
+
+class ScenarioRejectionCategory(str, Enum):
+    """Beklenen ve izole edilebilir scenario rejection kategorisi."""
+
+    UNREACHABLE_INPUT = "UNREACHABLE_INPUT"
+    UNSUPPORTED_EXPECTED_RESULT = "UNSUPPORTED_EXPECTED_RESULT"
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioRejection:
+    """Tek bir path için immutable scenario rejection kaydı."""
+
+    path_index: int
+    stage: ScenarioRejectionStage
+    category: ScenarioRejectionCategory
+    message: str
+    exception_type: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +126,9 @@ class ScenarioGenerator:
     DQM sonuçlarından önceliklendirilmiş ve çalıştırılabilir
     test senaryoları üretir.
 
-    Mantıksal olarak çelişkili kısıtlar içeren yürütme yolları
-    ulaşılamaz kabul edilir ve senaryo listesine eklenmez.
+    Bilinen input-domain veya expected-result replay hatası taşıyan
+    yürütme yolları yapılandırılmış rejection olarak kaydedilir ve
+    senaryo listesine eklenmez.
     """
 
     def __init__(
@@ -121,20 +148,28 @@ class ScenarioGenerator:
             if path_input_generator is not None
             else PathInputGenerator()
         )
-        self._skipped_path_indices: tuple[int, ...] = ()
+        self._rejections: tuple[ScenarioRejection, ...] = ()
+
+    @property
+    def rejections(self) -> tuple[ScenarioRejection, ...]:
+        """Son generate çağrısında izole edilen path kayıtlarını döndürür."""
+        return self._rejections
 
     @property
     def skipped_path_indices(self) -> tuple[int, ...]:
         """
-        Son generate çağrısında ulaşılamaz olduğu için atlanan
+        Son generate çağrısında bilinen domain hatası nedeniyle atlanan
         bir tabanlı yürütme yolu numaralarını döndürür.
         """
-        return self._skipped_path_indices
+        return tuple(
+            rejection.path_index
+            for rejection in self._rejections
+        )
 
     @property
     def skipped_path_count(self) -> int:
         """Son generate çağrısında atlanan yol sayısını döndürür."""
-        return len(self._skipped_path_indices)
+        return len(self._rejections)
 
     def generate(
         self,
@@ -152,10 +187,9 @@ class ScenarioGenerator:
         Bir fonksiyona ait yürütme yollarını test senaryolarına
         dönüştürür.
 
-        Ulaşılamaz yolların kısıtları PathInputGenerator tarafından
-        UnreachablePathError ile bildirilir. Bu yollar atlanır ve
-        kalan senaryoların priority_rank değerleri kesintisiz biçimde
-        yeniden numaralandırılır.
+        Ulaşılamaz input veya desteklenmeyen expected-result replay
+        domain hatası taşıyan yollar atlanır. Kalan senaryoların
+        priority_rank değerleri kesintisiz biçimde yeniden numaralandırılır.
 
         Args:
             function_name:
@@ -192,6 +226,8 @@ class ScenarioGenerator:
                 Fonksiyon adı boşsa, parametre adı geçersizse veya
                 DQM sonucu geçersiz bir yürütme yolunu gösteriyorsa.
         """
+        self._rejections = ()
+
         normalized_function_name = self._normalize_function_name(
             function_name
         )
@@ -211,7 +247,7 @@ class ScenarioGenerator:
         )
 
         scenarios: list[Scenario] = []
-        skipped_path_indices: list[int] = []
+        rejections: list[ScenarioRejection] = []
 
         for score in scores:
             path = self._get_path(
@@ -235,9 +271,27 @@ class ScenarioGenerator:
                         ),
                     )
                 )
-            except UnreachablePathError:
-                skipped_path_indices.append(
-                    score.path_index
+            except UnreachablePathError as error:
+                rejections.append(
+                    self._create_rejection(
+                        path_index=score.path_index,
+                        category=(
+                            ScenarioRejectionCategory.UNREACHABLE_INPUT
+                        ),
+                        error=error,
+                    )
+                )
+                continue
+            except UnsupportedExpectedResultError as error:
+                rejections.append(
+                    self._create_rejection(
+                        path_index=score.path_index,
+                        category=(
+                            ScenarioRejectionCategory
+                            .UNSUPPORTED_EXPECTED_RESULT
+                        ),
+                        error=error,
+                    )
                 )
                 continue
 
@@ -253,11 +307,30 @@ class ScenarioGenerator:
 
             scenarios.append(scenario)
 
-        self._skipped_path_indices = tuple(
-            skipped_path_indices
-        )
+        self._rejections = tuple(rejections)
 
         return scenarios
+
+    @staticmethod
+    def _create_rejection(
+        *,
+        path_index: int,
+        category: ScenarioRejectionCategory,
+        error: ValueError,
+    ) -> ScenarioRejection:
+        """Bilinen bir domain error'dan yapılandırılmış kayıt üretir."""
+        message = str(error).strip()
+
+        if not message:
+            message = type(error).__name__
+
+        return ScenarioRejection(
+            path_index=path_index,
+            stage=ScenarioRejectionStage.PATH_INPUT_GENERATION,
+            category=category,
+            message=message,
+            exception_type=type(error).__name__,
+        )
 
     def _create_scenario(
         self,

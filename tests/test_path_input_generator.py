@@ -2954,6 +2954,24 @@ def test_generate_rejects_non_allowlisted_call_shapes(
         )
 
 
+def test_unsupported_expected_result_uses_specific_domain_error() -> None:
+    path = create_execution_path(
+        node_labels=["START", "return unknown_transform(value)", "END"],
+        node_types=["start", "return", "end"],
+        edge_labels=[None, None],
+    )
+
+    with pytest.raises(ValueError) as captured:
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("value",),
+            candidate_values={"value": 3},
+        )
+
+    assert type(captured.value).__name__ == "UnsupportedExpectedResultError"
+    assert "return unknown_transform(value)" in str(captured.value)
+
+
 def test_generate_rejects_round_shadowed_by_parameter() -> None:
     path = create_execution_path(
         node_labels=["START", "return round(value)", "END"],

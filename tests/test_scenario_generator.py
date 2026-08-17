@@ -1,5 +1,6 @@
 import re
 import runpy
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -13,9 +14,15 @@ from generator.path_input_generator import (
     GeneratedTestInput,
     PathInputGenerator,
     UnreachablePathError,
+    UnsupportedExpectedResultError,
 )
 from generator.pytest_generator import PytestGenerator
-from generator.scenario_generator import Scenario, ScenarioGenerator
+from generator.scenario_generator import (
+    Scenario,
+    ScenarioGenerator,
+    ScenarioRejectionCategory,
+    ScenarioRejectionStage,
+)
 
 SOURCE_FILE = "datasets/sample_code.py"
 
@@ -384,6 +391,243 @@ def test_generate_propagates_non_unreachable_path_errors() -> None:
             scores=[create_mock_score(1, 100.0)],
             parameter_names=("score",),
         )
+
+
+def test_generate_isolates_unsupported_expected_result_path() -> None:
+    paths = [
+        ExecutionPath(
+            node_ids=[1, 2, 3],
+            edge_labels=[None, None],
+            node_labels=[
+                "START",
+                "return unknown_transform(value)",
+                "END",
+            ],
+            node_types=["start", "return", "end"],
+            line_numbers=[1, 2, 3],
+        ),
+        create_mock_path(2),
+    ]
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=paths,
+        scores=[
+            create_mock_score(1, 100.0),
+            create_mock_score(2, 90.0),
+        ],
+        parameter_names=("value",),
+        candidate_values_by_path={1: {"value": 3}},
+    )
+
+    assert [scenario.path_index for scenario in scenarios] == [2]
+    assert generator.skipped_path_indices == (1,)
+    assert len(generator.rejections) == 1
+    assert generator.rejections[0].path_index == 1
+
+
+def _unsupported_expected_result_error(
+    label: str = "return unknown_transform(value)",
+) -> UnsupportedExpectedResultError:
+    return UnsupportedExpectedResultError(
+        return_expression=label,
+        detail="Desteklenmeyen güvenli çağrı hedefi.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("side_effects", "expected_paths", "rejected_path"),
+    [
+        (
+            [
+                _unsupported_expected_result_error(),
+                GeneratedTestInput((), expected_result=2),
+                GeneratedTestInput((), expected_result=3),
+            ],
+            [2, 3],
+            1,
+        ),
+        (
+            [
+                GeneratedTestInput((), expected_result=1),
+                _unsupported_expected_result_error(),
+                GeneratedTestInput((), expected_result=3),
+            ],
+            [1, 3],
+            2,
+        ),
+        (
+            [
+                GeneratedTestInput((), expected_result=1),
+                GeneratedTestInput((), expected_result=2),
+                _unsupported_expected_result_error(),
+            ],
+            [1, 2],
+            3,
+        ),
+    ],
+)
+def test_generate_isolates_unsupported_path_at_any_position(
+    side_effects: list[object],
+    expected_paths: list[int],
+    rejected_path: int,
+) -> None:
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = side_effects
+    generator = ScenarioGenerator(path_input_generator)
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=[create_mock_path(index) for index in range(1, 4)],
+        scores=[create_mock_score(index, 100 - index) for index in range(1, 4)],
+    )
+
+    assert [scenario.path_index for scenario in scenarios] == expected_paths
+    assert generator.skipped_path_indices == (rejected_path,)
+    rejection = generator.rejections[0]
+    assert rejection.path_index == rejected_path
+    assert rejection.stage is ScenarioRejectionStage.PATH_INPUT_GENERATION
+    assert (
+        rejection.category
+        is ScenarioRejectionCategory.UNSUPPORTED_EXPECTED_RESULT
+    )
+    assert rejection.message
+    assert rejection.exception_type == "UnsupportedExpectedResultError"
+
+
+def test_generate_records_multiple_domain_rejection_categories() -> None:
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = [
+        _unsupported_expected_result_error(),
+        UnreachablePathError("Çelişkili input kısıtları."),
+        _unsupported_expected_result_error("return other_unknown(value)"),
+    ]
+    generator = ScenarioGenerator(path_input_generator)
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=[create_mock_path(index) for index in range(1, 4)],
+        scores=[create_mock_score(index, 100 - index) for index in range(1, 4)],
+    )
+
+    assert scenarios == []
+    assert generator.skipped_path_indices == (1, 2, 3)
+    assert tuple(rejection.path_index for rejection in generator.rejections) == (
+        1,
+        2,
+        3,
+    )
+    assert tuple(rejection.category for rejection in generator.rejections) == (
+        ScenarioRejectionCategory.UNSUPPORTED_EXPECTED_RESULT,
+        ScenarioRejectionCategory.UNREACHABLE_INPUT,
+        ScenarioRejectionCategory.UNSUPPORTED_EXPECTED_RESULT,
+    )
+
+
+@pytest.mark.parametrize(
+    "unexpected_error",
+    [
+        AssertionError("invariant"),
+        TypeError("bug"),
+        RuntimeError("unexpected"),
+    ],
+)
+def test_generate_propagates_unexpected_errors(
+    unexpected_error: Exception,
+) -> None:
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = unexpected_error
+    generator = ScenarioGenerator(path_input_generator)
+
+    with pytest.raises(type(unexpected_error), match=str(unexpected_error)):
+        generator.generate(
+            function_name="evaluate",
+            paths=[create_mock_path(1)],
+            scores=[create_mock_score(1, 100.0)],
+        )
+
+
+def test_rejection_state_is_immutable_and_resets_between_calls() -> None:
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = [
+        _unsupported_expected_result_error(),
+        GeneratedTestInput((), expected_result=1),
+    ]
+    generator = ScenarioGenerator(path_input_generator)
+    arguments = {
+        "function_name": "evaluate",
+        "paths": [create_mock_path(1)],
+        "scores": [create_mock_score(1, 100.0)],
+    }
+
+    generator.generate(**arguments)
+    rejection = generator.rejections[0]
+
+    with pytest.raises(FrozenInstanceError):
+        rejection.message = "changed"  # type: ignore[misc]
+
+    scenarios = generator.generate(**arguments)
+
+    assert len(scenarios) == 1
+    assert generator.rejections == ()
+    assert generator.skipped_path_indices == ()
+
+
+def test_safe_round_path_does_not_create_rejection() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3],
+        edge_labels=[None, None],
+        node_labels=["START", "return round(value, 2)", "END"],
+        node_types=["start", "return", "end"],
+        line_numbers=[1, 2, 3],
+    )
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=[path],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("value",),
+        candidate_values_by_path={1: {"value": 12.345}},
+    )
+
+    assert scenarios[0].expected_result == 12.35
+    assert generator.rejections == ()
+
+
+def test_real_cfg_keeps_supported_path_when_other_return_is_unsupported(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "mixed_expected_results.py"
+    source_file.write_text(
+        """
+def evaluate(value):
+    if value < 0:
+        return unknown_transform(value)
+    return value + 1
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="evaluate",
+        paths=paths,
+        scores=scores,
+        parameter_names=("value",),
+        parameter_types=function.parameter_types,
+    )
+
+    assert len(paths) == 2
+    assert len(scenarios) == 1
+    assert len(generator.rejections) == 1
+    assert scenarios[0].path_index != generator.rejections[0].path_index
+    assert scenarios[0].dqm_score == scores[scenarios[0].path_index - 1].normalized_score
 
 
 def test_generate_rejects_empty_function_name() -> None:
