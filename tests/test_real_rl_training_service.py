@@ -14,6 +14,11 @@ from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
 )
+from models.pipeline_diagnostic_result import (
+    PipelineDiagnosticResult,
+    PipelineRunStatus,
+    PipelineStage,
+)
 
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
@@ -29,6 +34,9 @@ from generator.input_candidate_generator import InputCandidateGenerator
 from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
+    ScenarioRejection,
+    ScenarioRejectionCategory,
+    ScenarioRejectionStage,
 )
 from rl.scenario_suite_coverage_transition import (
     ScenarioSuiteCoverageTransition,
@@ -680,6 +688,235 @@ def test_result_exposes_session_information(
     assert result.completed_episode_count == 1
     assert result.function_name == "calculate_score"
     assert result.module_path == "sample_code"
+
+
+@patch.object(TrainingSession, "run")
+def test_successful_run_exposes_completed_diagnostic(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert result.diagnostic.status is PipelineRunStatus.COMPLETED
+    assert result.diagnostic.last_completed_stage is PipelineStage.REPORTING
+    assert result.diagnostic.funnel.bounded_path_count == 1
+    assert result.diagnostic.funnel.final_scenario_count == 1
+    assert result.diagnostic.line_coverage_percent == 100.0
+
+
+def test_diagnostic_run_returns_partial_when_all_scenarios_rejected(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+    dependencies[8].generate.return_value = []
+
+    result = service.run_with_diagnostics(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+
+    assert isinstance(result, PipelineDiagnosticResult)
+    assert result.status is PipelineRunStatus.PARTIAL
+    assert result.stopped_stage is PipelineStage.SCENARIO_GENERATION
+    assert result.funnel.bounded_path_count == 1
+    assert result.funnel.final_scenario_count is None
+
+
+@pytest.mark.parametrize("error", (AssertionError(), TypeError(), RuntimeError()))
+def test_diagnostic_run_does_not_swallow_programming_errors(
+    error: Exception,
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+    dependencies[0].analyze_file.side_effect = error
+
+    with pytest.raises(type(error)):
+        service.run_with_diagnostics(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+
+def test_unexpected_error_diagnostic_does_not_expose_raw_message(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+    dependencies[0].analyze_file.side_effect = RuntimeError(
+        "secret input payload"
+    )
+
+    with pytest.raises(RuntimeError, match="secret input payload"):
+        service.run_with_diagnostics(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+        )
+
+    diagnostic = service.last_diagnostic_result
+    assert diagnostic is not None
+    assert diagnostic.exception_type == "RuntimeError"
+    assert diagnostic.error_message == "Beklenmeyen pipeline hatası."
+    assert "secret input payload" not in diagnostic.to_dict().values()
+
+
+@patch.object(TrainingSession, "run")
+def test_diagnostic_state_does_not_leak_between_runs(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    service, dependencies = create_service()
+    dependencies[8].generate.return_value = []
+
+    partial = service.run_with_diagnostics(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+    dependencies[8].generate.return_value = [create_scenario()]
+    completed = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert partial.status is PipelineRunStatus.PARTIAL
+    assert completed.diagnostic.status is PipelineRunStatus.COMPLETED
+    assert completed.diagnostic.error_message is None
+
+
+@patch.object(TrainingSession, "run")
+def test_diagnostic_preserves_structured_and_concrete_rejections(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    service, dependencies = create_service()
+    accepted = create_scenario()
+    rejected = Scenario(
+        scenario_id="calculate_score_scenario_002",
+        name="concrete mismatch",
+        path_index=2,
+        priority_rank=2,
+        priority_level="Medium",
+        dqm_score=25.0,
+        node_ids=(1, 2, 4),
+        edge_labels=(None, "False"),
+        contains_loop=False,
+        contains_exception=False,
+        description="Concrete mismatch",
+        keyword_arguments=(("score", 10),),
+        expected_result="Başarılı",
+    )
+    dependencies[8].generate.return_value = [accepted, rejected]
+    dependencies[8].rejections = (
+        ScenarioRejection(
+            path_index=3,
+            stage=ScenarioRejectionStage.PATH_INPUT_GENERATION,
+            category=ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS,
+            message="Güvenli özet",
+            exception_type="UnsupportedInputSynthesisError",
+        ),
+    )
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.scenario_rejection_counts == (
+        ("UNSUPPORTED_INPUT_SYNTHESIS", 1),
+    )
+    assert result.diagnostic.concrete_rejection_counts == (
+        ("EXECUTION_MISMATCH", 1),
+    )
+    assert result.diagnostic.funnel.pre_concrete_scenario_count == 2
+    assert result.diagnostic.funnel.final_scenario_count == 1
+
+
+def test_all_concrete_rejections_produce_partial_diagnostic(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+    scenario = create_scenario()
+    dependencies[8].generate.return_value = [
+        Scenario(
+            scenario_id=scenario.scenario_id,
+            name=scenario.name,
+            path_index=scenario.path_index,
+            priority_rank=scenario.priority_rank,
+            priority_level=scenario.priority_level,
+            dqm_score=scenario.dqm_score,
+            node_ids=scenario.node_ids,
+            edge_labels=scenario.edge_labels,
+            contains_loop=scenario.contains_loop,
+            contains_exception=scenario.contains_exception,
+            description=scenario.description,
+            keyword_arguments=(("score", 10),),
+            expected_result="Başarılı",
+        )
+    ]
+
+    result = service.run_with_diagnostics(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+    )
+
+    assert isinstance(result, PipelineDiagnosticResult)
+    assert result.stopped_stage is PipelineStage.CONCRETE_VALIDATION
+    assert result.funnel.concrete_validation_accepted_count == 0
+    assert result.funnel.concrete_validation_rejected_count == 1
+    assert result.funnel.final_scenario_count == 0
+
+
+@patch.object(TrainingSession, "run")
+def test_rl_failure_preserves_completed_coverage_diagnostic(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.side_effect = RuntimeError("trainer invariant")
+    service, _ = create_service()
+
+    with pytest.raises(RuntimeError, match="trainer invariant"):
+        service.run_with_diagnostics(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            episode_count=1,
+        )
+
+    diagnostic = service.last_diagnostic_result
+    assert diagnostic is not None
+    assert diagnostic.status is PipelineRunStatus.PARTIAL
+    assert diagnostic.last_completed_stage is PipelineStage.COVERAGE_MEASUREMENT
+    assert diagnostic.stopped_stage is PipelineStage.RL_TRAINING
+    assert diagnostic.line_coverage_percent == 100.0
+    assert diagnostic.funnel.rl_executed_test_count is None
 
 
 def test_run_rejects_missing_function(

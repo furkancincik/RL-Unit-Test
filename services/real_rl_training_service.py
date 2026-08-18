@@ -4,6 +4,8 @@ import copy
 import importlib.util
 import math
 import random
+import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -31,6 +33,12 @@ from models.coverage_reachability_result import (
 from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
+)
+from models.pipeline_diagnostic_result import (
+    PipelineDiagnosticResult,
+    PipelineFunnelSnapshot,
+    PipelineRunStatus,
+    PipelineStage,
 )
 from rl.coverage_environment import CoverageEnvironment
 from rl.coverage_state import CoverageState
@@ -108,6 +116,7 @@ class RealRLTrainingResult:
     reachability_result: (
         FunctionCoverageReachabilityResult | None
     ) = None
+    diagnostic: PipelineDiagnosticResult | None = None
 
     @property
     def success(self) -> bool:
@@ -166,6 +175,153 @@ class RealRLTrainingResult:
     def has_full_file_coverage(self) -> bool:
         """Dosya geneli coverage'ın tam olup olmadığını döndürür."""
         return self.file_coverage.has_full_coverage
+
+
+class _ControlledPipelineFailure(ValueError):
+    """Public diagnostic olarak döndürülebilen kontrollü domain duruşu."""
+
+
+@dataclass(slots=True)
+class _PipelineDiagnosticAccumulator:
+    """Tek bir run boyunca doğrulanmış diagnostic değerleri biriktirir."""
+
+    source_file: Path
+    function_name: str
+    started_at: float
+    current_stage: PipelineStage | None = None
+    current_stage_started_at: float | None = None
+    last_completed_stage: PipelineStage | None = None
+    stage_durations: list[tuple[PipelineStage, float]] | None = None
+    bounded_path_count: int | None = None
+    feasible_path_count: int | None = None
+    infeasible_path_count: int | None = None
+    unknown_path_count: int | None = None
+    candidate_generated_path_count: int | None = None
+    input_generation_accepted_count: int | None = None
+    input_generation_rejected_count: int | None = None
+    scenario_generation_accepted_count: int | None = None
+    scenario_generation_rejected_count: int | None = None
+    pre_concrete_scenario_count: int | None = None
+    concrete_validation_accepted_count: int | None = None
+    concrete_validation_rejected_count: int | None = None
+    final_scenario_count: int | None = None
+    rl_executed_test_count: int | None = None
+    q_table_state_count: int | None = None
+    scenario_rejection_counts: tuple[tuple[str, int], ...] = ()
+    concrete_rejection_counts: tuple[tuple[str, int], ...] = ()
+    line_coverage_percent: float | None = None
+    branch_coverage_percent: float | None = None
+    reachability_counts: tuple[tuple[str, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.stage_durations is None:
+            self.stage_durations = []
+
+    def start_stage(self, stage: PipelineStage) -> float:
+        self.current_stage = stage
+        self.current_stage_started_at = time.perf_counter()
+        return self.current_stage_started_at
+
+    def complete_stage(self, stage: PipelineStage, started_at: float) -> None:
+        duration = max(0.0, time.perf_counter() - started_at)
+        assert self.stage_durations is not None
+        self.stage_durations.append((stage, duration))
+        self.last_completed_stage = stage
+        self.current_stage = None
+        self.current_stage_started_at = None
+
+    def build(
+        self,
+        *,
+        status: PipelineRunStatus,
+        error: Exception | None = None,
+    ) -> PipelineDiagnosticResult:
+        scenario_rejections = tuple(sorted(self.scenario_rejection_counts))
+        concrete_rejections = tuple(sorted(self.concrete_rejection_counts))
+        reachability_counts = tuple(sorted(self.reachability_counts))
+        stage_durations = list(self.stage_durations or ())
+        if (
+            self.current_stage is not None
+            and self.current_stage_started_at is not None
+        ):
+            stage_durations.append(
+                (
+                    self.current_stage,
+                    max(
+                        0.0,
+                        time.perf_counter()
+                        - self.current_stage_started_at,
+                    ),
+                )
+            )
+
+        controlled_error = isinstance(error, _ControlledPipelineFailure)
+        return PipelineDiagnosticResult(
+            status=status,
+            source_file=self.source_file,
+            function_name=self.function_name,
+            last_completed_stage=self.last_completed_stage,
+            stopped_stage=(
+                self.current_stage
+                if status is not PipelineRunStatus.COMPLETED
+                else None
+            ),
+            error_category=(
+                "CONTROLLED_FAILURE"
+                if controlled_error
+                else "UNEXPECTED_FAILURE"
+                if error is not None
+                else None
+            ),
+            error_message=(
+                (str(error).strip() or type(error).__name__)
+                if controlled_error
+                else "Beklenmeyen pipeline hatası."
+                if error is not None
+                else None
+            ),
+            exception_type=(type(error).__name__ if error is not None else None),
+            total_duration_seconds=max(
+                0.0, time.perf_counter() - self.started_at
+            ),
+            stage_durations=tuple(stage_durations),
+            funnel=PipelineFunnelSnapshot(
+                bounded_path_count=self.bounded_path_count,
+                feasible_path_count=self.feasible_path_count,
+                infeasible_path_count=self.infeasible_path_count,
+                unknown_path_count=self.unknown_path_count,
+                candidate_generated_path_count=(
+                    self.candidate_generated_path_count
+                ),
+                input_generation_accepted_count=(
+                    self.input_generation_accepted_count
+                ),
+                input_generation_rejected_count=(
+                    self.input_generation_rejected_count
+                ),
+                scenario_generation_accepted_count=(
+                    self.scenario_generation_accepted_count
+                ),
+                scenario_generation_rejected_count=(
+                    self.scenario_generation_rejected_count
+                ),
+                pre_concrete_scenario_count=self.pre_concrete_scenario_count,
+                concrete_validation_accepted_count=(
+                    self.concrete_validation_accepted_count
+                ),
+                concrete_validation_rejected_count=(
+                    self.concrete_validation_rejected_count
+                ),
+                final_scenario_count=self.final_scenario_count,
+                rl_executed_test_count=self.rl_executed_test_count,
+                q_table_state_count=self.q_table_state_count,
+            ),
+            scenario_rejection_counts=scenario_rejections,
+            concrete_rejection_counts=concrete_rejections,
+            line_coverage_percent=self.line_coverage_percent,
+            branch_coverage_percent=self.branch_coverage_percent,
+            reachability_counts=reachability_counts,
+        )
 
 
 class RealRLTrainingService:
@@ -253,8 +409,86 @@ class RealRLTrainingService:
             coverage_reachability_service
             or CoverageReachabilityService()
         )
+        self._active_diagnostic_accumulator: (
+            _PipelineDiagnosticAccumulator | None
+        ) = None
+        self._last_diagnostic_result: PipelineDiagnosticResult | None = None
+
+    @property
+    def last_diagnostic_result(self) -> PipelineDiagnosticResult | None:
+        """Son run'a ait immutable diagnostic sonucu döndürür."""
+        return self._last_diagnostic_result
 
     def run(
+        self,
+        *,
+        source_file: str | Path,
+        module_path: str,
+        function_name: str,
+        output_directory: str | Path,
+        max_visits_per_node: int = 3,
+        episode_count: int = 3,
+        epsilon: float = 0.30,
+        epsilon_decay_rate: float | None = 0.95,
+        minimum_epsilon: float = 0.05,
+        learning_rate: float = 0.5,
+        discount_factor: float = 0.9,
+        random_seed: int | None = 42,
+        overwrite: bool = True,
+        timeout_seconds: float = 30.0,
+    ) -> RealRLTrainingResult:
+        """Mevcut exception davranışını koruyarak production run çalıştırır."""
+        self._active_diagnostic_accumulator = None
+        self._last_diagnostic_result = None
+
+        try:
+            result = self._run_pipeline(
+                source_file=source_file,
+                module_path=module_path,
+                function_name=function_name,
+                output_directory=output_directory,
+                max_visits_per_node=max_visits_per_node,
+                episode_count=episode_count,
+                epsilon=epsilon,
+                epsilon_decay_rate=epsilon_decay_rate,
+                minimum_epsilon=minimum_epsilon,
+                learning_rate=learning_rate,
+                discount_factor=discount_factor,
+                random_seed=random_seed,
+                overwrite=overwrite,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as error:
+            accumulator = self._active_diagnostic_accumulator
+            if accumulator is not None:
+                self._last_diagnostic_result = accumulator.build(
+                    status=(
+                        PipelineRunStatus.PARTIAL
+                        if accumulator.last_completed_stage is not None
+                        else PipelineRunStatus.FAILED
+                    ),
+                    error=error,
+                )
+            raise
+
+        self._last_diagnostic_result = result.diagnostic
+        return result
+
+    def run_with_diagnostics(
+        self,
+        **run_arguments: Any,
+    ) -> RealRLTrainingResult | PipelineDiagnosticResult:
+        """Kontrollü domain duruşlarında ara diagnostic sonucu döndürür."""
+        try:
+            return self.run(**run_arguments)
+        except _ControlledPipelineFailure:
+            if self._last_diagnostic_result is None:
+                raise RuntimeError(
+                    "Kontrollü pipeline duruşu diagnostic sonuç üretmedi."
+                )
+            return self._last_diagnostic_result
+
+    def _run_pipeline(
         self,
         *,
         source_file: str | Path,
@@ -387,14 +621,36 @@ class RealRLTrainingService:
         self._validate_overwrite(overwrite)
         self._validate_timeout(timeout_seconds)
 
+        diagnostic = _PipelineDiagnosticAccumulator(
+            source_file=normalized_source_file,
+            function_name=normalized_function_name,
+            started_at=time.perf_counter(),
+        )
+        self._active_diagnostic_accumulator = diagnostic
+
+        stage_started = diagnostic.start_stage(
+            PipelineStage.SOURCE_ANALYSIS
+        )
         analysis_result = self._analyzer.analyze_file(
             normalized_source_file
         )
+        diagnostic.complete_stage(
+            PipelineStage.SOURCE_ANALYSIS, stage_started
+        )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.CFG_CONSTRUCTION
+        )
         graphs = self._cfg_builder.build_from_file(
             normalized_source_file
         )
+        diagnostic.complete_stage(
+            PipelineStage.CFG_CONSTRUCTION, stage_started
+        )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.FUNCTION_DISCOVERY
+        )
         function = next(
             (
                 candidate
@@ -405,7 +661,7 @@ class RealRLTrainingService:
         )
 
         if function is None:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Kaynak dosyada belirtilen fonksiyon bulunamadı: "
                 f"{normalized_function_name}"
             )
@@ -421,26 +677,41 @@ class RealRLTrainingService:
         )
 
         if graph is None:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Fonksiyon için Control Flow Graph bulunamadı: "
                 f"{normalized_function_name}"
             )
 
+        diagnostic.complete_stage(
+            PipelineStage.FUNCTION_DISCOVERY, stage_started
+        )
+
+        stage_started = diagnostic.start_stage(
+            PipelineStage.PATH_DISCOVERY
+        )
         paths = self._path_analyzer.find_paths(
             graph,
             max_visits_per_node=max_visits_per_node,
         )
 
         if not paths:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Fonksiyon için yürütme yolu bulunamadı: "
                 f"{normalized_function_name}"
             )
+
+        diagnostic.bounded_path_count = len(paths)
+        diagnostic.complete_stage(
+            PipelineStage.PATH_DISCOVERY, stage_started
+        )
 
         parameter_names = self._extract_parameter_names(
             function.parameters
         )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.PATH_FEASIBILITY
+        )
         data_flow_result = (
             self._data_flow_analyzer.analyze_file(
                 source_file=normalized_source_file,
@@ -466,6 +737,22 @@ class RealRLTrainingService:
             )
         )
 
+        diagnostic.feasible_path_count = sum(
+            result.status is FeasibilityStatus.FEASIBLE
+            for result in feasibility_results
+        )
+        diagnostic.infeasible_path_count = sum(
+            result.status is FeasibilityStatus.INFEASIBLE
+            for result in feasibility_results
+        )
+        diagnostic.unknown_path_count = sum(
+            result.status is FeasibilityStatus.UNKNOWN
+            for result in feasibility_results
+        )
+        diagnostic.complete_stage(
+            PipelineStage.PATH_FEASIBILITY, stage_started
+        )
+
         retained_path_indices = {
             path_index
             for path_index, feasibility_result
@@ -480,12 +767,15 @@ class RealRLTrainingService:
         }
 
         if not retained_path_indices:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Fonksiyon için FEASIBLE veya UNKNOWN "
                 "yürütme yolu bulunamadı: "
                 f"{normalized_function_name}"
             )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.CANDIDATE_GENERATION
+        )
         candidate_values_by_path = (
             self._build_candidate_values_by_path(
                 paths=paths,
@@ -493,6 +783,12 @@ class RealRLTrainingService:
                 path_states=path_states,
                 data_flow_result=data_flow_result,
             )
+        )
+        diagnostic.candidate_generated_path_count = len(
+            candidate_values_by_path
+        )
+        diagnostic.complete_stage(
+            PipelineStage.CANDIDATE_GENERATION, stage_started
         )
 
         all_scores = self._dqm.evaluate_paths(
@@ -507,12 +803,15 @@ class RealRLTrainingService:
         ]
 
         if not scores:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Fonksiyon için uygulanabilir DQM sonucu "
                 "üretilemedi: "
                 f"{normalized_function_name}"
             )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.SCENARIO_GENERATION
+        )
         scenarios = self._scenario_generator.generate(
             function_name=normalized_function_name,
             paths=paths,
@@ -524,24 +823,68 @@ class RealRLTrainingService:
             ),
         )
 
+        scenario_rejections = getattr(
+            self._scenario_generator, "rejections", ()
+        )
+        if not isinstance(scenario_rejections, tuple):
+            scenario_rejections = ()
+        rejection_counter = Counter(
+            rejection.category.value for rejection in scenario_rejections
+        )
+        diagnostic.scenario_rejection_counts = tuple(
+            sorted(rejection_counter.items())
+        )
+        diagnostic.input_generation_accepted_count = len(scenarios)
+        diagnostic.input_generation_rejected_count = len(
+            scenario_rejections
+        )
+        diagnostic.scenario_generation_accepted_count = len(scenarios)
+        diagnostic.scenario_generation_rejected_count = len(
+            scenario_rejections
+        )
+        diagnostic.pre_concrete_scenario_count = len(scenarios)
+
         if not scenarios:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Fonksiyon için test senaryosu üretilemedi: "
                 f"{normalized_function_name}"
             )
 
+        diagnostic.complete_stage(
+            PipelineStage.SCENARIO_GENERATION, stage_started
+        )
+
+        stage_started = diagnostic.start_stage(
+            PipelineStage.CONCRETE_VALIDATION
+        )
         scenario_tuple = self._filter_executable_scenarios(
             source_file=normalized_source_file,
             function_name=normalized_function_name,
             scenarios=tuple(scenarios),
         )
 
+        concrete_rejected_count = len(scenarios) - len(scenario_tuple)
+        diagnostic.concrete_validation_accepted_count = len(scenario_tuple)
+        diagnostic.concrete_validation_rejected_count = (
+            concrete_rejected_count
+        )
+        diagnostic.concrete_rejection_counts = (
+            (("EXECUTION_MISMATCH", concrete_rejected_count),)
+            if concrete_rejected_count
+            else ()
+        )
+        diagnostic.final_scenario_count = len(scenario_tuple)
+
         if not scenario_tuple:
-            raise ValueError(
+            raise _ControlledPipelineFailure(
                 "Üretilen senaryoların hiçbiri hedef fonksiyonda "
                 "beklenen sonucu üretmedi: "
                 f"{normalized_function_name}"
             )
+
+        diagnostic.complete_stage(
+            PipelineStage.CONCRETE_VALIDATION, stage_started
+        )
 
         mapper = ScenarioActionMapper(
             scenarios=scenario_tuple,
@@ -558,6 +901,9 @@ class RealRLTrainingService:
             timeout_seconds=timeout_seconds,
         )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.COVERAGE_MEASUREMENT
+        )
         baseline_coverage_result = (
             suite_transition.measure_scenarios(
                 scenario_tuple
@@ -591,6 +937,34 @@ class RealRLTrainingService:
                 "Geçerli senaryo havuzu pozitif bir coverage "
                 "hedefi üretemedi."
             )
+
+        diagnostic.line_coverage_percent = (
+            baseline_coverage_result.line_coverage_percent
+        )
+        diagnostic.branch_coverage_percent = (
+            baseline_coverage_result.branch_coverage_percent
+        )
+        diagnostic.reachability_counts = (
+            (
+                "COVERED",
+                len(reachability_result.covered_lines),
+            ),
+            (
+                "FEASIBLE_UNCOVERED",
+                len(reachability_result.feasible_uncovered_lines),
+            ),
+            (
+                "INFEASIBLE_ONLY",
+                len(reachability_result.infeasible_only_lines),
+            ),
+            (
+                "UNRESOLVED",
+                len(reachability_result.unresolved_lines),
+            ),
+        )
+        diagnostic.complete_stage(
+            PipelineStage.COVERAGE_MEASUREMENT, stage_started
+        )
 
         transition_adapter = ScenarioTransitionAdapter(
             mapper=mapper,
@@ -647,6 +1021,9 @@ class RealRLTrainingService:
             statistics=statistics,
         )
 
+        stage_started = diagnostic.start_stage(
+            PipelineStage.RL_TRAINING
+        )
         session_result = session.run(
             environment=environment,
             episode_count=episode_count,
@@ -664,12 +1041,44 @@ class RealRLTrainingService:
                 "bulunamadı."
             )
 
+        diagnostic.rl_executed_test_count = (
+            statistics.best_executed_test_count
+        )
+        diagnostic.q_table_state_count = len(q_table)
+        if isinstance(final_coverage_result, FunctionCoverageResult):
+            diagnostic.line_coverage_percent = (
+                final_coverage_result.line_coverage_percent
+            )
+            diagnostic.branch_coverage_percent = (
+                final_coverage_result.branch_coverage_percent
+            )
+        else:
+            diagnostic.line_coverage_percent = (
+                final_coverage_result.line_coverage_percent
+            )
+            diagnostic.branch_coverage_percent = (
+                final_coverage_result.branch_coverage_percent
+            )
+        diagnostic.complete_stage(
+            PipelineStage.RL_TRAINING, stage_started
+        )
+
+        stage_started = diagnostic.start_stage(
+            PipelineStage.REPORTING
+        )
         report = self._report_formatter.format_session(
             result=session_result,
             statistics=statistics,
             function_name=normalized_function_name,
             coverage_result=final_coverage_result,
             reachability_result=reachability_result,
+        )
+        diagnostic.complete_stage(
+            PipelineStage.REPORTING, stage_started
+        )
+
+        diagnostic_result = diagnostic.build(
+            status=PipelineRunStatus.COMPLETED
         )
 
         return RealRLTrainingResult(
@@ -683,6 +1092,7 @@ class RealRLTrainingService:
             final_coverage_result=final_coverage_result,
             report=report,
             reachability_result=reachability_result,
+            diagnostic=diagnostic_result,
         )
 
     def _build_candidate_values_by_path(

@@ -7,6 +7,7 @@ from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
 )
+from models.pipeline_diagnostic_result import PipelineDiagnosticResult
 from rl.training_session import TrainingSessionResult
 from rl.training_statistics import (
     EpisodeStatistics,
@@ -63,6 +64,87 @@ class TrainingReportFormatter:
                 ),
             )
         )
+
+    def format_diagnostic(
+        self,
+        diagnostic: PipelineDiagnosticResult,
+    ) -> str:
+        """Tamamlanmamış run dahil güvenli pipeline özetini biçimlendirir."""
+        if not isinstance(diagnostic, PipelineDiagnosticResult):
+            raise TypeError(
+                "diagnostic bir PipelineDiagnosticResult olmalıdır."
+            )
+
+        funnel = diagnostic.funnel
+        unavailable: list[str] = []
+        if diagnostic.line_coverage_percent is None:
+            coverage_text = "Ölçülmedi"
+            unavailable.append("Line/branch coverage")
+        else:
+            branch_text = (
+                f"%{diagnostic.branch_coverage_percent:.2f}"
+                if diagnostic.branch_coverage_percent is not None
+                else "Ölçülmedi"
+            )
+            coverage_text = (
+                f"Line %{diagnostic.line_coverage_percent:.2f}, "
+                f"branch {branch_text}"
+            )
+
+        if funnel.rl_executed_test_count is None:
+            unavailable.append("RL çalıştırılan test sayısı")
+        if funnel.q_table_state_count is None:
+            unavailable.append("Q-Table state sayısı")
+
+        def count_text(value: int | None) -> str:
+            return str(value) if value is not None else "Kullanılamıyor"
+
+        sections = (
+            "PIPELINE DIAGNOSTIC ÖZETİ",
+            "=" * 48,
+            f"Run durumu                  : {diagnostic.status.value}",
+            (
+                "Son tamamlanan aşama         : "
+                + (
+                    diagnostic.last_completed_stage.value
+                    if diagnostic.last_completed_stage is not None
+                    else "Yok"
+                )
+            ),
+            (
+                "Durma aşaması                : "
+                + (
+                    diagnostic.stopped_stage.value
+                    if diagnostic.stopped_stage is not None
+                    else "Yok"
+                )
+            ),
+            f"Durma nedeni                 : {diagnostic.error_message or 'Yok'}",
+            "DOĞRULANMIŞ ARA METRİKLER",
+            (
+                "Bounded path                 : "
+                f"{count_text(funnel.bounded_path_count)}"
+            ),
+            (
+                "Pre-concrete scenario        : "
+                f"{count_text(funnel.pre_concrete_scenario_count)}"
+            ),
+            (
+                "Concrete kabul / red         : "
+                f"{count_text(funnel.concrete_validation_accepted_count)} / "
+                f"{count_text(funnel.concrete_validation_rejected_count)}"
+            ),
+            (
+                "Final senaryo havuzu         : "
+                f"{count_text(funnel.final_scenario_count)}"
+            ),
+            f"Coverage ölçümü              : {coverage_text}",
+            (
+                "Üretilemeyen metrikler       : "
+                + (", ".join(unavailable) if unavailable else "Yok")
+            ),
+        )
+        return "\n".join(sections)
 
     def format_session(
         self,

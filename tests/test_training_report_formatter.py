@@ -13,11 +13,47 @@ from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
 )
+from models.pipeline_diagnostic_result import (
+    PipelineDiagnosticResult,
+    PipelineFunnelSnapshot,
+    PipelineRunStatus,
+    PipelineStage,
+)
 from rl.coverage_state import CoverageState
 from rl.environment_step import EnvironmentStep
 from rl.training_report_formatter import TrainingReportFormatter
 from rl.training_session import TrainingSessionResult
 from rl.training_statistics import TrainingStatistics
+
+
+def test_format_diagnostic_does_not_report_unknown_coverage_as_zero() -> None:
+    diagnostic = PipelineDiagnosticResult(
+        status=PipelineRunStatus.PARTIAL,
+        source_file=Path("sample.py"),
+        function_name="calculate",
+        last_completed_stage=PipelineStage.CONCRETE_VALIDATION,
+        stopped_stage=PipelineStage.COVERAGE_MEASUREMENT,
+        error_category="CONTROLLED_FAILURE",
+        error_message="Coverage üretilemedi.",
+        exception_type="ValueError",
+        total_duration_seconds=1.0,
+        funnel=PipelineFunnelSnapshot(
+            bounded_path_count=3,
+            pre_concrete_scenario_count=2,
+            concrete_validation_accepted_count=1,
+            concrete_validation_rejected_count=1,
+            final_scenario_count=1,
+        ),
+    )
+
+    report = TrainingReportFormatter().format_diagnostic(diagnostic)
+
+    assert "Run durumu" in report
+    assert "PARTIAL" in report
+    assert "Coverage ölçümü" in report
+    assert "Ölçülmedi" in report
+    assert "%0" not in report
+    assert "Final senaryo havuzu" in report
 
 
 def create_training_results() -> tuple[

@@ -3,6 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from models.coverage_result import FunctionCoverageResult
+from models.pipeline_diagnostic_result import (
+    PipelineDiagnosticResult,
+    PipelineRunStatus,
+    PipelineStage,
+)
 from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
@@ -90,6 +95,10 @@ def test_real_rl_training_service_runs_end_to_end(
     assert result.has_full_function_coverage is True
     assert result.has_full_file_coverage is True
     assert result.file_coverage.success is True
+    assert result.diagnostic is not None
+    assert result.diagnostic.status is PipelineRunStatus.COMPLETED
+    assert result.diagnostic.funnel.final_scenario_count == result.scenario_count
+    assert result.diagnostic.line_coverage_percent == 100.0
 
 
 def test_real_rl_training_service_generates_cumulative_test_file(
@@ -182,3 +191,37 @@ def test_real_rl_training_service_produces_readable_report(
     assert "Toplam reward" in report
     assert "En iyi episode" in report
     assert "Oturum başarılı" in report
+
+
+def test_real_pipeline_returns_partial_diagnostic_for_controlled_failure(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "unsupported_result.py"
+    source_file.write_text(
+        "def helper(value):\n"
+        "    return value\n\n"
+        "def unsupported_result(value: int):\n"
+        "    return helper(value)\n",
+        encoding="utf-8",
+    )
+
+    result = RealRLTrainingService().run_with_diagnostics(
+        source_file=source_file,
+        module_path="unsupported_result",
+        function_name="unsupported_result",
+        output_directory=tmp_path / "output",
+        episode_count=1,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
+        timeout_seconds=30.0,
+    )
+
+    assert isinstance(result, PipelineDiagnosticResult)
+    assert result.status is PipelineRunStatus.PARTIAL
+    assert result.stopped_stage is PipelineStage.SCENARIO_GENERATION
+    assert result.funnel.bounded_path_count is not None
+    assert result.funnel.scenario_generation_accepted_count == 0
+    assert dict(result.scenario_rejection_counts) == {
+        "UNSUPPORTED_EXPECTED_RESULT": 1,
+    }
