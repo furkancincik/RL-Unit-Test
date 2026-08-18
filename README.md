@@ -194,6 +194,43 @@ This allows the agent to optimize not only coverage growth but also the number o
 - Human-Readable Training Reports
 - JSON Reports
 - DQM Reports
+- Persistent Pipeline Diagnostic Results
+- Funnel Snapshots and Structured Rejection Summaries
+- Explicit `COMPLETED`, `PARTIAL`, `FAILED`, and `TIMED_OUT` States
+- Unavailable Coverage Metrics Reported as Unmeasured Instead of `0%`
+
+---
+
+## Pipeline Diagnostics and Global Timeout
+
+- Atomic JSON Diagnostic Checkpoints
+- Partial Results Preserved Across Global Timeout
+- Global Orchestration Deadline at the Service API Boundary
+- Windows `spawn` Worker Isolation
+- Run-Scoped Worker Process-Tree Cleanup
+- Deterministic Worker Process-Handle Closure
+- Separate Per-Test and Pipeline-Wide Timeout Configuration
+
+`timeout_seconds` remains the pytest/coverage execution timeout. `pipeline_timeout_seconds` is the independent deadline for the complete service pipeline. Checkpoints contain aggregate stage, funnel, rejection, and coverage metadata; they do not persist generated inputs, expected/actual values, source code, or tracebacks.
+
+```text
+Pipeline worker
+      |
+      v
+Diagnostic checkpoint
+      |
+      +--> Completed result
+      |
+      +--> Timeout watchdog
+                |
+                v
+         Worker tree cleanup
+                |
+                v
+        TIMED_OUT partial result
+```
+
+Global timeout is integrated into the service API. `main.py` option 8 and multi-function project orchestration remain work for a later sprint.
 
 ---
 
@@ -382,6 +419,9 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Coverage Workflow
 - ✅ End-to-End RL Training Service
 - ✅ Configurable Path Expansion in the Production Service
+- ✅ Persistent Partial Pipeline Diagnostics
+- ✅ Service-Level Global Orchestration Timeout
+- ✅ Windows Worker-Tree and Process-Handle Cleanup
 
 ---
 
@@ -463,7 +503,9 @@ Recent robustness work extended the generic pipeline with aggregate-state feasib
 
 For `determine_transaction_risk`, all five bounded paths were classified as feasible. Four became concrete-valid scenarios, while one was isolated as an `UNREACHABLE_INPUT` rejection instead of aborting scenario generation. `FEASIBLE_UNCOVERED 215` refers to source line 215, not to a count of uncovered paths.
 
-The `analyze_transactions` production run reached the externally enforced 180-second orchestration timeout. The observed 96 tests are an intermediate concrete-suite count, not a final scenario-pool size and not an RL executed-test count. Because orchestration did not complete, no final line or branch coverage estimate is reported. No new expression exception was observed before timeout. The remaining blocker is bounded-path explosion and timeout scope at the CLI/orchestration level; the two smaller robustness targets complete successfully.
+The `analyze_transactions` production run reached the externally enforced 180-second orchestration timeout. The observed 96 tests are an intermediate concrete-suite count, not a final scenario-pool size and not an RL executed-test count. Because orchestration did not complete, no final line or branch coverage estimate is reported. No new expression exception was observed before timeout. The new service-level global timeout has not yet been exercised on this heavy target, so no such result is claimed. The remaining blockers are bounded-path explosion and final CLI/orchestration integration; the two smaller robustness targets complete successfully.
+
+The current small production acceptance run for `calculate_category_usage` completed with 3 bounded paths, a 3-scenario pool, 3 RL-executed tests, 3 Q-table states, 100% function line coverage, 100% function branch coverage, and a `COMPLETED` pipeline diagnostic.
 
 ---
 
@@ -527,9 +569,9 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,574 |
+| Passed | 1,628 |
 | Failed | 0 |
-| Duration | 75.70s |
+| Duration | 96.67s |
 
 ---
 
@@ -597,6 +639,11 @@ RL-Unit-Test
 - Complex Dataset Evaluation
 - Ultracomplex Dataset Evaluation
 - Configurable Production Path Expansion
+- Persistent Pipeline Diagnostic and Funnel Snapshots
+- Structured Scenario and Concrete Rejection Summaries
+- Atomic JSON Diagnostic Checkpoints
+- Service-Level Global Orchestration Timeout
+- Windows Worker Process-Tree and Process-Handle Cleanup
 
 ---
 
@@ -610,7 +657,7 @@ RL-Unit-Test
 - Test Suite Minimization
 - RL Test Selection Efficiency Evaluation
 - Robustness Path-Explosion Reduction
-- End-to-End CLI Timeout Scoping
+- `main.py` Option 8 and Multi-Function Timeout Orchestration
 - Final `analyze_transactions` Coverage Measurement
 
 ---
@@ -640,7 +687,7 @@ RL-Unit-Test
 - The `analyze_transactions` benchmark has only a partial concrete-suite observation because the 180-second orchestration limit expired.
 - The observed 96 temporary-suite tests are neither the final scenario-pool size nor the number of RL-executed tests.
 - Final line and branch coverage for `analyze_transactions` have not been measured.
-- Timeout enforcement currently belongs to the external orchestration used for the robustness check; complete CLI-wide timeout handling remains in progress.
+- Global timeout is available through the service API, but `main.py` option 8 and multi-function project orchestration are not yet integrated.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
 - Exact global minimum-suite guarantees are not yet available; minimization remains an evaluation objective.
 
