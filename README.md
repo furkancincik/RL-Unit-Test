@@ -85,9 +85,12 @@ The project is being developed as a modular and extensible architecture suitable
 - Subscript Alias Propagation
 - Loop-Variable Constraint Propagation
 - Aggregate-Aware Derived-Value Input Synthesis
+- Affine `while` Control-Variable Initialization
+- Safe Optional Dictionary Lookup Synthesis
 - Relational Witness Forwarding
 - Dynamic Return-Value Evaluation
 - Safe Built-in `round` Return Replay
+- Safe Built-in `isinstance` Predicate Replay
 - Safe f-String and Format-Spec Evaluation
 - Stage- and Category-Aware Scenario Rejection Reporting
 - Concrete Result and Exception Validation
@@ -332,8 +335,11 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Typed Path Input Generator
 - ✅ Loop and Alias-Aware Input Generation
 - ✅ Aggregate-Aware Derived-Value Input Synthesis
+- ✅ Affine `while` Control-Variable Initialization
+- ✅ Safe Optional Dictionary Lookup Synthesis
 - ✅ Dynamic Expected Result Generation
 - ✅ Safe Built-in `round` Return Replay
+- ✅ Safe Built-in `isinstance` Predicate Replay
 - ✅ Scenario Generator
 - ✅ Unsupported Path Failure Isolation and Rejection Reporting
 - ✅ Scenario Action Mapper
@@ -416,7 +422,7 @@ Before the latest revisions:
 
 The diagnostic showed that paths after a local two-iteration `while` loop required a third visit to the loop condition to model the final exit check.
 
-After integrating a configurable `max_visits_per_node` value with a production default of `3`, improving generic input generation, and validating generated scenarios against the real target function:
+After integrating a configurable `max_visits_per_node` value with a production default of `3`, improving generic input generation, and validating generated scenarios against the real target function, an earlier checkpoint produced:
 
 | Metric | Result |
 | --- | ---: |
@@ -431,23 +437,33 @@ After integrating a configurable `max_visits_per_node` value with a production d
 | File line coverage | 68.60% |
 | File branch coverage | 66.67% |
 
-The improvement was achieved without modifying the benchmark source code and without adding `process_order`-specific rules to the framework.
+The current checkpoint, after reachability alignment, aggregate-state feasibility, derived-value synthesis, iteration-scoped loop analysis, and safe replay improvements, is:
 
-Some terminal branches are intentionally or structurally unreachable. The next evaluation step is therefore to separate raw coverage from reachable coverage and determine the minimum scenario subset that preserves the reachable maximum.
+| Metric | Result |
+| --- | ---: |
+| Concrete scenario pool | 165 |
+| Scenarios executed in the measured RL episode | 144 |
+| Function line coverage | 88.06% |
+| Function branch coverage | 92.31% |
+| Feasible but uncovered source lines | None |
+| Unresolved reachability lines | None |
+| Infeasible-only lines | Present; bounded-analysis-specific |
+
+The improvement was achieved without modifying the benchmark source code and without adding `process_order`-specific rules to the framework. `INFEASIBLE_ONLY` remains a bounded-analysis classification: it describes the explored path space under the configured visit limit rather than proving global semantic unreachability.
 
 ## Robustness Benchmarks
 
-Recent robustness work extended the generic pipeline with aggregate-state feasibility, derived-value input synthesis, loop-scoped `break` control flow, safe `round` replay, and isolated handling of unsupported expected-result paths.
+Recent robustness work extended the generic pipeline with aggregate-state feasibility, derived-value input synthesis, affine `while` initialization, loop-scoped `break` control flow, safe built-in replay, optional dictionary lookup synthesis, and isolated handling of unsupported expected-result paths.
 
-| Target | Pipeline result | Validated scenarios | Function line coverage | Function branch coverage |
-| --- | --- | ---: | ---: | ---: |
-| `calculate_category_usage` | Completed | 3 / 3 | 100% | 100% |
-| `determine_transaction_risk` | Completed | 4 / 4 | 90% | 87.5% |
-| `analyze_transactions` | Blocked during input synthesis | — | — | — |
+| Target | Pipeline result | Bounded paths | Concrete validation / suite progress | Function line coverage | Function branch coverage |
+| --- | --- | ---: | --- | ---: | ---: |
+| `calculate_category_usage` | Completed | 3 | 3 | 100% | 100% |
+| `determine_transaction_risk` | Completed | 5 | 4 | 90% | 87.5% |
+| `analyze_transactions` | Timeout / partial | 24,560 | At least 96 reached the temporary concrete suite | Not finalized | Not finalized |
 
-For `determine_transaction_risk`, all five bounded paths were classified as feasible. Four became concrete-valid scenarios, while one was isolated as an `UNREACHABLE_INPUT` rejection instead of aborting scenario generation. The remaining feasible-but-uncovered branch is tracked separately from generator failures.
+For `determine_transaction_risk`, all five bounded paths were classified as feasible. Four became concrete-valid scenarios, while one was isolated as an `UNREACHABLE_INPUT` rejection instead of aborting scenario generation. `FEASIBLE_UNCOVERED 215` refers to source line 215, not to a count of uncovered paths.
 
-The current robustness blocker is derived initialization of a `while` control variable, such as a local value computed from an input before the loop. This limitation is reported explicitly rather than producing an invalid scenario or hiding the failure.
+The `analyze_transactions` production run reached the externally enforced 180-second orchestration timeout. The observed 96 tests are an intermediate concrete-suite count, not a final scenario-pool size and not an RL executed-test count. Because orchestration did not complete, no final line or branch coverage estimate is reported. No new expression exception was observed before timeout. The remaining blocker is bounded-path explosion and timeout scope at the CLI/orchestration level; the two smaller robustness targets complete successfully.
 
 ---
 
@@ -458,22 +474,22 @@ The framework can now generate a substantially larger validated scenario pool fo
 Current situation:
 
 ```text
-60 validated scenarios
+165 validated scenarios
         │
         ▼
 RL scenario selection
         │
         ▼
-51 executed scenarios
+144 executed scenarios
         │
         ▼
-83.58% line coverage / 84.62% branch coverage
+88.06% line coverage / 92.31% branch coverage
 ```
 
 The next objective is to determine whether the same or higher reachable coverage can be achieved with a smaller subset:
 
 ```text
-60 available scenarios
+165 available scenarios
         │
         ▼
 Scenario contribution analysis
@@ -511,8 +527,9 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,466 |
+| Passed | 1,574 |
 | Failed | 0 |
+| Duration | 75.70s |
 
 ---
 
@@ -551,10 +568,13 @@ RL-Unit-Test
 - Collection, Alias, and Loop-Variable Input Generation
 - Aggregate Collection-State Feasibility
 - Aggregate-Aware Derived-Value Input Synthesis
+- Affine `while` Control-Variable Initialization
+- Safe Optional Dictionary Lookup Synthesis
 - Iteration-Scoped Loop Activation Analysis
 - Relational Witness Integration
 - Dynamic Return and f-String Evaluation
 - Safe Built-in `round` Return Replay
+- Safe Built-in `isinstance` Predicate Replay
 - Loop-Scoped `break` Control-Flow Semantics
 - Unsupported Scenario Path Failure Isolation
 - Scenario Generation
@@ -589,7 +609,9 @@ RL-Unit-Test
 - Greedy Minimum Scenario Baseline
 - Test Suite Minimization
 - RL Test Selection Efficiency Evaluation
-- Derived `while` Control-Variable Initialization
+- Robustness Path-Explosion Reduction
+- End-to-End CLI Timeout Scoping
+- Final `analyze_transactions` Coverage Measurement
 
 ---
 
@@ -608,6 +630,45 @@ RL-Unit-Test
 - Tree-sitter Integration
 - FastAPI Backend
 - Web Interface
+
+---
+
+# Current Limitations
+
+- Bounded path exploration can grow rapidly for functions with nested loops, multiple branches, and exception paths.
+- `INFEASIBLE_ONLY` is relative to the configured bounded path space and is not a proof of global semantic infeasibility.
+- The `analyze_transactions` benchmark has only a partial concrete-suite observation because the 180-second orchestration limit expired.
+- The observed 96 temporary-suite tests are neither the final scenario-pool size nor the number of RL-executed tests.
+- Final line and branch coverage for `analyze_transactions` have not been measured.
+- Timeout enforcement currently belongs to the external orchestration used for the robustness check; complete CLI-wide timeout handling remains in progress.
+- Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
+- Exact global minimum-suite guarantees are not yet available; minimization remains an evaluation objective.
+
+---
+
+# Final Acceptance Flow
+
+```text
+Bounded path discovery
+        │
+        ▼
+Feasibility and reachability classification
+        │
+        ▼
+Safe input and expected-result synthesis
+        │
+        ▼
+Concrete validation
+        │
+        ├── Accepted scenarios enter the RL action pool
+        └── Structured rejections remain observable
+        │
+        ▼
+RL execution and real coverage measurement
+        │
+        ▼
+Report completed metrics or explicit timeout / partial status
+```
 
 ---
 
