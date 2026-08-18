@@ -6,7 +6,7 @@ import math
 import random
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -62,6 +62,10 @@ from rl.training_session import (
 from rl.training_statistics import TrainingStatistics
 from services.coverage_reachability_service import (
     CoverageReachabilityService,
+)
+from services.pipeline_timeout_service import (
+    GlobalPipelineTimeoutRunner,
+    PipelineDiagnosticCheckpointStore,
 )
 
 
@@ -212,6 +216,7 @@ class _PipelineDiagnosticAccumulator:
     line_coverage_percent: float | None = None
     branch_coverage_percent: float | None = None
     reachability_counts: tuple[tuple[str, int], ...] = ()
+    checkpoint_store: PipelineDiagnosticCheckpointStore | None = None
 
     def __post_init__(self) -> None:
         if self.stage_durations is None:
@@ -220,6 +225,7 @@ class _PipelineDiagnosticAccumulator:
     def start_stage(self, stage: PipelineStage) -> float:
         self.current_stage = stage
         self.current_stage_started_at = time.perf_counter()
+        self.publish()
         return self.current_stage_started_at
 
     def complete_stage(self, stage: PipelineStage, started_at: float) -> None:
@@ -229,6 +235,15 @@ class _PipelineDiagnosticAccumulator:
         self.last_completed_stage = stage
         self.current_stage = None
         self.current_stage_started_at = None
+        self.publish()
+
+    def publish(self) -> None:
+        """Son doğrulanmış snapshot'ı varsa durable store'a yazar."""
+        if self.checkpoint_store is None:
+            return
+        self.checkpoint_store.write(
+            self.build(status=PipelineRunStatus.PARTIAL)
+        )
 
     def build(
         self,
@@ -375,8 +390,26 @@ class RealRLTrainingService:
         coverage_reachability_service: (
             CoverageReachabilityService | None
         ) = None,
+        diagnostic_checkpoint_path: Path | None = None,
+        global_timeout_runner: GlobalPipelineTimeoutRunner | None = None,
     ) -> None:
         """Servisin analiz ve raporlama bağımlılıklarını hazırlar."""
+        self._supports_process_isolation = all(
+            dependency is None
+            for dependency in (
+                analyzer,
+                cfg_builder,
+                path_analyzer,
+                data_flow_analyzer,
+                path_state_analyzer,
+                path_feasibility_analyzer,
+                input_candidate_generator,
+                dqm,
+                scenario_generator,
+                report_formatter,
+                coverage_reachability_service,
+            )
+        )
         self._analyzer = analyzer or PythonAnalyzer()
         self._cfg_builder = (
             cfg_builder or ControlFlowGraphBuilder()
@@ -413,6 +446,14 @@ class RealRLTrainingService:
             _PipelineDiagnosticAccumulator | None
         ) = None
         self._last_diagnostic_result: PipelineDiagnosticResult | None = None
+        self._diagnostic_checkpoint_store = (
+            PipelineDiagnosticCheckpointStore(diagnostic_checkpoint_path)
+            if diagnostic_checkpoint_path is not None
+            else None
+        )
+        self._global_timeout_runner = (
+            global_timeout_runner or GlobalPipelineTimeoutRunner()
+        )
 
     @property
     def last_diagnostic_result(self) -> PipelineDiagnosticResult | None:
@@ -436,10 +477,60 @@ class RealRLTrainingService:
         random_seed: int | None = 42,
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
-    ) -> RealRLTrainingResult:
+        pipeline_timeout_seconds: float | None = None,
+    ) -> RealRLTrainingResult | PipelineDiagnosticResult:
         """Mevcut exception davranışını koruyarak production run çalıştırır."""
         self._active_diagnostic_accumulator = None
         self._last_diagnostic_result = None
+        self._validate_pipeline_timeout(pipeline_timeout_seconds)
+
+        if pipeline_timeout_seconds is not None:
+            if not self._supports_process_isolation:
+                raise ValueError(
+                    "Global pipeline timeout yalnız varsayılan production "
+                    "bağımlılıklarıyla kullanılabilir."
+                )
+            result = self._global_timeout_runner.run(
+                run_arguments={
+                    "source_file": source_file,
+                    "module_path": module_path,
+                    "function_name": function_name,
+                    "output_directory": output_directory,
+                    "max_visits_per_node": max_visits_per_node,
+                    "episode_count": episode_count,
+                    "epsilon": epsilon,
+                    "epsilon_decay_rate": epsilon_decay_rate,
+                    "minimum_epsilon": minimum_epsilon,
+                    "learning_rate": learning_rate,
+                    "discount_factor": discount_factor,
+                    "random_seed": random_seed,
+                    "overwrite": overwrite,
+                    "timeout_seconds": timeout_seconds,
+                    "pipeline_timeout_seconds": None,
+                },
+                source_file=Path(source_file).resolve(),
+                function_name=function_name,
+                timeout_seconds=pipeline_timeout_seconds,
+            )
+            if isinstance(result, PipelineDiagnosticResult):
+                result = replace(
+                    result,
+                    pipeline_timeout_seconds=pipeline_timeout_seconds,
+                )
+                self._last_diagnostic_result = result
+            else:
+                if result.diagnostic is not None:
+                    result = replace(
+                        result,
+                        diagnostic=replace(
+                            result.diagnostic,
+                            pipeline_timeout_seconds=(
+                                pipeline_timeout_seconds
+                            ),
+                        ),
+                    )
+                self._last_diagnostic_result = result.diagnostic
+            return result
 
         try:
             result = self._run_pipeline(
@@ -468,6 +559,9 @@ class RealRLTrainingService:
                         else PipelineRunStatus.FAILED
                     ),
                     error=error,
+                )
+                self._write_diagnostic_checkpoint(
+                    self._last_diagnostic_result
                 )
             raise
 
@@ -625,6 +719,7 @@ class RealRLTrainingService:
             source_file=normalized_source_file,
             function_name=normalized_function_name,
             started_at=time.perf_counter(),
+            checkpoint_store=self._diagnostic_checkpoint_store,
         )
         self._active_diagnostic_accumulator = diagnostic
 
@@ -1080,6 +1175,7 @@ class RealRLTrainingService:
         diagnostic_result = diagnostic.build(
             status=PipelineRunStatus.COMPLETED
         )
+        self._write_diagnostic_checkpoint(diagnostic_result)
 
         return RealRLTrainingResult(
             source_file=normalized_source_file,
@@ -1094,6 +1190,13 @@ class RealRLTrainingService:
             reachability_result=reachability_result,
             diagnostic=diagnostic_result,
         )
+
+    def _write_diagnostic_checkpoint(
+        self,
+        diagnostic: PipelineDiagnosticResult,
+    ) -> None:
+        if self._diagnostic_checkpoint_store is not None:
+            self._diagnostic_checkpoint_store.write(diagnostic)
 
     def _build_candidate_values_by_path(
         self,
@@ -1683,4 +1786,23 @@ class RealRLTrainingService:
         ):
             raise ValueError(
                 "timeout_seconds sonlu ve sıfırdan büyük olmalıdır."
+            )
+
+    @staticmethod
+    def _validate_pipeline_timeout(
+        pipeline_timeout_seconds: float | None,
+    ) -> None:
+        if pipeline_timeout_seconds is None:
+            return
+        if (
+            isinstance(pipeline_timeout_seconds, bool)
+            or not isinstance(pipeline_timeout_seconds, (int, float))
+        ):
+            raise TypeError(
+                "pipeline_timeout_seconds sayısal veya None olmalıdır."
+            )
+        normalized_timeout = float(pipeline_timeout_seconds)
+        if not math.isfinite(normalized_timeout) or normalized_timeout <= 0.0:
+            raise ValueError(
+                "pipeline_timeout_seconds sonlu ve sıfırdan büyük olmalıdır."
             )

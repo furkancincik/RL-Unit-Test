@@ -76,6 +76,11 @@ class TrainingReportFormatter:
             )
 
         funnel = diagnostic.funnel
+        status_text = (
+            "Zaman aşımı"
+            if diagnostic.status.value == "TIMED_OUT"
+            else diagnostic.status.value
+        )
         unavailable: list[str] = []
         if diagnostic.line_coverage_percent is None:
             coverage_text = "Ölçülmedi"
@@ -102,7 +107,19 @@ class TrainingReportFormatter:
         sections = (
             "PIPELINE DIAGNOSTIC ÖZETİ",
             "=" * 48,
-            f"Run durumu                  : {diagnostic.status.value}",
+            f"Run durumu                  : {status_text}",
+            (
+                "Global süre sınırı           : "
+                + (
+                    f"{diagnostic.pipeline_timeout_seconds:.3f} saniye"
+                    if diagnostic.pipeline_timeout_seconds is not None
+                    else "Yok"
+                )
+            ),
+            (
+                "Geçen süre                   : "
+                f"{diagnostic.total_duration_seconds:.3f} saniye"
+            ),
             (
                 "Son tamamlanan aşama         : "
                 + (

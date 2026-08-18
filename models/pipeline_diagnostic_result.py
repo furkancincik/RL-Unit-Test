@@ -137,6 +137,7 @@ class PipelineDiagnosticResult:
     branch_coverage_percent: float | None = None
     reachability_counts: tuple[tuple[str, int], ...] = ()
     includes_sensitive_details: bool = False
+    pipeline_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, PipelineRunStatus):
@@ -168,10 +169,20 @@ class PipelineDiagnosticResult:
         )
         if not isinstance(self.includes_sensitive_details, bool):
             raise TypeError("includes_sensitive_details bool olmalıdır.")
+        if self.pipeline_timeout_seconds is not None:
+            self._validate_positive_duration(
+                "pipeline_timeout_seconds",
+                self.pipeline_timeout_seconds,
+            )
 
     @property
     def success(self) -> bool:
         """Pipeline eksiksiz tamamlandıysa True döndürür."""
+        return self.status is PipelineRunStatus.COMPLETED
+
+    @property
+    def completed(self) -> bool:
+        """Pipeline'ın eksiksiz tamamlanıp tamamlanmadığını döndürür."""
         return self.status is PipelineRunStatus.COMPLETED
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,6 +190,7 @@ class PipelineDiagnosticResult:
         return {
             "status": self.status.value,
             "success": self.success,
+            "completed": self.completed,
             "source_file": str(self.source_file),
             "function_name": self.function_name,
             "last_completed_stage": (
@@ -209,7 +221,55 @@ class PipelineDiagnosticResult:
             "branch_coverage_percent": self.branch_coverage_percent,
             "reachability_counts": dict(self.reachability_counts),
             "includes_sensitive_details": self.includes_sensitive_details,
+            "pipeline_timeout_seconds": self.pipeline_timeout_seconds,
         }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> PipelineDiagnosticResult:
+        """Güvenilir JSON mapping'inden doğrulanmış diagnostic oluşturur."""
+        if not isinstance(value, dict):
+            raise TypeError("Diagnostic JSON kökü bir nesne olmalıdır.")
+
+        stage_durations = value.get("stage_durations", {})
+        funnel = value.get("funnel", {})
+        if not isinstance(stage_durations, dict):
+            raise TypeError("stage_durations bir JSON nesnesi olmalıdır.")
+        if not isinstance(funnel, dict):
+            raise TypeError("funnel bir JSON nesnesi olmalıdır.")
+
+        return cls(
+            status=PipelineRunStatus(value["status"]),
+            source_file=Path(value["source_file"]),
+            function_name=value["function_name"],
+            last_completed_stage=cls._stage_from_value(
+                value.get("last_completed_stage")
+            ),
+            stopped_stage=cls._stage_from_value(value.get("stopped_stage")),
+            error_category=value.get("error_category"),
+            error_message=value.get("error_message"),
+            exception_type=value.get("exception_type"),
+            total_duration_seconds=value["total_duration_seconds"],
+            stage_durations=tuple(
+                (PipelineStage(stage), duration)
+                for stage, duration in stage_durations.items()
+            ),
+            funnel=PipelineFunnelSnapshot(**funnel),
+            scenario_rejection_counts=cls._counts_from_mapping(
+                value.get("scenario_rejection_counts", {})
+            ),
+            concrete_rejection_counts=cls._counts_from_mapping(
+                value.get("concrete_rejection_counts", {})
+            ),
+            line_coverage_percent=value.get("line_coverage_percent"),
+            branch_coverage_percent=value.get("branch_coverage_percent"),
+            reachability_counts=cls._counts_from_mapping(
+                value.get("reachability_counts", {})
+            ),
+            includes_sensitive_details=value.get(
+                "includes_sensitive_details", False
+            ),
+            pipeline_timeout_seconds=value.get("pipeline_timeout_seconds"),
+        )
 
     @classmethod
     def timed_out(
@@ -217,12 +277,13 @@ class PipelineDiagnosticResult:
         *,
         source_file: Path,
         function_name: str,
-        stopped_stage: PipelineStage,
+        stopped_stage: PipelineStage | None,
         last_completed_stage: PipelineStage | None,
         total_duration_seconds: float,
         funnel: PipelineFunnelSnapshot = PipelineFunnelSnapshot(),
         message: str = "Pipeline zaman aşımına uğradı.",
         stage_durations: tuple[tuple[PipelineStage, float], ...] = (),
+        pipeline_timeout_seconds: float | None = None,
     ) -> PipelineDiagnosticResult:
         """Gelecekteki timeout orchestration için partial sonuç üretir."""
         return cls(
@@ -231,13 +292,26 @@ class PipelineDiagnosticResult:
             function_name=function_name,
             last_completed_stage=last_completed_stage,
             stopped_stage=stopped_stage,
-            error_category="TIMEOUT",
+            error_category="PIPELINE_TIMEOUT",
             error_message=message,
             exception_type=None,
             total_duration_seconds=total_duration_seconds,
             stage_durations=stage_durations,
             funnel=funnel,
+            pipeline_timeout_seconds=pipeline_timeout_seconds,
         )
+
+    @staticmethod
+    def _stage_from_value(value: Any) -> PipelineStage | None:
+        if value is None:
+            return None
+        return PipelineStage(value)
+
+    @staticmethod
+    def _counts_from_mapping(value: Any) -> tuple[tuple[str, int], ...]:
+        if not isinstance(value, dict):
+            raise TypeError("Diagnostic kategori dağılımı nesne olmalıdır.")
+        return tuple(sorted(value.items()))
 
     @staticmethod
     def _validate_optional_stage(
@@ -252,6 +326,12 @@ class PipelineDiagnosticResult:
             raise TypeError(f"{name} sayısal olmalıdır.")
         if not math.isfinite(float(value)) or float(value) < 0.0:
             raise ValueError(f"{name} negatif olmayan sonlu sayı olmalıdır.")
+
+    @staticmethod
+    def _validate_positive_duration(name: str, value: float) -> None:
+        PipelineDiagnosticResult._validate_duration(name, value)
+        if float(value) <= 0.0:
+            raise ValueError(f"{name} sıfırdan büyük olmalıdır.")
 
     @classmethod
     def _validate_stage_durations(

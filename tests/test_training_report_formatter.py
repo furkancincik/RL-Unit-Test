@@ -56,6 +56,27 @@ def test_format_diagnostic_does_not_report_unknown_coverage_as_zero() -> None:
     assert "Final senaryo havuzu" in report
 
 
+def test_format_diagnostic_reports_global_timeout_without_fake_metrics() -> None:
+    diagnostic = PipelineDiagnosticResult.timed_out(
+        source_file=Path("sample.py"),
+        function_name="calculate",
+        stopped_stage=PipelineStage.SCENARIO_GENERATION,
+        last_completed_stage=PipelineStage.CANDIDATE_GENERATION,
+        total_duration_seconds=0.51,
+        pipeline_timeout_seconds=0.5,
+        funnel=PipelineFunnelSnapshot(bounded_path_count=7),
+    )
+
+    report = TrainingReportFormatter().format_diagnostic(diagnostic)
+
+    assert "Zaman aşımı" in report
+    assert "Global süre sınırı" in report
+    assert "0.500 saniye" in report
+    assert "Geçen süre" in report
+    assert "Ölçülmedi" in report
+    assert "%0" not in report
+
+
 def create_training_results() -> tuple[
     TrainingSessionResult,
     TrainingStatistics,

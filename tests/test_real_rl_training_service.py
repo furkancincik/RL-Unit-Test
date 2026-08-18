@@ -16,6 +16,7 @@ from models.coverage_result import (
 )
 from models.pipeline_diagnostic_result import (
     PipelineDiagnosticResult,
+    PipelineFunnelSnapshot,
     PipelineRunStatus,
     PipelineStage,
 )
@@ -53,6 +54,7 @@ from rl.training_statistics import (
 from services.coverage_reachability_service import (
     CoverageReachabilityService,
 )
+from services.pipeline_timeout_service import GlobalPipelineTimeoutRunner
 from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
@@ -771,6 +773,109 @@ def test_unexpected_error_diagnostic_does_not_expose_raw_message(
     assert diagnostic.exception_type == "RuntimeError"
     assert diagnostic.error_message == "Beklenmeyen pipeline hatası."
     assert "secret input payload" not in diagnostic.to_dict().values()
+
+
+@pytest.mark.parametrize(
+    "pipeline_timeout_seconds",
+    (True, "1", object()),
+)
+def test_run_rejects_invalid_pipeline_timeout_type(
+    pipeline_timeout_seconds: object,
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+    with pytest.raises(TypeError, match="pipeline_timeout_seconds"):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            pipeline_timeout_seconds=pipeline_timeout_seconds,  # type: ignore[arg-type]
+        )
+    dependencies[0].analyze_file.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "pipeline_timeout_seconds",
+    (0.0, -1.0, float("nan"), float("inf")),
+)
+def test_run_rejects_invalid_pipeline_timeout_value(
+    pipeline_timeout_seconds: float,
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+    with pytest.raises(ValueError, match="pipeline_timeout_seconds"):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            pipeline_timeout_seconds=pipeline_timeout_seconds,
+        )
+    dependencies[0].analyze_file.assert_not_called()
+
+
+@patch.object(TrainingSession, "run")
+def test_none_pipeline_timeout_preserves_in_process_run(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    service, dependencies = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+        pipeline_timeout_seconds=None,
+    )
+
+    assert isinstance(result, RealRLTrainingResult)
+    dependencies[0].analyze_file.assert_called_once()
+
+
+def test_global_timeout_rejects_injected_pipeline_dependencies(
+    tmp_path: Path,
+) -> None:
+    service, dependencies = create_service()
+
+    with pytest.raises(ValueError, match="varsayılan production"):
+        service.run_with_diagnostics(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            pipeline_timeout_seconds=1.0,
+        )
+
+    dependencies[0].analyze_file.assert_not_called()
+
+
+def test_global_timeout_keeps_coverage_timeout_meaning(tmp_path: Path) -> None:
+    runner = Mock(spec=GlobalPipelineTimeoutRunner)
+    runner.run.return_value = PipelineDiagnosticResult.timed_out(
+        source_file=Path("sample.py"),
+        function_name="calculate_score",
+        stopped_stage=PipelineStage.COVERAGE_MEASUREMENT,
+        last_completed_stage=PipelineStage.CONCRETE_VALIDATION,
+        total_duration_seconds=2.0,
+        funnel=PipelineFunnelSnapshot(),
+        pipeline_timeout_seconds=2.0,
+    )
+    service = RealRLTrainingService(global_timeout_runner=runner)
+
+    service.run_with_diagnostics(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        timeout_seconds=7.5,
+        pipeline_timeout_seconds=2.0,
+    )
+
+    assert runner.run.call_args.kwargs["run_arguments"]["timeout_seconds"] == 7.5
 
 
 @patch.object(TrainingSession, "run")

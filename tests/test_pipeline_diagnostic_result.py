@@ -131,3 +131,19 @@ def test_unknown_metrics_remain_none() -> None:
     assert snapshot.bounded_path_count is None
     assert result.line_coverage_percent is None
     assert result.to_dict()["funnel"]["bounded_path_count"] is None
+
+
+def test_diagnostic_deserializes_json_compatible_mapping() -> None:
+    original = PipelineDiagnosticResult.timed_out(
+        source_file=Path("sample.py"),
+        function_name="calculate",
+        stopped_stage=PipelineStage.RL_TRAINING,
+        last_completed_stage=PipelineStage.COVERAGE_MEASUREMENT,
+        total_duration_seconds=1.0,
+        funnel=create_snapshot(),
+        pipeline_timeout_seconds=0.5,
+    )
+
+    assert PipelineDiagnosticResult.from_dict(original.to_dict()) == original
+    assert original.completed is False
+    assert original.error_category == "PIPELINE_TIMEOUT"

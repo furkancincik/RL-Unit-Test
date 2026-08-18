@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from models.coverage_result import FunctionCoverageResult
 from models.pipeline_diagnostic_result import (
     PipelineDiagnosticResult,
     PipelineRunStatus,
     PipelineStage,
+)
+from services.pipeline_timeout_service import (
+    PipelineDiagnosticCheckpointStore,
 )
 from services.real_rl_training_service import (
     RealRLTrainingResult,
@@ -225,3 +230,103 @@ def test_real_pipeline_returns_partial_diagnostic_for_controlled_failure(
     assert dict(result.scenario_rejection_counts) == {
         "UNSUPPORTED_EXPECTED_RESULT": 1,
     }
+
+
+def test_small_real_pipeline_completes_before_global_timeout(
+    tmp_path: Path,
+) -> None:
+    result = RealRLTrainingService().run(
+        source_file=Path("datasets/sample_robustness_code.py"),
+        module_path="datasets.sample_robustness_code",
+        function_name="calculate_category_usage",
+        output_directory=tmp_path,
+        episode_count=1,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
+        random_seed=42,
+        timeout_seconds=30.0,
+        pipeline_timeout_seconds=20.0,
+    )
+
+    assert isinstance(result, RealRLTrainingResult)
+    assert result.scenario_count == 3
+    assert result.diagnostic is not None
+    assert result.diagnostic.status is PipelineRunStatus.COMPLETED
+    assert result.diagnostic.pipeline_timeout_seconds == pytest.approx(20.0)
+    assert result.diagnostic.funnel.final_scenario_count == 3
+    assert result.diagnostic.line_coverage_percent == 100.0
+    assert result.diagnostic.branch_coverage_percent == 100.0
+
+
+def test_real_pipeline_timeout_returns_checkpoint_and_allows_next_run(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "slow_target.py"
+    source_file.write_text(
+        "import time\n\n"
+        "def slow_target(value: int):\n"
+        "    time.sleep(10)\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    service = RealRLTrainingService()
+
+    timed_out = service.run_with_diagnostics(
+        source_file=source_file,
+        module_path="slow_target",
+        function_name="slow_target",
+        output_directory=tmp_path / "slow-output",
+        episode_count=1,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
+        pipeline_timeout_seconds=2.0,
+    )
+
+    assert isinstance(timed_out, PipelineDiagnosticResult)
+    assert timed_out.status is PipelineRunStatus.TIMED_OUT
+    assert timed_out.stopped_stage is PipelineStage.CONCRETE_VALIDATION
+    assert timed_out.funnel.bounded_path_count == 1
+    assert timed_out.funnel.pre_concrete_scenario_count == 1
+    assert timed_out.line_coverage_percent is None
+    assert timed_out.funnel.rl_executed_test_count is None
+
+    completed = service.run(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        function_name=FUNCTION_NAME,
+        output_directory=tmp_path / "next-output",
+        episode_count=1,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
+        pipeline_timeout_seconds=20.0,
+    )
+    assert isinstance(completed, RealRLTrainingResult)
+    assert completed.success is True
+
+
+def test_completed_run_writes_matching_durable_checkpoint(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "diagnostic.json"
+    service = RealRLTrainingService(
+        diagnostic_checkpoint_path=checkpoint_path
+    )
+    result = service.run(
+        source_file=SOURCE_FILE,
+        module_path=MODULE_PATH,
+        function_name=FUNCTION_NAME,
+        output_directory=tmp_path / "output",
+        episode_count=1,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
+    )
+
+    assert isinstance(result, RealRLTrainingResult)
+    assert result.diagnostic is not None
+    checkpoint = PipelineDiagnosticCheckpointStore(checkpoint_path).read()
+    assert checkpoint is not None
+    assert checkpoint.to_dict() == result.diagnostic.to_dict()
