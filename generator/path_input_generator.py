@@ -118,6 +118,27 @@ class _ForLoopActivation:
     iteration_constraints: dict[int, _VariableConstraint] = field(
         default_factory=dict
     )
+    local_iteration_constraints: dict[
+        int, dict[str, _VariableConstraint]
+    ] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuredInputReference:
+    """Gerçek bir parametre içindeki güvenli list/dict değer yolu."""
+
+    parameter_name: str
+    access_path: tuple[int | str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _DictionaryLookup:
+    """Yerel bir değerin doğrulanmış ``dict.get`` provenance'ı."""
+
+    mapping: _StructuredInputReference
+    key: _StructuredInputReference | int | float | str | bool | None
+    default: _StructuredInputReference | int | float | str | bool | None
+    has_default: bool
 
 
 class PathInputGenerator:
@@ -251,6 +272,15 @@ class PathInputGenerator:
             parameter_types=normalized_parameter_types,
             loop_activations=loop_activations,
             direct_values=direct_values,
+        )
+
+        self._apply_dictionary_lookup_constraints(
+            path=path,
+            parameter_names=parameter_names,
+            parameter_types=normalized_parameter_types,
+            constraints=constraints,
+            direct_values=direct_values,
+            loop_activations=loop_activations,
         )
 
         self._apply_runtime_type_overrides(
@@ -757,10 +787,9 @@ class PathInputGenerator:
             not isinstance(subscript_node.value, ast.Name)
             or subscript_node.value.id not in parameter_names
         ):
-            raise ValueError(
-                "KeyError sözlüğü doğrudan bir fonksiyon "
-                "parametresi olmalıdır."
-            )
+            # Loop-element dictionary gibi güvenli nested provenance,
+            # sıralı structured-input katmanında çözümlenir.
+            return
 
         try:
             ast.literal_eval(subscript_node.slice)
@@ -1558,6 +1587,17 @@ class PathInputGenerator:
         katmanında çözülür. Burada tekrar literal olarak yorumlanmaları,
         geçerli path'lerin aday üretimi sırasında hata vermesine neden olur.
         """
+        if isinstance(operator, (ast.Is, ast.IsNot)):
+            self._apply_none_identity_comparison(
+                left=left,
+                operator=operator,
+                right=right,
+                desired_result=desired_result,
+                constraints=constraints,
+                original_expression=original_expression,
+            )
+            return
+
         if (
             isinstance(left, ast.Name)
             and isinstance(right, ast.Name)
@@ -1566,7 +1606,17 @@ class PathInputGenerator:
 
         if isinstance(left, ast.Name):
             variable_name = left.id
-            value = self._extract_literal(right)
+            try:
+                value = self._extract_literal(right)
+            except ValueError as error:
+                raise UnsupportedInputSynthesisError(
+                    "Karşılaştırma operand provenance'ı güvenli literal "
+                    "constraint'e indirgenemedi: "
+                    f"expression={original_expression!r}, "
+                    f"operator={type(operator).__name__}, "
+                    f"left={type(left).__name__}, "
+                    f"right={type(right).__name__}"
+                ) from error
             normalized_operator = operator
 
         elif isinstance(right, ast.Name):
@@ -1578,7 +1628,17 @@ class PathInputGenerator:
                 )
 
             variable_name = right.id
-            value = self._extract_literal(left)
+            try:
+                value = self._extract_literal(left)
+            except ValueError as error:
+                raise UnsupportedInputSynthesisError(
+                    "Karşılaştırma operand provenance'ı güvenli literal "
+                    "constraint'e indirgenemedi: "
+                    f"expression={original_expression!r}, "
+                    f"operator={type(operator).__name__}, "
+                    f"left={type(left).__name__}, "
+                    f"right={type(right).__name__}"
+                ) from error
             normalized_operator = self._reverse_operator(operator)
 
         else:
@@ -1603,6 +1663,37 @@ class PathInputGenerator:
             current=current_constraint,
             operator=effective_operator,
             value=value,
+        )
+
+    def _apply_none_identity_comparison(
+        self,
+        *,
+        left: ast.expr,
+        operator: ast.cmpop,
+        right: ast.expr,
+        desired_result: bool,
+        constraints: dict[str, _VariableConstraint],
+        original_expression: str,
+    ) -> None:
+        """Yalnız ``name is (not) None`` identity biçimlerini uygular."""
+        left_is_none = isinstance(left, ast.Constant) and left.value is None
+        right_is_none = isinstance(right, ast.Constant) and right.value is None
+
+        if left_is_none and isinstance(right, ast.Name):
+            variable_name = right.id
+        elif right_is_none and isinstance(left, ast.Name):
+            variable_name = left.id
+        else:
+            raise UnsupportedInputSynthesisError(
+                "Identity comparison yalnızca bir değişken ile None "
+                f"arasında desteklenmektedir: {original_expression}"
+            )
+
+        requires_none = isinstance(operator, ast.Is) is desired_result
+        constraints[variable_name] = self._merge_constraint(
+            current=constraints.get(variable_name, _VariableConstraint()),
+            operator=ast.Eq() if requires_none else ast.NotEq(),
+            value=None,
         )
 
     @staticmethod
@@ -2084,6 +2175,10 @@ class PathInputGenerator:
                         activation.iteration_index,
                         _VariableConstraint(),
                     )
+                    activation.local_iteration_constraints.setdefault(
+                        activation.iteration_index,
+                        {},
+                    )
                     continue
 
                 if (
@@ -2092,6 +2187,16 @@ class PathInputGenerator:
                 ):
                     del active_loops[matching_index:]
 
+                continue
+
+            if step.node_type in {"Assign", "AnnAssign"} and active_loops:
+                assignment = self._parse_single_assignment(step.node_label)
+                if assignment is not None:
+                    target_name, _ = assignment
+                    owner = active_loops[-1]
+                    owner.local_iteration_constraints[
+                        owner.iteration_index
+                    ].setdefault(target_name, _VariableConstraint())
                 continue
 
             if (
@@ -2204,6 +2309,12 @@ class PathInputGenerator:
                     activation.iteration_index
                 ]
             )
+            routed_constraints.update(
+                activation.local_iteration_constraints.get(
+                    activation.iteration_index,
+                    {},
+                )
+            )
 
         self._apply_condition_step(
             step=step,
@@ -2218,7 +2329,17 @@ class PathInputGenerator:
             )
 
             if activation is None:
-                constraints[variable_name] = constraint
+                activation = self._find_active_loop_for_local(
+                    active_loops=active_loops,
+                    variable_name=variable_name,
+                )
+                if activation is None:
+                    constraints[variable_name] = constraint
+                    continue
+
+                activation.local_iteration_constraints[
+                    activation.iteration_index
+                ][variable_name] = constraint
                 continue
 
             activation.iteration_constraints[
@@ -2236,6 +2357,20 @@ class PathInputGenerator:
             if activation.target_name == target_name:
                 return activation
 
+        return None
+
+    @staticmethod
+    def _find_active_loop_for_local(
+        *,
+        active_loops: list[_ForLoopActivation],
+        variable_name: str,
+    ) -> _ForLoopActivation | None:
+        for activation in reversed(active_loops):
+            if variable_name in activation.local_iteration_constraints.get(
+                activation.iteration_index,
+                {},
+            ):
+                return activation
         return None
 
     @staticmethod
@@ -2626,6 +2761,629 @@ class PathInputGenerator:
                 current=constraints.get(parameter_name, _VariableConstraint()),
                 additional=local_constraint,
             )
+
+    def _apply_dictionary_lookup_constraints(
+        self,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str],
+        constraints: dict[str, _VariableConstraint],
+        direct_values: dict[str, Any],
+        loop_activations: list[_ForLoopActivation],
+    ) -> None:
+        """Güvenli subscript ve ``dict.get`` provenance'ını dış girdiye taşır."""
+        references = {
+            name: _StructuredInputReference(name)
+            for name in parameter_names
+        }
+        lookups: dict[str, _DictionaryLookup] = {}
+        loop_indices: dict[int, int] = {}
+        active_structured_loops: list[_ForLoopActivation] = []
+        used_activation_ids: set[int] = set()
+        required_present: set[_StructuredInputReference] = set()
+        required_absent: set[_StructuredInputReference] = set()
+
+        for step in path.steps:
+            if step.node_type == "for":
+                if step.outgoing_edge_label == "Iterate":
+                    binding = self._extract_for_loop_binding(
+                        step=step,
+                        parameter_names=parameter_names,
+                    )
+                    if binding is not None:
+                        target, iterable = binding
+                        index = loop_indices.get(step.node_id, -1) + 1
+                        loop_indices[step.node_id] = index
+                        activation = next(
+                            (
+                                candidate
+                                for candidate in active_structured_loops
+                                if candidate.node_id == step.node_id
+                            ),
+                            None,
+                        )
+                        if activation is None:
+                            activation = next(
+                                candidate
+                                for candidate in loop_activations
+                                if candidate.node_id == step.node_id
+                                and candidate.activation_id not in used_activation_ids
+                            )
+                            used_activation_ids.add(activation.activation_id)
+                            active_structured_loops.append(activation)
+                        references[target] = _StructuredInputReference(
+                            iterable, (index,)
+                        )
+                elif step.outgoing_edge_label == "Complete":
+                    loop_indices.pop(step.node_id, None)
+                    active_structured_loops = [
+                        activation
+                        for activation in active_structured_loops
+                        if activation.node_id != step.node_id
+                    ]
+                continue
+
+            if step.node_type not in {"Assign", "AnnAssign"}:
+                continue
+            assignment = self._parse_single_assignment(step.node_label)
+            if assignment is None:
+                continue
+            target_name, expression = assignment
+
+            if isinstance(expression, ast.Name):
+                source = references.get(expression.id)
+                if source is not None:
+                    references[target_name] = source
+                continue
+
+            if isinstance(expression, ast.Subscript):
+                reference = self._resolve_structured_subscript(
+                    expression=expression,
+                    references=references,
+                    parameter_types=parameter_types,
+                    direct_values=direct_values,
+                    require_present=(step.outgoing_edge_label != "Exception"),
+                    required_present=required_present,
+                    required_absent=required_absent,
+                )
+                if reference is None and step.outgoing_edge_label == "Exception":
+                    raise UnsupportedInputSynthesisError(
+                        "KeyError dictionary provenance'ı gerçek input'a "
+                        "güvenli biçimde bağlanamadı."
+                    )
+                if reference is not None:
+                    references[target_name] = reference
+                    constraint = self._structured_local_constraint(
+                        variable_name=target_name,
+                        constraints=constraints,
+                        active_loops=active_structured_loops,
+                        loop_indices=loop_indices,
+                    )
+                    if (
+                        constraint is not None
+                        and step.outgoing_edge_label != "Exception"
+                    ):
+                        self._materialize_structured_constraint(
+                            reference=reference,
+                            constraint=constraint,
+                            parameter_types=parameter_types,
+                            direct_values=direct_values,
+                        )
+                continue
+
+            if isinstance(expression, ast.Call):
+                constraint = self._structured_local_constraint(
+                    variable_name=target_name,
+                    constraints=constraints,
+                    active_loops=active_structured_loops,
+                    loop_indices=loop_indices,
+                )
+                if constraint is None:
+                    continue
+                lookup = self._parse_safe_dictionary_lookup(
+                    expression=expression,
+                    references=references,
+                    parameter_types=parameter_types,
+                    direct_values=direct_values,
+                )
+                lookups[target_name] = lookup
+                if constraint is not None:
+                    self._materialize_dictionary_lookup(
+                        lookup=lookup,
+                        constraint=constraint,
+                        constraints=constraints,
+                        parameter_types=parameter_types,
+                        direct_values=direct_values,
+                    )
+                continue
+
+            if target_name in constraints:
+                references.pop(target_name, None)
+                lookups.pop(target_name, None)
+
+        for local_name, reference in references.items():
+            if local_name in parameter_names:
+                continue
+            constraint = constraints.get(local_name)
+            if constraint is not None:
+                self._materialize_structured_constraint(
+                    reference=reference,
+                    constraint=constraint,
+                    parameter_types=parameter_types,
+                    direct_values=direct_values,
+                )
+
+        for local_name, lookup in lookups.items():
+            constraint = constraints.get(local_name)
+            if constraint is not None:
+                self._materialize_dictionary_lookup(
+                    lookup=lookup,
+                    constraint=constraint,
+                    constraints=constraints,
+                    parameter_types=parameter_types,
+                    direct_values=direct_values,
+                )
+
+    @staticmethod
+    def _structured_local_constraint(
+        *,
+        variable_name: str,
+        constraints: dict[str, _VariableConstraint],
+        active_loops: list[_ForLoopActivation],
+        loop_indices: dict[int, int],
+    ) -> _VariableConstraint | None:
+        for activation in reversed(active_loops):
+            iteration_index = loop_indices.get(activation.node_id)
+            if iteration_index is None:
+                continue
+            local_constraint = activation.local_iteration_constraints.get(
+                iteration_index,
+                {},
+            ).get(variable_name)
+            if local_constraint is not None:
+                return local_constraint
+        return constraints.get(variable_name)
+
+    @staticmethod
+    def _parse_single_assignment(
+        statement_text: str,
+    ) -> tuple[str, ast.expr] | None:
+        try:
+            statement = ast.parse(statement_text).body[0]
+        except (SyntaxError, IndexError):
+            return None
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            return statement.targets[0].id, statement.value
+        if (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+        ):
+            return statement.target.id, statement.value
+        return None
+
+    def _resolve_structured_subscript(
+        self,
+        *,
+        expression: ast.Subscript,
+        references: dict[str, _StructuredInputReference],
+        parameter_types: dict[str, str],
+        direct_values: dict[str, Any],
+        require_present: bool,
+        required_present: set[_StructuredInputReference],
+        required_absent: set[_StructuredInputReference],
+    ) -> _StructuredInputReference | None:
+        if not isinstance(expression.value, ast.Name):
+            return None
+        parent = references.get(expression.value.id)
+        if parent is None:
+            return None
+        parent_type = self._structured_reference_type(
+            reference=parent,
+            parameter_types=parameter_types,
+        )
+        parent_value = direct_values.get(parent.parameter_name)
+        if (
+            not parent.access_path
+            and not isinstance(parent_value, (list, tuple, dict))
+            and not (
+                self._is_dict_type(parent_type)
+                or self._extract_element_type(parent_type) is not None
+            )
+        ):
+            return None
+        key = self._resolve_lookup_key(
+            expression=expression.slice,
+            references=references,
+            parameter_types=parameter_types,
+            direct_values=direct_values,
+        )
+        if not isinstance(key, (int, str)) or isinstance(key, bool):
+            raise UnsupportedInputSynthesisError(
+                "Structured dictionary/list anahtarı int veya str olmalıdır."
+            )
+        reference = _StructuredInputReference(
+            parent.parameter_name, (*parent.access_path, key)
+        )
+        if require_present:
+            if reference in required_absent:
+                raise UnreachablePathError(
+                    "Aynı dictionary key için present ve absent "
+                    f"kısıtları çelişiyor: {self._format_structured_reference(reference)}"
+                )
+            required_present.add(reference)
+            self._ensure_structured_reference(
+                reference=reference,
+                parameter_types=parameter_types,
+                direct_values=direct_values,
+            )
+        else:
+            if reference in required_present:
+                raise UnreachablePathError(
+                    "Aynı dictionary key için present ve absent "
+                    f"kısıtları çelişiyor: {self._format_structured_reference(reference)}"
+                )
+            required_absent.add(reference)
+            self._delete_structured_reference(
+                reference=reference,
+                direct_values=direct_values,
+            )
+        return reference
+
+    def _parse_safe_dictionary_lookup(
+        self,
+        *,
+        expression: ast.Call,
+        references: dict[str, _StructuredInputReference],
+        parameter_types: dict[str, str],
+        direct_values: dict[str, Any],
+    ) -> _DictionaryLookup:
+        if not (
+            isinstance(expression.func, ast.Attribute)
+            and expression.func.attr == "get"
+            and isinstance(expression.func.value, ast.Name)
+        ):
+            raise UnsupportedInputSynthesisError(
+                "Yalnız doğrulanmış dictionary receiver üzerindeki dict.get "
+                "lookup çağrıları desteklenmektedir."
+            )
+        if expression.keywords or len(expression.args) not in {1, 2} or any(
+            isinstance(argument, ast.Starred) for argument in expression.args
+        ):
+            raise UnsupportedInputSynthesisError(
+                "dict.get yalnız bir veya iki positional, starred olmayan "
+                "argümanla desteklenmektedir."
+            )
+        mapping = references.get(expression.func.value.id)
+        if mapping is None:
+            raise UnsupportedInputSynthesisError(
+                "dict.get receiver provenance'ı gerçek input'a bağlanamadı."
+            )
+        mapping_value = self._ensure_structured_reference(
+            reference=mapping,
+            parameter_types=parameter_types,
+            direct_values=direct_values,
+        )
+        mapping_type = self._structured_reference_type(
+            reference=mapping,
+            parameter_types=parameter_types,
+        )
+        if type(mapping_value) is not dict and not self._is_dict_type(mapping_type):
+            raise UnsupportedInputSynthesisError(
+                "dict.get receiver gerçek dictionary parametresi veya alias olmalıdır."
+            )
+        if type(mapping_value) is not dict:
+            self._set_structured_reference(mapping, {}, direct_values)
+
+        key = self._resolve_lookup_key(
+            expression=expression.args[0],
+            references=references,
+            parameter_types=parameter_types,
+            direct_values=direct_values,
+        )
+        default: _StructuredInputReference | int | float | str | bool | None = None
+        if len(expression.args) == 2:
+            default = self._resolve_lookup_value(
+                expression=expression.args[1],
+                references=references,
+            )
+            if isinstance(default, _StructuredInputReference):
+                default = self._ensure_structured_reference(
+                    reference=default,
+                    parameter_types=parameter_types,
+                    direct_values=direct_values,
+                )
+        return _DictionaryLookup(
+            mapping=mapping,
+            key=key,
+            default=default,
+            has_default=(len(expression.args) == 2),
+        )
+
+    def _resolve_lookup_key(
+        self,
+        *,
+        expression: ast.expr,
+        references: dict[str, _StructuredInputReference],
+        parameter_types: dict[str, str],
+        direct_values: dict[str, Any],
+    ) -> _StructuredInputReference | int | float | str | bool | None:
+        value = self._resolve_lookup_value(
+            expression=expression,
+            references=references,
+        )
+        if isinstance(value, _StructuredInputReference):
+            return self._ensure_structured_reference(
+                reference=value,
+                parameter_types=parameter_types,
+                direct_values=direct_values,
+            )
+        return value
+
+    @staticmethod
+    def _resolve_lookup_value(
+        *,
+        expression: ast.expr,
+        references: dict[str, _StructuredInputReference],
+    ) -> _StructuredInputReference | int | float | str | bool | None:
+        if isinstance(expression, ast.Name):
+            reference = references.get(expression.id)
+            if reference is not None:
+                return reference
+        try:
+            value = ast.literal_eval(expression)
+        except (ValueError, TypeError) as error:
+            raise UnsupportedInputSynthesisError(
+                "dict.get key/default ifadesi güvenli literal veya input "
+                "provenance olmalıdır."
+            ) from error
+        if value is not None and not isinstance(value, (int, float, str, bool)):
+            raise UnsupportedInputSynthesisError(
+                "dict.get key/default yalnız primitive değerleri destekler."
+            )
+        return value
+
+    def _materialize_structured_constraint(
+        self,
+        *,
+        reference: _StructuredInputReference,
+        constraint: _VariableConstraint,
+        parameter_types: dict[str, str],
+        direct_values: dict[str, Any],
+    ) -> None:
+        existing_value = self._ensure_structured_reference(
+            reference=reference,
+            parameter_types=parameter_types,
+            direct_values=direct_values,
+        )
+        if self._value_satisfies_constraint(
+            value=existing_value,
+            constraint=constraint,
+        ):
+            return
+        value = self._create_parameter_value(
+            parameter_name=self._format_structured_reference(reference),
+            constraint=constraint,
+            parameter_type=self._structured_reference_type(
+                reference=reference,
+                parameter_types=parameter_types,
+            ),
+        )
+        self._set_structured_reference(reference, value, direct_values)
+
+    def _materialize_dictionary_lookup(
+        self,
+        *,
+        lookup: _DictionaryLookup,
+        constraint: _VariableConstraint,
+        constraints: dict[str, _VariableConstraint],
+        parameter_types: dict[str, str],
+        direct_values: dict[str, Any],
+    ) -> None:
+        mapping = self._get_structured_reference(lookup.mapping, direct_values)
+        if type(mapping) is not dict:
+            raise UnsupportedInputSynthesisError(
+                "Doğrulanmış dict.get receiver dictionary değerine dönüşmedi."
+            )
+        key = lookup.key
+        default = lookup.default
+        absent_value = default if lookup.has_default else None
+
+        if self._value_satisfies_constraint(value=absent_value, constraint=constraint):
+            mapping.pop(key, None)
+            self._preserve_truthy_mapping(
+                lookup=lookup,
+                missing_key=key,
+                mapping=mapping,
+                constraints=constraints,
+                parameter_types=parameter_types,
+            )
+            return
+
+        value_type = self._dictionary_value_type(
+            self._structured_reference_type(
+                reference=lookup.mapping,
+                parameter_types=parameter_types,
+            )
+        )
+        mapping[key] = self._create_parameter_value(
+            parameter_name=f"{self._format_structured_reference(lookup.mapping)}[{key!r}]",
+            constraint=constraint,
+            parameter_type=value_type,
+        )
+
+    def _preserve_truthy_mapping(
+        self,
+        *,
+        lookup: _DictionaryLookup,
+        missing_key: Any,
+        mapping: dict[Any, Any],
+        constraints: dict[str, _VariableConstraint],
+        parameter_types: dict[str, str],
+    ) -> None:
+        if mapping:
+            return
+        root_constraint = constraints.get(lookup.mapping.parameter_name)
+        if not (
+            root_constraint is not None
+            and root_constraint.has_equal_value
+            and root_constraint.equal_value is True
+        ):
+            return
+        key_type, value_type = self._dictionary_types(
+            self._structured_reference_type(
+                reference=lookup.mapping,
+                parameter_types=parameter_types,
+            )
+        )
+        sentinel: int | str = 0 if key_type == "int" else "__generated_key__"
+        while sentinel == missing_key or sentinel in mapping:
+            sentinel = f"{sentinel}_x" if isinstance(sentinel, str) else sentinel + 1
+        mapping[sentinel] = self._create_default_typed_value(value_type)
+
+    def _ensure_structured_reference(
+        self,
+        *,
+        reference: _StructuredInputReference,
+        parameter_types: dict[str, str],
+        direct_values: dict[str, Any],
+    ) -> Any:
+        if reference.parameter_name not in direct_values:
+            direct_values[reference.parameter_name] = self._create_default_typed_value(
+                parameter_types.get(reference.parameter_name)
+            )
+        current = direct_values[reference.parameter_name]
+        current_type = parameter_types.get(reference.parameter_name)
+        for position, token in enumerate(reference.access_path):
+            next_type = self._child_type(current_type, token)
+            is_last = position == len(reference.access_path) - 1
+            if isinstance(token, int) and isinstance(current, (list, tuple)):
+                if isinstance(current, tuple):
+                    if token >= len(current):
+                        raise UnsupportedInputSynthesisError(
+                            "Tuple structured provenance mevcut indeksin "
+                            "dışına genişletilemez."
+                        )
+                    if is_last:
+                        return current[token]
+                    current = current[token]
+                    current_type = next_type
+                    continue
+                while len(current) <= token:
+                    current.append(self._create_default_typed_value(next_type))
+                if is_last:
+                    return current[token]
+                current = current[token]
+            elif isinstance(current, dict):
+                if token not in current:
+                    current[token] = self._create_default_typed_value(next_type)
+                if is_last:
+                    return current[token]
+                current = current[token]
+            else:
+                raise UnsupportedInputSynthesisError(
+                    "Structured input provenance list/dict değerine indirgenemedi: "
+                    f"{self._format_structured_reference(reference)}"
+                )
+            current_type = next_type
+        return current
+
+    @staticmethod
+    def _get_structured_reference(
+        reference: _StructuredInputReference,
+        direct_values: dict[str, Any],
+    ) -> Any:
+        current = direct_values[reference.parameter_name]
+        for token in reference.access_path:
+            current = current[token]
+        return current
+
+    @staticmethod
+    def _set_structured_reference(
+        reference: _StructuredInputReference,
+        value: Any,
+        direct_values: dict[str, Any],
+    ) -> None:
+        if not reference.access_path:
+            direct_values[reference.parameter_name] = value
+            return
+        current = direct_values[reference.parameter_name]
+        for token in reference.access_path[:-1]:
+            current = current[token]
+        current[reference.access_path[-1]] = value
+
+    @staticmethod
+    def _delete_structured_reference(
+        *,
+        reference: _StructuredInputReference,
+        direct_values: dict[str, Any],
+    ) -> None:
+        if not reference.access_path or reference.parameter_name not in direct_values:
+            return
+        current = direct_values[reference.parameter_name]
+        try:
+            for token in reference.access_path[:-1]:
+                current = current[token]
+            if isinstance(current, dict):
+                current.pop(reference.access_path[-1], None)
+        except (KeyError, IndexError, TypeError):
+            return
+
+    def _structured_reference_type(
+        self,
+        *,
+        reference: _StructuredInputReference,
+        parameter_types: dict[str, str],
+    ) -> str | None:
+        current = parameter_types.get(reference.parameter_name)
+        for token in reference.access_path:
+            current = self._child_type(current, token)
+        return current
+
+    def _child_type(self, parent_type: str | None, token: int | str) -> str | None:
+        if isinstance(token, int) and not self._is_dict_type(parent_type):
+            return self._extract_element_type(parent_type)
+        return self._dictionary_value_type(parent_type)
+
+    @staticmethod
+    def _is_dict_type(type_name: str | None) -> bool:
+        normalized = (type_name or "").replace(" ", "")
+        return normalized == "dict" or normalized.startswith(("dict[", "typing.Dict["))
+
+    @classmethod
+    def _dictionary_value_type(cls, type_name: str | None) -> str | None:
+        return cls._dictionary_types(type_name)[1]
+
+    @staticmethod
+    def _dictionary_types(type_name: str | None) -> tuple[str | None, str | None]:
+        normalized = (type_name or "").replace(" ", "")
+        prefix = next(
+            (prefix for prefix in ("dict[", "typing.Dict[") if normalized.startswith(prefix)),
+            None,
+        )
+        if prefix is None or not normalized.endswith("]"):
+            return None, None
+        inner = normalized[len(prefix):-1]
+        depth = 0
+        for index, character in enumerate(inner):
+            if character in "[({":
+                depth += 1
+            elif character in "])}":
+                depth -= 1
+            elif character == "," and depth == 0:
+                return inner[:index], inner[index + 1:]
+        return None, None
+
+    @staticmethod
+    def _format_structured_reference(reference: _StructuredInputReference) -> str:
+        return reference.parameter_name + "".join(
+            f"[{token!r}]" for token in reference.access_path
+        )
 
     def _apply_runtime_type_overrides(
         self,
@@ -3118,6 +3876,13 @@ class PathInputGenerator:
                 for value in constraint.forbidden_values
             )
         ):
+            if None in constraint.forbidden_values:
+                typed_default = self._create_default_typed_value(parameter_type)
+                if self._value_satisfies_constraint(
+                    value=typed_default,
+                    constraint=constraint,
+                ):
+                    return typed_default
             candidate = "__generated_value__"
 
             while candidate in constraint.forbidden_values:
@@ -4024,8 +4789,40 @@ class PathInputGenerator:
         *,
         expression: ast.Call,
         environment: dict[str, Any],
-    ) -> int | float:
+    ) -> Any:
         """Allowlist'teki yan etkisiz built-in çağrıyı değerlendirir."""
+        if isinstance(expression.func, ast.Attribute):
+            if expression.func.attr != "get":
+                raise ValueError("Desteklenmeyen güvenli çağrı hedefi.")
+            if expression.keywords or len(expression.args) not in {1, 2} or any(
+                isinstance(argument, ast.Starred) for argument in expression.args
+            ):
+                raise ValueError(
+                    "Güvenli dict.get çağrısı bir veya iki positional "
+                    "argüman almalıdır."
+                )
+            receiver = cls._evaluate_safe_expression(
+                expression=expression.func.value,
+                environment=environment,
+            )
+            if type(receiver) is not dict:
+                raise ValueError(
+                    "Güvenli dict.get receiver doğrulanmış dict olmalıdır."
+                )
+            key = cls._evaluate_safe_expression(
+                expression=expression.args[0],
+                environment=environment,
+            )
+            default = (
+                cls._evaluate_safe_expression(
+                    expression=expression.args[1],
+                    environment=environment,
+                )
+                if len(expression.args) == 2
+                else None
+            )
+            return receiver.get(key, default)
+
         if not (
             isinstance(expression.func, ast.Name)
             and expression.func.id == "round"

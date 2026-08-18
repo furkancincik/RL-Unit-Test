@@ -3678,3 +3678,337 @@ def test_robustness_transaction_predicate_overrides_element_annotation() -> None
 
     assert len(transactions) == 1
     assert not isinstance(transactions[0], dict)
+
+
+@pytest.mark.parametrize(
+    ("condition", "edge_label", "expect_none"),
+    [
+        ("value is None", "True", True),
+        ("value is None", "False", False),
+        ("value is not None", "True", False),
+        ("value is not None", "False", True),
+        ("None is value", "True", True),
+        ("None is value", "False", False),
+        ("None is not value", "True", False),
+        ("None is not value", "False", True),
+    ],
+)
+def test_generate_supports_none_identity_edges(
+    condition: str,
+    edge_label: str,
+    expect_none: bool,
+) -> None:
+    path = create_execution_path(
+        node_labels=["START", condition, "return 0", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, edge_label, None],
+    )
+
+    value = PathInputGenerator().generate(
+        path, ("value",), {"value": "int | None"}
+    ).keyword_argument_dict["value"]
+
+    assert (value is None) is expect_none
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "left is right",
+        "left is not right",
+        "value is True",
+        "value is False",
+        "value is singleton.member",
+    ],
+)
+def test_generate_rejects_non_none_identity(condition: str) -> None:
+    path = create_execution_path(
+        node_labels=["START", condition, "return 0", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="identity|None"):
+        PathInputGenerator().generate(
+            path, ("left", "right", "value", "singleton")
+        )
+
+
+def _create_dict_get_path(
+    *,
+    lookup: str = 'mapping.get("wanted")',
+    condition: str = "lookup_result is None",
+    edge_label: str = "True",
+    prefix_labels: tuple[str, ...] = (),
+    prefix_types: tuple[str, ...] = (),
+    return_label: str = "return 0",
+) -> ExecutionPath:
+    return create_execution_path(
+        node_labels=[
+            "START", *prefix_labels,
+            f"lookup_result = {lookup}", condition, return_label, "END",
+        ],
+        node_types=[
+            "start", *prefix_types,
+            "Assign", "if", "return", "end",
+        ],
+        edge_labels=[
+            None, *(None for _ in prefix_labels), None, edge_label, None,
+        ],
+    )
+
+
+def test_generate_dict_get_none_uses_absent_key() -> None:
+    result = PathInputGenerator().generate(
+        _create_dict_get_path(),
+        ("mapping",),
+        {"mapping": "dict[str, int]"},
+    )
+
+    assert "wanted" not in result.keyword_argument_dict["mapping"]
+
+
+def test_generate_dict_get_non_none_creates_typed_value() -> None:
+    result = PathInputGenerator().generate(
+        _create_dict_get_path(condition="lookup_result is not None"),
+        ("mapping",),
+        {"mapping": "dict[str, int]"},
+    )
+
+    assert type(result.keyword_argument_dict["mapping"]["wanted"]) is int
+
+
+def test_generate_truthy_dict_get_absence_uses_deterministic_sentinel() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "mapping", 'lookup_result = mapping.get("wanted")',
+            "lookup_result is None", "return 0", "END",
+        ],
+        node_types=["start", "if", "Assign", "if", "return", "end"],
+        edge_labels=[None, "True", None, "True", None],
+    )
+
+    first = PathInputGenerator().generate(
+        path, ("mapping",), {"mapping": "dict[str, int]"}
+    ).keyword_argument_dict["mapping"]
+    second = PathInputGenerator().generate(
+        path, ("mapping",), {"mapping": "dict[str, int]"}
+    ).keyword_argument_dict["mapping"]
+
+    assert first == second
+    assert first
+    assert "wanted" not in first
+    assert all(type(value) is int for value in first.values())
+
+
+def test_generate_dict_get_default_and_expected_result_replay() -> None:
+    result = PathInputGenerator().generate(
+        _create_dict_get_path(
+            lookup='mapping.get("wanted", 7)',
+            condition="lookup_result is not None",
+            return_label="return lookup_result",
+        ),
+        ("mapping",),
+        {"mapping": "dict[str, int]"},
+    )
+
+    assert result.expected_result == 7
+
+
+@pytest.mark.parametrize(
+    ("prefix_labels", "prefix_types", "lookup"),
+    [
+        ((), (), "mapping.get(key)"),
+        (("key_alias = key",), ("Assign",), "mapping.get(key_alias)"),
+        (("key_alias = keys[0]",), ("Assign",), "mapping.get(key_alias)"),
+    ],
+)
+def test_generate_dict_get_preserves_dynamic_key_provenance(
+    prefix_labels: tuple[str, ...],
+    prefix_types: tuple[str, ...],
+    lookup: str,
+) -> None:
+    parameter_names = (
+        ("mapping", "key", "keys")
+        if "keys[" in " ".join(prefix_labels)
+        else ("mapping", "key")
+    )
+    candidate_values = {"key": "category", "keys": ["category"]}
+    result = PathInputGenerator().generate(
+        _create_dict_get_path(
+            lookup=lookup,
+            condition="lookup_result is not None",
+            prefix_labels=prefix_labels,
+            prefix_types=prefix_types,
+        ),
+        parameter_names,
+        {"mapping": "dict[str, int]", **(
+            {"key": "str"} if "key" in parameter_names else {}
+        ), **({"keys": "list[str]"} if "keys" in parameter_names else {})},
+        candidate_values,
+    )
+    arguments = result.keyword_argument_dict
+    key = arguments.get("key", arguments.get("keys", [None])[0])
+
+    assert key in arguments["mapping"]
+
+
+def test_generate_synthesizes_loop_element_dictionary_lookup() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 2, 10, 11],
+        edge_labels=[
+            None, "Iterate", "False", None, None, "False", "False",
+            None, "True", "Complete", None,
+        ],
+        node_labels=[
+            "START", "transaction in transactions",
+            "not isinstance(transaction, dict)",
+            'category = transaction["category"]',
+            'amount = transaction["amount"]',
+            "not isinstance(category, str)",
+            "not isinstance(amount, int)",
+            "category_limit = limits.get(category)",
+            "category_limit is not None",
+            "transaction in transactions", "return 0", "END",
+        ],
+        node_types=[
+            "start", "for", "if", "Assign", "Assign", "if", "if",
+            "Assign", "if", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 13)),
+    )
+
+    arguments = PathInputGenerator().generate(
+        path,
+        ("transactions", "limits"),
+        {
+            "transactions": "list[dict[str, int | str]]",
+            "limits": "dict[str, int]",
+        },
+    ).keyword_argument_dict
+    transaction = arguments["transactions"][0]
+
+    assert type(transaction) is dict
+    assert type(transaction["category"]) is str
+    assert type(transaction["amount"]) is int
+    assert transaction["category"] in arguments["limits"]
+
+
+def test_generate_keeps_structured_locals_separate_between_iterations() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 2, 3, 4, 5, 2, 6, 7],
+        edge_labels=[
+            None, "Iterate", "True", None, "True", "Iterate",
+            "True", None, "False", "Complete", None,
+        ],
+        node_labels=[
+            "START", "item in items", "isinstance(item, dict)",
+            'category = item["category"]', 'category == "A"',
+            "item in items", "isinstance(item, dict)",
+            'category = item["category"]', 'category == "A"',
+            "item in items", "return 0", "END",
+        ],
+        node_types=[
+            "start", "for", "if", "Assign", "if", "for", "if",
+            "Assign", "if", "for", "return", "end",
+        ],
+        line_numbers=list(range(1, 13)),
+    )
+
+    items = PathInputGenerator().generate(
+        path,
+        ("items",),
+        {"items": "list[dict[str, str]]"},
+    ).keyword_argument_dict["items"]
+
+    assert items[0]["category"] == "A"
+    assert items[1]["category"] != "A"
+
+
+def test_generate_nested_loop_dictionary_key_error_input() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6, 7],
+        edge_labels=[None, "Iterate", "True", "Exception", None, None],
+        node_labels=[
+            "START", "item in items", "isinstance(item, dict)",
+            'value = item["required"]', "except KeyError",
+            'return "missing"', "END",
+        ],
+        node_types=[
+            "start", "for", "if", "Assign", "except", "return", "end",
+        ],
+        line_numbers=list(range(1, 8)),
+    )
+
+    result = PathInputGenerator().generate(
+        path,
+        ("items",),
+        {"items": "list[dict[str, int]]"},
+    )
+
+    assert "required" not in result.keyword_argument_dict["items"][0]
+    assert result.expected_result == "missing"
+
+
+def test_generate_rejects_dictionary_key_present_absent_conflict() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", 'first = mapping["key"]',
+            'second = mapping["key"]', "except KeyError", "return 0", "END",
+        ],
+        node_types=[
+            "start", "Assign", "Assign", "except", "return", "end",
+        ],
+        edge_labels=[None, None, "Exception", None, None],
+    )
+
+    with pytest.raises(UnreachablePathError, match="present ve absent"):
+        PathInputGenerator().generate(
+            path,
+            ("mapping",),
+            {"mapping": "dict[str, int]"},
+        )
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        'receiver.get("key")',
+        'holder.mapping.get("key")',
+        'mapping.get(key="key")',
+        'mapping.get(*keys)',
+        'mapping.get("key", **options)',
+        'mapping.other("key")',
+    ],
+)
+def test_generate_rejects_unsafe_dict_get_shapes(lookup: str) -> None:
+    path = _create_dict_get_path(
+        lookup=lookup,
+        condition="lookup_result is not None",
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="dict|get|lookup"):
+        PathInputGenerator().generate(
+            path,
+            ("mapping", "receiver", "holder", "keys", "options"),
+            {"mapping": "dict[str, int]"},
+        )
+
+
+def test_generate_classifies_unsupported_affine_comparison_as_domain_error() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START", "category_total > category_limit * 2", "return 0", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(
+        UnsupportedInputSynthesisError,
+        match="category_total > category_limit \\* 2",
+    ):
+        PathInputGenerator().generate(
+            path,
+            ("category_total", "category_limit"),
+        )

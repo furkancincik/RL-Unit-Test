@@ -251,10 +251,38 @@ class DerivedValueInputSynthesizer:
         )
         if expression is None:
             expressions.pop(target_name, None)
-            unsupported_names.add(target_name)
+            if self._is_safe_structured_external_expression(value):
+                unsupported_names.discard(target_name)
+            else:
+                unsupported_names.add(target_name)
         else:
             expressions[target_name] = expression
             unsupported_names.discard(target_name)
+
+    @staticmethod
+    def _is_safe_structured_external_expression(expression: ast.expr) -> bool:
+        """PathInputGenerator'ın doğruladığı dar structured provenance biçimleri."""
+        if isinstance(expression, ast.Subscript) and isinstance(
+            expression.value, ast.Name
+        ):
+            try:
+                key = ast.literal_eval(expression.slice)
+            except (ValueError, TypeError):
+                return False
+            return isinstance(key, (int, str)) and not isinstance(key, bool)
+
+        return bool(
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Attribute)
+            and isinstance(expression.func.value, ast.Name)
+            and expression.func.attr == "get"
+            and not expression.keywords
+            and len(expression.args) in {1, 2}
+            and not any(
+                isinstance(argument, ast.Starred)
+                for argument in expression.args
+            )
+        )
 
     def _parse_expression(
         self,

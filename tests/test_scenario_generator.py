@@ -1332,3 +1332,115 @@ def classify(value: dict[str, int]) -> str:
         for scenario in scenarios
     )
     assert generator.rejections == ()
+
+
+def test_generate_isolates_unsupported_dict_get_receiver() -> None:
+    unsupported_path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5],
+        edge_labels=[None, None, "True", None],
+        node_labels=[
+            "START", 'result = receiver.get("key")',
+            "result is not None", "return 1", "END",
+        ],
+        node_types=["start", "Assign", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4, 5],
+    )
+    generator = ScenarioGenerator()
+
+    assert generator.generate(
+        function_name="lookup",
+        paths=[unsupported_path],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("receiver",),
+    ) == []
+    assert generator.rejections[0].category is (
+        ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+    )
+
+    assert generator.generate(
+        function_name="lookup",
+        paths=[create_mock_path(1)],
+        scores=[create_mock_score(1, 100.0)],
+    )
+    assert generator.rejections == ()
+
+
+def test_real_cfg_dict_get_scenarios_are_concrete_valid(tmp_path: Path) -> None:
+    source_file = tmp_path / "safe_lookup.py"
+    source_file.write_text(
+        """
+def lookup(mapping: dict[str, int], key: str) -> int:
+    result = mapping.get(key)
+    if result is None:
+        return -1
+    return result
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="lookup",
+        paths=paths,
+        scores=scores,
+        parameter_names=tuple(function.parameters),
+        parameter_types=function.parameter_types,
+    )
+    target = runpy.run_path(str(source_file))["lookup"]
+
+    assert len(scenarios) == 2
+    assert all(
+        target(**scenario.keyword_argument_dict) == scenario.expected_result
+        for scenario in scenarios
+    )
+
+
+def test_real_robustness_path_seven_accepts_safe_lookup() -> None:
+    source_file = Path("datasets/sample_robustness_code.py")
+    function = next(
+        function
+        for function in PythonAnalyzer().analyze_file(source_file).functions
+        if function.name == "analyze_transactions"
+    )
+    graph = next(
+        graph
+        for graph in ControlFlowGraphBuilder().build_from_file(source_file)
+        if graph.function_name == function.name
+    )
+    path = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=3)[6]
+
+    generated = PathInputGenerator().generate(
+        path=path,
+        parameter_names=tuple(function.parameters),
+        parameter_types=function.parameter_types,
+    )
+    target = runpy.run_path(str(source_file))[function.name]
+
+    assert target(**generated.keyword_argument_dict) == generated.expected_result
+
+
+def test_generate_isolates_unsupported_affine_comparison_path() -> None:
+    unsupported_path = ExecutionPath(
+        node_ids=[1, 2, 3, 4],
+        edge_labels=[None, "True", None],
+        node_labels=[
+            "START", "total > limit * 2", "return 1", "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4],
+    )
+    generator = ScenarioGenerator()
+
+    assert generator.generate(
+        function_name="check",
+        paths=[unsupported_path],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("total", "limit"),
+    ) == []
+    assert generator.rejections[0].category is (
+        ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+    )
