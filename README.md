@@ -298,6 +298,36 @@ python main.py --operation rl --source-file datasets/sample_robustness_code.py -
 
 ---
 
+## Secure Source Acquisition and Python Project Discovery
+
+The service layer can now resolve three source kinds without importing or executing project code:
+
+- A local Python file
+- A local project directory
+- A public GitHub repository using an exact `https://github.com/<owner>/<repository>` URL
+
+```text
+Local Python file ---------+
+                           |
+Local project directory ---+--> Source acquisition policy
+                           |       |
+Public GitHub HTTPS URL ---+       +--> Resource and path limits
+                                   +--> Symlink/junction containment
+                                   +--> Deterministic Python discovery
+                                   +--> Module-path candidates
+                                   +--> Immutable JSON-safe inventory
+```
+
+Local discovery supports top-level modules, regular packages, normalized package `__init__.py` paths, and conventional `src/` layouts. Ambiguous or non-importable layouts are reported instead of guessed. PEP 263 encoding detection and per-file AST parsing classify unsupported encodings and syntax errors without allowing one broken file to hide valid modules. Test discovery is controlled by the explicit `include_tests` request option.
+
+Ignored directories come from one general policy covering Git metadata, virtual environments, caches, build outputs, installed dependencies, `node_modules`, and generated output. Discovery does not follow symlinks, junctions, or reparse points, and every candidate is checked against the resolved project root. Configurable limits cover clone time, repository bytes, Python file count, single-file bytes, total Python bytes, and path depth.
+
+Public GitHub acquisition uses a unique tool-owned system-temp workspace and a shallow, single-branch, no-tags clone. Git runs with `shell=False`, credential prompting and helpers disabled, process-local Git configuration, disabled LFS smudge, no submodule recursion, and a disabled hook path. Clone output is discarded; only the validated 40-character commit SHA is captured. Failed or timed-out clones clean their partial workspace, while local user-owned sources are never cleanup targets. No dependency manifest, setup script, package manager, or repository code is executed.
+
+The real local-project acceptance discovered top-level, package, and `src/` modules, excluded tests by default, included them on request, ignored `.venv`, and preserved the user-owned workspace. A real temporary local Git fixture verified commit-SHA resolution. Anonymous `ls-remote` access succeeded for both the current origin and GitHub's official small public connectivity fixture. The single official resolver acceptance completed the clone in 1.133 seconds and resolved commit `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`. The fixture contained no Python files; this is reported as a non-fatal `NO_PYTHON_FILES` partial inventory rather than `CLONE_FAILED`. That run exposed Windows read-only Git pack cleanup behavior, which now has a regression-tested writable-retry path; the tool-owned workspace was removed and no Git process remained. Repository inventory handoff into multi-file RL analysis remains a 38.2 task.
+
+---
+
 # Architecture
 
 ```text
@@ -641,9 +671,10 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,746 |
+| Passed | 1,807 |
 | Failed | 0 |
-| Duration | 106.75s |
+| Skipped | 1 (Windows symlink creation unavailable) |
+| Duration | 109.57s |
 
 ---
 
@@ -729,6 +760,11 @@ RL-Unit-Test
 - Exact-Coverage RL vs Greedy Strategy Comparison
 - Real Raw-RL Suite Coverage Verification
 - Optional Per-Function Project Comparison Serialization
+- Immutable Local/GitHub Source Acquisition Models
+- Secure Public GitHub HTTPS URL Validation and Shallow Clone Policy
+- Deterministic Python Project Discovery and Module-Path Inference
+- Tool-Owned Temporary Workspace Cleanup
+- Source Discovery Resource and Path-Containment Limits
 
 ---
 
@@ -742,6 +778,7 @@ RL-Unit-Test
 - Comparison Coverage-Execution Caching and Performance
 - Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
+- Repository Inventory to Multi-Function Analysis Integration (38.2)
 
 ---
 
@@ -751,8 +788,6 @@ RL-Unit-Test
 - State Representation Experiments
 - Hyperparameter Evaluation
 - Additional Complex Dataset Experiments
-- External Multi-File Project Input
-- Git Repository Input
 - Dependency Discovery
 - Isolated and Resource-Limited Execution
 - Tree-sitter Integration
@@ -772,6 +807,8 @@ RL-Unit-Test
 - Aggregate project coverage is reported as unmeasured because function percentages are not arithmetically averaged and a combined-suite measurement is not yet performed.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
+- Source acquisition currently produces a safe project inventory only; repository-wide RL/coverage orchestration is not connected until 38.2.
+- Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, dependency installation, and untrusted project execution are intentionally unsupported.
 
 ---
 
