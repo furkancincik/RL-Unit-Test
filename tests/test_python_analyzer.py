@@ -34,6 +34,55 @@ def test_analyze_file_returns_correct_counts() -> None:
     assert function.risk_level == "Low"
 
 
+def test_function_discovery_preserves_source_order_and_scope_metadata(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "targets.py"
+    source_file.write_text(
+        """
+def first(value: int) -> int:
+    return value
+
+async def asynchronous() -> None:
+    return None
+
+def outer() -> int:
+    def nested() -> int:
+        return 1
+    return nested()
+
+class Handler:
+    def method(self) -> int:
+        return 1
+
+def last(*, enabled: bool) -> bool:
+    return enabled
+""",
+        encoding="utf-8",
+    )
+
+    functions = PythonAnalyzer().analyze_file(source_file).functions
+
+    assert [function.qualified_name for function in functions] == [
+        "first",
+        "asynchronous",
+        "outer",
+        "outer.nested",
+        "Handler.method",
+        "last",
+    ]
+    assert functions[0].return_annotation == "int"
+    assert functions[0].is_supported is True
+    assert functions[1].is_async is True
+    assert functions[1].is_supported is False
+    assert functions[3].is_nested is True
+    assert functions[3].is_supported is False
+    assert functions[4].is_method is True
+    assert functions[4].is_supported is False
+    assert functions[5].parameters == ["enabled"]
+    assert functions[5].is_supported is True
+
+
 def test_analyze_file_raises_error_when_file_does_not_exist() -> None:
     analyzer = PythonAnalyzer()
 

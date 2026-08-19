@@ -24,6 +24,12 @@ class FunctionInfo:
     parameter_types: dict[str, str] = field(
         default_factory=dict
     )
+    return_annotation: str | None = None
+    qualified_name: str = ""
+    is_nested: bool = False
+    is_method: bool = False
+    is_supported: bool = True
+    unsupported_reason: str | None = None
 
 
 @dataclass
@@ -112,17 +118,21 @@ class PythonAnalyzer:
         tree: ast.AST,
     ) -> list[FunctionInfo]:
         functions: list[FunctionInfo] = []
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        function_nodes = sorted(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
 
-        for node in ast.walk(tree):
-            if not isinstance(
-                node,
-                (
-                    ast.FunctionDef,
-                    ast.AsyncFunctionDef,
-                ),
-            ):
-                continue
-
+        for node in function_nodes:
             parameters = self._extract_parameters(node)
             parameter_types = self._extract_parameter_types(
                 node
@@ -135,6 +145,20 @@ class PythonAnalyzer:
                 node
             )
             cyclomatic_complexity = 1 + branch_count
+            ancestry = self._function_ancestry(node, parents)
+            is_nested = any(
+                isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for parent in ancestry
+            )
+            is_method = any(
+                isinstance(parent, ast.ClassDef) for parent in ancestry
+            )
+            unsupported_reason = self._unsupported_reason(
+                node=node,
+                direct_parent=parents.get(node),
+                is_nested=is_nested,
+                is_method=is_method,
+            )
 
             functions.append(
                 FunctionInfo(
@@ -168,10 +192,71 @@ class PythonAnalyzer:
                         else node.lineno
                     ),
                     parameter_types=parameter_types,
+                    return_annotation=(
+                        ast.unparse(node.returns)
+                        if node.returns is not None
+                        else None
+                    ),
+                    qualified_name=self._qualified_name(node, ancestry),
+                    is_nested=is_nested,
+                    is_method=is_method,
+                    is_supported=unsupported_reason is None,
+                    unsupported_reason=unsupported_reason,
                 )
             )
 
         return functions
+
+    @staticmethod
+    def _function_ancestry(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        parents: dict[ast.AST, ast.AST],
+    ) -> tuple[ast.AST, ...]:
+        ancestry: list[ast.AST] = []
+        current = parents.get(node)
+        while current is not None:
+            ancestry.append(current)
+            current = parents.get(current)
+        return tuple(ancestry)
+
+    @staticmethod
+    def _qualified_name(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        ancestry: tuple[ast.AST, ...],
+    ) -> str:
+        scope_names = [
+            parent.name
+            for parent in reversed(ancestry)
+            if isinstance(
+                parent,
+                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+        ]
+        return ".".join((*scope_names, node.name))
+
+    @staticmethod
+    def _unsupported_reason(
+        *,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        direct_parent: ast.AST | None,
+        is_nested: bool,
+        is_method: bool,
+    ) -> str | None:
+        if isinstance(node, ast.AsyncFunctionDef):
+            return "Async functions are not supported by the production pipeline."
+        if is_nested:
+            return "Nested functions are not supported by the production pipeline."
+        if is_method:
+            return "Class methods are not supported by the production pipeline."
+        if not isinstance(direct_parent, ast.Module):
+            return "Conditionally defined functions are not supported."
+        if node.name.startswith("__") and node.name.endswith("__"):
+            return "Dunder functions are excluded from automatic production runs."
+        if node.args.posonlyargs:
+            return "Positional-only parameters are not supported."
+        if node.args.vararg is not None or node.args.kwarg is not None:
+            return "Variadic function signatures are not supported."
+        return None
 
     @staticmethod
     def _extract_parameters(
@@ -179,7 +264,7 @@ class PythonAnalyzer:
     ) -> list[str]:
         return [
             argument.arg
-            for argument in node.args.args
+            for argument in (*node.args.args, *node.args.kwonlyargs)
         ]
 
     @staticmethod
@@ -195,7 +280,7 @@ class PythonAnalyzer:
         """
         parameter_types: dict[str, str] = {}
 
-        for argument in node.args.args:
+        for argument in (*node.args.args, *node.args.kwonlyargs):
             if argument.annotation is None:
                 continue
 
@@ -211,7 +296,7 @@ class PythonAnalyzer:
     ) -> int:
         return sum(
             argument.annotation is not None
-            for argument in node.args.args
+            for argument in (*node.args.args, *node.args.kwonlyargs)
         )
 
     @staticmethod

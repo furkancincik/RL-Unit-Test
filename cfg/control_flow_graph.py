@@ -79,12 +79,19 @@ class ControlFlowGraphBuilder:
 
         graphs: list[ControlFlowGraph] = []
 
-        for node in ast.walk(tree):
-            if isinstance(
-                node,
-                (ast.FunctionDef, ast.AsyncFunctionDef),
-            ):
-                graphs.append(self._build_function_graph(node))
+        function_nodes = sorted(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(
+                    node,
+                    (ast.FunctionDef, ast.AsyncFunctionDef),
+                )
+            ),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        for node in function_nodes:
+            graphs.append(self._build_function_graph(node))
 
         return graphs
 

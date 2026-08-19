@@ -1,13 +1,17 @@
 ﻿import argparse
-from collections.abc import Sequence
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from analyzer.python_analyzer import PythonAnalyzer
+from analyzer.python_analyzer import AnalysisResult, PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from cfg.path_analyzer import CFGPathAnalyzer
 from evaluator.dqm import DecisionQualityMatrix
 from reports.json_reporter import JSONReportWriter
+from services.project_analysis_report_service import (
+    ProjectAnalysisReportFormatter,
+)
 from services.automation_service import (
     AutomationService,
     AutomationSummary,
@@ -20,6 +24,14 @@ from services.rl_demo_service import RLDemoService
 from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
+)
+from models.project_analysis_result import (
+    ProjectAnalysisResult,
+    ProjectRunStatus,
+)
+from services.source_analysis_orchestrator import (
+    SourceAnalysisOrchestrator,
+    SourceAnalysisValidationError,
 )
 
 
@@ -48,11 +60,12 @@ CLI_OPERATIONS = (
 class ApplicationConfiguration:
     """Komut satırından alınan hedef ve çalışma ayarlarını taşır."""
 
-    source_file: Path
-    module_path: str
-    function_name: str
+    source_file: Path | None
+    module_path: str | None
+    function_name: str | None
     output_directory: Path
     operation: str = "menu"
+    all_functions: bool = False
     max_visits_per_node: int = 3
     episode_count: int = 3
     epsilon: float = 0.0
@@ -61,6 +74,7 @@ class ApplicationConfiguration:
     random_seed: int = 42
     overwrite: bool = True
     timeout_seconds: float = 30.0
+    pipeline_timeout_seconds: float | None = None
 
 
 def _python_source_file(value: str) -> Path:
@@ -137,7 +151,7 @@ def _positive_float(value: str) -> float:
             f"Pozitif sayı bekleniyordu: {value!r}"
         ) from error
 
-    if normalized_value <= 0.0:
+    if not math.isfinite(normalized_value) or normalized_value <= 0.0:
         raise argparse.ArgumentTypeError(
             f"Değer sıfırdan büyük olmalıdır: {value!r}"
         )
@@ -154,7 +168,10 @@ def _probability(value: str) -> float:
             f"Oran sayısal olmalıdır: {value!r}"
         ) from error
 
-    if not 0.0 <= normalized_value <= 1.0:
+    if (
+        not math.isfinite(normalized_value)
+        or not 0.0 <= normalized_value <= 1.0
+    ):
         raise argparse.ArgumentTypeError(
             f"Oran 0.0 ile 1.0 arasında olmalıdır: {value!r}"
         )
@@ -174,29 +191,35 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-file",
         type=_python_source_file,
-        default=Path(SOURCE_FILE),
+        default=None,
         help=(
-            "Analiz edilecek Python dosyası "
-            f"(varsayılan: {SOURCE_FILE})."
+            "Analiz edilecek Python dosyası. Production RL işlemi için "
+            "açıkça verilmelidir."
         ),
     )
     parser.add_argument(
         "--module-path",
         type=_python_module_path,
-        default=MODULE_PATH,
+        default=None,
         help=(
-            "Kaynak dosyanın import edilebilir modül yolu "
-            f"(varsayılan: {MODULE_PATH})."
+            "Kaynak dosyanın import edilebilir modül yolu. Production RL "
+            "işlemi için açıkça verilmelidir."
         ),
     )
-    parser.add_argument(
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
         "--function-name",
         type=_python_identifier,
-        default=FUNCTION_NAME,
+        default=None,
         help=(
-            "RL eğitimi uygulanacak fonksiyon "
-            f"(varsayılan: {FUNCTION_NAME})."
+            "RL eğitimi uygulanacak fonksiyon. Production RL işleminde "
+            "--all-functions kullanılmıyorsa açıkça verilmelidir."
         ),
+    )
+    target_group.add_argument(
+        "--all-functions",
+        action="store_true",
+        help="Kaynak dosyadaki bütün keşfedilmiş fonksiyonları raporlar.",
     )
     parser.add_argument(
         "--output-directory",
@@ -259,6 +282,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Her test veya coverage çalıştırmasının süre sınırı.",
     )
     parser.add_argument(
+        "--pipeline-timeout-seconds",
+        type=_positive_float,
+        default=None,
+        help="Her fonksiyonun production pipeline süre sınırı.",
+    )
+    parser.add_argument(
         "--no-overwrite",
         action="store_false",
         dest="overwrite",
@@ -275,14 +304,34 @@ def parse_cli_arguments(
     argv: Sequence[str] | None = None,
 ) -> ApplicationConfiguration:
     """CLI argümanlarını çalışma yapılandırmasına dönüştürür."""
-    arguments = create_argument_parser().parse_args(argv)
+    parser = create_argument_parser()
+    arguments = parser.parse_args(argv)
+    source_file = arguments.source_file
+    module_path = arguments.module_path
+    function_name = arguments.function_name
+
+    if arguments.operation == "rl":
+        if source_file is None:
+            parser.error("--operation rl için --source-file zorunludur.")
+        if module_path is None:
+            parser.error("--operation rl için --module-path zorunludur.")
+        if function_name is None and not arguments.all_functions:
+            parser.error(
+                "--operation rl için --function-name veya --all-functions zorunludur."
+            )
+    elif arguments.operation != "menu":
+        source_file = source_file or Path(SOURCE_FILE)
+        module_path = module_path or MODULE_PATH
+        if function_name is None and not arguments.all_functions:
+            function_name = FUNCTION_NAME
 
     return ApplicationConfiguration(
-        source_file=arguments.source_file,
-        module_path=arguments.module_path,
-        function_name=arguments.function_name,
+        source_file=source_file,
+        module_path=module_path,
+        function_name=function_name,
         output_directory=arguments.output_directory,
         operation=arguments.operation,
+        all_functions=arguments.all_functions,
         max_visits_per_node=arguments.max_visits_per_node,
         episode_count=arguments.episode_count,
         epsilon=arguments.epsilon,
@@ -291,6 +340,7 @@ def parse_cli_arguments(
         random_seed=arguments.random_seed,
         overwrite=arguments.overwrite,
         timeout_seconds=arguments.timeout_seconds,
+        pipeline_timeout_seconds=arguments.pipeline_timeout_seconds,
     )
 
 
@@ -326,6 +376,13 @@ def print_analyzer_report(
         print(f"\nFonksiyon #{index}")
         print("-" * 55)
         print(f"Fonksiyon Adı              : {function.name}")
+        print(f"Qualified Adı              : {function.qualified_name}")
+        print(
+            "Production Desteği         : "
+            f"{'Destekleniyor' if function.is_supported else 'Desteklenmiyor'}"
+        )
+        if function.unsupported_reason is not None:
+            print(f"Desteklenmeme Nedeni       : {function.unsupported_reason}")
         print(f"Parametreler               : {function.parameters}")
         print(f"Satır Numarası             : {function.line_number}")
         print(f"Async Fonksiyon mu?        : {function.is_async}")
@@ -836,6 +893,53 @@ def run_real_rl_training(
     return result
 
 
+def run_source_analysis(
+    source_file: str | Path,
+    module_path: str,
+    function_name: str | None,
+    all_functions: bool,
+    output_directory: str | Path = GENERATED_TEST_DIRECTORY,
+    *,
+    max_visits_per_node: int = 3,
+    episode_count: int = 3,
+    epsilon: float = 0.0,
+    learning_rate: float = 0.5,
+    discount_factor: float = 0.9,
+    random_seed: int | None = 42,
+    overwrite: bool = True,
+    timeout_seconds: float = 30.0,
+    pipeline_timeout_seconds: float | None = None,
+) -> ProjectAnalysisResult:
+    """Tek veya bütün fonksiyonlar için ortak production akışını çalıştırır."""
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path=module_path,
+        function_name=function_name,
+        all_functions=all_functions,
+        output_root=output_directory,
+        max_visits_per_node=max_visits_per_node,
+        episode_count=episode_count,
+        epsilon=epsilon,
+        learning_rate=learning_rate,
+        discount_factor=discount_factor,
+        random_seed=random_seed,
+        overwrite=overwrite,
+        timeout_seconds=timeout_seconds,
+        per_function_timeout_seconds=pipeline_timeout_seconds,
+    )
+    print(ProjectAnalysisReportFormatter().format(result))
+    return result
+
+
+def project_exit_code(result: ProjectAnalysisResult) -> int:
+    """Project sonucunu kararlı CLI exit code'una dönüştürür."""
+    if result.status in {ProjectRunStatus.COMPLETED, ProjectRunStatus.PARTIAL}:
+        return 0 if result.has_usable_result else 3
+    if result.status is ProjectRunStatus.TIMED_OUT:
+        return 4
+    return 3
+
+
 def print_runtime_configuration(
     configuration: ApplicationConfiguration,
 ) -> None:
@@ -845,13 +949,20 @@ def print_runtime_configuration(
     print("=" * 65)
     print(f"Kaynak dosya          : {configuration.source_file}")
     print(f"Modül yolu            : {configuration.module_path}")
-    print(f"Hedef fonksiyon       : {configuration.function_name}")
+    print(
+        "Hedef fonksiyon       : "
+        f"{'TÜM FONKSİYONLAR' if configuration.all_functions else configuration.function_name}"
+    )
     print(f"Çıktı klasörü         : {configuration.output_directory}")
     print(
         "Düğüm ziyaret sınırı : "
         f"{configuration.max_visits_per_node}"
     )
     print(f"Episode sayısı        : {configuration.episode_count}")
+    print(
+        "Fonksiyon pipeline timeout: "
+        f"{configuration.pipeline_timeout_seconds or 'Yok'}"
+    )
 
 
 def run_configured_operation(
@@ -908,10 +1019,11 @@ def run_configured_operation(
         return RLDemoService().run()
 
     if operation == "rl":
-        return run_real_rl_training(
+        return run_source_analysis(
             source_file=configuration.source_file,
             module_path=configuration.module_path,
             function_name=configuration.function_name,
+            all_functions=configuration.all_functions,
             output_directory=configuration.output_directory,
             max_visits_per_node=(
                 configuration.max_visits_per_node
@@ -923,6 +1035,9 @@ def run_configured_operation(
             random_seed=configuration.random_seed,
             overwrite=configuration.overwrite,
             timeout_seconds=configuration.timeout_seconds,
+            pipeline_timeout_seconds=(
+                configuration.pipeline_timeout_seconds
+            ),
         )
 
     raise ValueError(
@@ -930,32 +1045,243 @@ def run_configured_operation(
     )
 
 
+def _interactive_source_file() -> tuple[Path, AnalysisResult]:
+    raw_value = input("Python kaynak dosyası: ").strip()
+    if not raw_value:
+        raise SourceAnalysisValidationError(
+            "Python kaynak dosyası boş bırakılamaz."
+        )
+    try:
+        source_file = _python_source_file(raw_value).resolve()
+    except argparse.ArgumentTypeError as error:
+        raise SourceAnalysisValidationError(str(error)) from error
+
+    analysis = PythonAnalyzer().analyze_file(source_file)
+    print(f"Seçilen kaynak       : {source_file}")
+    return source_file, analysis
+
+
+def _suggest_module_path(source_file: Path) -> str | None:
+    try:
+        relative_path = source_file.relative_to(Path.cwd().resolve())
+    except ValueError:
+        return None
+    parts = list(relative_path.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    if not parts or any(not part.isidentifier() for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def _interactive_module_path(source_file: Path) -> str:
+    suggestion = _suggest_module_path(source_file)
+    prompt = "Module path"
+    if suggestion is not None:
+        prompt += f" [{suggestion}]"
+    raw_value = input(f"{prompt}: ").strip()
+    if not raw_value:
+        if suggestion is None:
+            raise SourceAnalysisValidationError("Module path boş bırakılamaz.")
+        return suggestion
+    try:
+        return _python_module_path(raw_value)
+    except argparse.ArgumentTypeError as error:
+        raise SourceAnalysisValidationError(str(error)) from error
+
+
+def _interactive_target_selection(
+    analysis: AnalysisResult,
+) -> tuple[str | None, bool]:
+    mode = input("Analiz modu [1=tek fonksiyon, 2=tüm fonksiyonlar]: ").strip()
+    if mode == "2":
+        return None, True
+    if mode != "1":
+        raise SourceAnalysisValidationError("Analiz modu 1 veya 2 olmalıdır.")
+
+    functions = tuple(
+        function
+        for function in analysis.functions
+        if function.is_supported
+    )
+    if not functions:
+        raise SourceAnalysisValidationError(
+            "Kaynak dosyada desteklenen fonksiyon bulunamadı."
+        )
+    print("Desteklenen fonksiyonlar:")
+    for function in functions:
+        print(f"- {function.name}")
+    raw_name = input("Function name: ").strip()
+    if not raw_name.isidentifier():
+        raise SourceAnalysisValidationError("Geçerli bir function name girilmelidir.")
+    if raw_name not in {function.name for function in functions}:
+        raise SourceAnalysisValidationError(
+            f"Desteklenen fonksiyon bulunamadı: {raw_name}"
+        )
+    return raw_name, False
+
+
+def _interactive_output_root(source_file: Path) -> Path:
+    safe_stem = "".join(
+        character if character.isalnum() or character == "_" else "_"
+        for character in source_file.stem
+    ).strip("_") or "source"
+    suggestion = (Path("output") / f"{safe_stem}_analysis").resolve()
+    raw_value = input(f"Output directory [{suggestion}]: ").strip()
+    return Path(raw_value).resolve() if raw_value else suggestion
+
+
+def _interactive_value(
+    label: str,
+    default: int | float,
+    parser: Callable[[str], int | float],
+) -> int | float:
+    raw_value = input(f"{label} [{default}]: ").strip()
+    if not raw_value:
+        return default
+    try:
+        return parser(raw_value)
+    except argparse.ArgumentTypeError as error:
+        raise SourceAnalysisValidationError(str(error)) from error
+
+
+def _interactive_analysis_configuration(
+    defaults: ApplicationConfiguration,
+) -> ApplicationConfiguration:
+    source_file, analysis = _interactive_source_file()
+    module_path = _interactive_module_path(source_file)
+    function_name, all_functions = _interactive_target_selection(analysis)
+    output_directory = _interactive_output_root(source_file)
+    advanced = input("Gelişmiş ayarlar kullanılsın mı? [e/H]: ").strip().lower()
+    if advanced not in {"", "e", "evet", "h", "hayır", "hayir"}:
+        raise SourceAnalysisValidationError("Gelişmiş ayar seçimi e veya h olmalıdır.")
+    if advanced in {"", "h", "hayır", "hayir"}:
+        return ApplicationConfiguration(
+            source_file=source_file,
+            module_path=module_path,
+            function_name=function_name,
+            all_functions=all_functions,
+            output_directory=output_directory,
+            operation="rl",
+            max_visits_per_node=defaults.max_visits_per_node,
+            episode_count=defaults.episode_count,
+            epsilon=defaults.epsilon,
+            learning_rate=defaults.learning_rate,
+            discount_factor=defaults.discount_factor,
+            random_seed=defaults.random_seed,
+            overwrite=defaults.overwrite,
+            timeout_seconds=defaults.timeout_seconds,
+            pipeline_timeout_seconds=defaults.pipeline_timeout_seconds,
+        )
+
+    max_visits = _interactive_value(
+        "Max visits per node", defaults.max_visits_per_node, _positive_int
+    )
+    episode_count = _interactive_value(
+        "Episode count", defaults.episode_count, _positive_int
+    )
+    epsilon = _interactive_value("Epsilon", defaults.epsilon, _probability)
+    learning_rate = _interactive_value(
+        "Learning rate", defaults.learning_rate, _probability
+    )
+    discount_factor = _interactive_value(
+        "Discount factor", defaults.discount_factor, _probability
+    )
+    seed_raw = input(f"Random seed [{defaults.random_seed}]: ").strip()
+    try:
+        random_seed = defaults.random_seed if not seed_raw else int(seed_raw)
+    except ValueError as error:
+        raise SourceAnalysisValidationError("Random seed tam sayı olmalıdır.") from error
+    timeout = _interactive_value(
+        "Pytest/coverage timeout", defaults.timeout_seconds, _positive_float
+    )
+    pipeline_default = defaults.pipeline_timeout_seconds
+    pipeline_label = "Yok" if pipeline_default is None else str(pipeline_default)
+    pipeline_raw = input(f"Pipeline timeout [{pipeline_label}]: ").strip()
+    if not pipeline_raw:
+        pipeline_timeout = pipeline_default
+    else:
+        try:
+            pipeline_timeout = _positive_float(pipeline_raw)
+        except argparse.ArgumentTypeError as error:
+            raise SourceAnalysisValidationError(str(error)) from error
+
+    return ApplicationConfiguration(
+        source_file=source_file,
+        module_path=module_path,
+        function_name=function_name,
+        all_functions=all_functions,
+        output_directory=output_directory,
+        operation="rl",
+        max_visits_per_node=int(max_visits),
+        episode_count=int(episode_count),
+        epsilon=float(epsilon),
+        learning_rate=float(learning_rate),
+        discount_factor=float(discount_factor),
+        random_seed=random_seed,
+        overwrite=defaults.overwrite,
+        timeout_seconds=float(timeout),
+        pipeline_timeout_seconds=pipeline_timeout,
+    )
+
+
+def _run_interactive_project_analysis(
+    defaults: ApplicationConfiguration,
+) -> ProjectAnalysisResult:
+    configuration = _interactive_analysis_configuration(defaults)
+    return run_source_analysis(
+        source_file=configuration.source_file,
+        module_path=configuration.module_path,
+        function_name=configuration.function_name,
+        all_functions=configuration.all_functions,
+        output_directory=configuration.output_directory,
+        max_visits_per_node=configuration.max_visits_per_node,
+        episode_count=configuration.episode_count,
+        epsilon=configuration.epsilon,
+        learning_rate=configuration.learning_rate,
+        discount_factor=configuration.discount_factor,
+        random_seed=configuration.random_seed,
+        overwrite=configuration.overwrite,
+        timeout_seconds=configuration.timeout_seconds,
+        pipeline_timeout_seconds=configuration.pipeline_timeout_seconds,
+    )
+
+
+def _run_interactive_static_preview() -> None:
+    source_file, _ = _interactive_source_file()
+    print_analyzer_report(source_file)
+
+
 def print_menu() -> None:
     """Uygulama ana menüsünü ekrana yazdırır."""
     print("\n" + "=" * 55)
-    print("RL UNIT TEST")
+    print("RL-UNIT-TEST DEVELOPER TOOL")
     print("=" * 55)
-    print("1 - Python kod analizi")
-    print("2 - Control Flow Graph")
-    print("3 - DQM yol önceliklendirme")
-    print("4 - DQM JSON raporu oluştur")
-    print("5 - Otomatik test üret ve çalıştır")
-    print("6 - Otomatik test üret ve coverage ölç")
-    print("7 - Q-Learning simülasyon demosu")
-    print("8 - Gerçek RL coverage eğitimi")
-    print("0 - Çıkış")
+    print("1. Kaynak Kod / Proje Analizi")
+    print("2. Hızlı Statik Ön İnceleme")
+    print("0. Çıkış")
 
 
 def main(
     argv: Sequence[str] | None = None,
-) -> None:
+) -> int:
     """Komut satırı uygulamasını çalıştırır."""
     configuration = parse_cli_arguments(argv)
-    print_runtime_configuration(configuration)
 
     if configuration.operation != "menu":
-        run_configured_operation(configuration)
-        return
+        print_runtime_configuration(configuration)
+        try:
+            result = run_configured_operation(configuration)
+        except (
+            FileNotFoundError,
+            SyntaxError,
+            SourceAnalysisValidationError,
+        ) as error:
+            print(f"CLI doğrulama hatası: {error}")
+            return 2
+        if configuration.operation == "rl":
+            return project_exit_code(result)
+        return 0
 
     while True:
         print_menu()
@@ -964,161 +1290,38 @@ def main(
 
         if choice == "1":
             print()
-            print_analyzer_report(configuration.source_file)
+            try:
+                _run_interactive_project_analysis(configuration)
+            except (
+                FileNotFoundError,
+                SyntaxError,
+                SourceAnalysisValidationError,
+            ) as error:
+                print(f"Proje analizi başlatılamadı: {error}")
             continue
 
         if choice == "2":
             print()
-            print_cfg_report(configuration.source_file)
-            continue
-
-        if choice == "3":
-            print()
-            print_dqm_report(
-                configuration.source_file,
-                max_visits_per_node=(
-                    configuration.max_visits_per_node
-                ),
-            )
-            continue
-
-        if choice == "4":
-            print()
-            create_dqm_json_report(
-                configuration.source_file,
-                max_visits_per_node=(
-                    configuration.max_visits_per_node
-                ),
-            )
-            continue
-
-        if choice == "5":
-            print()
-
             try:
-                run_automated_test_pipeline(
-                    source_file=configuration.source_file,
-                    module_path=configuration.module_path,
-                    output_directory=(
-                        configuration.output_directory
-                    ),
-                    overwrite=configuration.overwrite,
-                    timeout_seconds=(
-                        configuration.timeout_seconds
-                    ),
-                )
+                _run_interactive_static_preview()
             except (
                 FileNotFoundError,
-                TypeError,
-                ValueError,
-                TimeoutError,
-                OSError,
+                SyntaxError,
+                SourceAnalysisValidationError,
             ) as error:
-                print(
-                    "Otomatik test işlemi tamamlanamadı: "
-                    f"{error}"
-                )
-
-            continue
-
-        if choice == "6":
-            print()
-
-            try:
-                run_coverage_pipeline(
-                    source_file=configuration.source_file,
-                    module_path=configuration.module_path,
-                    output_directory=(
-                        configuration.output_directory
-                    ),
-                    overwrite=configuration.overwrite,
-                    timeout_seconds=(
-                        configuration.timeout_seconds
-                    ),
-                )
-            except (
-                FileNotFoundError,
-                TypeError,
-                ValueError,
-                TimeoutError,
-                RuntimeError,
-                OSError,
-            ) as error:
-                print(
-                    "Coverage işlemi tamamlanamadı: "
-                    f"{error}"
-                )
-
-            continue
-
-        if choice == "7":
-            print()
-
-            try:
-                demo_service = RLDemoService()
-                demo_service.run()
-            except (
-                TypeError,
-                ValueError,
-                RuntimeError,
-            ) as error:
-                print(
-                    "Q-Learning demosu tamamlanamadı: "
-                    f"{error}"
-                )
-
-            continue
-
-        if choice == "8":
-            print()
-
-            try:
-                run_real_rl_training(
-                    source_file=configuration.source_file,
-                    module_path=configuration.module_path,
-                    function_name=configuration.function_name,
-                    output_directory=(
-                        configuration.output_directory
-                    ),
-                    max_visits_per_node=(
-                        configuration.max_visits_per_node
-                    ),
-                    episode_count=configuration.episode_count,
-                    epsilon=configuration.epsilon,
-                    learning_rate=configuration.learning_rate,
-                    discount_factor=(
-                        configuration.discount_factor
-                    ),
-                    random_seed=configuration.random_seed,
-                    overwrite=configuration.overwrite,
-                    timeout_seconds=(
-                        configuration.timeout_seconds
-                    ),
-                )
-            except (
-                FileNotFoundError,
-                TypeError,
-                ValueError,
-                TimeoutError,
-                RuntimeError,
-                OSError,
-            ) as error:
-                print(
-                    "Gerçek RL eğitimi tamamlanamadı: "
-                    f"{error}"
-                )
+                print(f"Statik ön inceleme başlatılamadı: {error}")
 
             continue
 
         if choice == "0":
             print("\nProgram sonlandırıldı.")
-            break
+            return 0
 
         print(
             "\nGeçersiz seçim. "
-            "Lütfen 0, 1, 2, 3, 4, 5, 6, 7 veya 8 girin."
+            "Lütfen 0, 1 veya 2 girin."
         )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -763,3 +763,29 @@ def test_robustness_break_has_structural_loop_exit() -> None:
         and edge.target_id in decrement_nodes
         for edge in graph.edges
     )
+
+
+def test_graph_discovery_preserves_lexical_source_order(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "ordered_functions.py"
+    source_file.write_text(
+        "def first():\n    return 1\n\n"
+        "def outer():\n"
+        "    def nested():\n        return 2\n"
+        "    return nested()\n\n"
+        "class Handler:\n"
+        "    def method(self):\n        return 3\n\n"
+        "def last():\n    return 4\n",
+        encoding="utf-8",
+    )
+
+    graphs = ControlFlowGraphBuilder().build_from_file(source_file)
+
+    assert [graph.function_name for graph in graphs] == [
+        "first",
+        "outer",
+        "nested",
+        "method",
+        "last",
+    ]

@@ -5,6 +5,14 @@ from models.pipeline_diagnostic_result import (
     PipelineRunStatus,
     PipelineStage,
 )
+from models.project_analysis_result import (
+    FunctionAnalysisResult,
+    FunctionRunStatus,
+    FunctionSelectionMode,
+    FunctionTarget,
+    ProjectAnalysisResult,
+    ProjectRunStatus,
+)
 
 __all__ = [
     "CoverageResult",
@@ -12,4 +20,10 @@ __all__ = [
     "PipelineFunnelSnapshot",
     "PipelineRunStatus",
     "PipelineStage",
+    "FunctionAnalysisResult",
+    "FunctionRunStatus",
+    "FunctionSelectionMode",
+    "FunctionTarget",
+    "ProjectAnalysisResult",
+    "ProjectRunStatus",
 ]
