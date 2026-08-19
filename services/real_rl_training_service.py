@@ -40,6 +40,7 @@ from models.pipeline_diagnostic_result import (
     PipelineRunStatus,
     PipelineStage,
 )
+from models.scenario_minimization_result import ScenarioMinimizationResult
 from rl.coverage_environment import CoverageEnvironment
 from rl.coverage_state import CoverageState
 from rl.epsilon_greedy_policy import EpsilonGreedyPolicy
@@ -66,6 +67,9 @@ from services.coverage_reachability_service import (
 from services.pipeline_timeout_service import (
     GlobalPipelineTimeoutRunner,
     PipelineDiagnosticCheckpointStore,
+)
+from services.scenario_coverage_minimization_service import (
+    ScenarioCoverageMinimizationService,
 )
 
 
@@ -106,6 +110,10 @@ class RealRLTrainingResult:
 
         report:
             Terminalde veya dosyada kullanılabilecek eğitim raporu.
+
+        minimization_result:
+            Açıkça etkinleştirildiğinde validated scenario havuzu için
+            üretilen deterministic greedy baseline sonucu.
     """
 
     source_file: Path
@@ -121,6 +129,7 @@ class RealRLTrainingResult:
         FunctionCoverageReachabilityResult | None
     ) = None
     diagnostic: PipelineDiagnosticResult | None = None
+    minimization_result: ScenarioMinimizationResult | None = None
 
     @property
     def success(self) -> bool:
@@ -392,6 +401,9 @@ class RealRLTrainingService:
         ) = None,
         diagnostic_checkpoint_path: Path | None = None,
         global_timeout_runner: GlobalPipelineTimeoutRunner | None = None,
+        scenario_minimization_service: (
+            ScenarioCoverageMinimizationService | None
+        ) = None,
     ) -> None:
         """Servisin analiz ve raporlama bağımlılıklarını hazırlar."""
         self._supports_process_isolation = all(
@@ -408,6 +420,7 @@ class RealRLTrainingService:
                 scenario_generator,
                 report_formatter,
                 coverage_reachability_service,
+                scenario_minimization_service,
             )
         )
         self._analyzer = analyzer or PythonAnalyzer()
@@ -441,6 +454,10 @@ class RealRLTrainingService:
         self._coverage_reachability_service = (
             coverage_reachability_service
             or CoverageReachabilityService()
+        )
+        self._scenario_minimization_service = (
+            scenario_minimization_service
+            or ScenarioCoverageMinimizationService()
         )
         self._active_diagnostic_accumulator: (
             _PipelineDiagnosticAccumulator | None
@@ -478,11 +495,19 @@ class RealRLTrainingService:
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
         pipeline_timeout_seconds: float | None = None,
+        run_greedy_baseline: bool = False,
+        greedy_timeout_seconds: float | None = None,
     ) -> RealRLTrainingResult | PipelineDiagnosticResult:
         """Mevcut exception davranışını koruyarak production run çalıştırır."""
         self._active_diagnostic_accumulator = None
         self._last_diagnostic_result = None
         self._validate_pipeline_timeout(pipeline_timeout_seconds)
+        if not isinstance(run_greedy_baseline, bool):
+            raise TypeError("run_greedy_baseline bool olmalıdır.")
+        self._validate_optional_timeout(
+            greedy_timeout_seconds,
+            "greedy_timeout_seconds",
+        )
 
         if pipeline_timeout_seconds is not None:
             if not self._supports_process_isolation:
@@ -507,6 +532,8 @@ class RealRLTrainingService:
                     "overwrite": overwrite,
                     "timeout_seconds": timeout_seconds,
                     "pipeline_timeout_seconds": None,
+                    "run_greedy_baseline": run_greedy_baseline,
+                    "greedy_timeout_seconds": greedy_timeout_seconds,
                 },
                 source_file=Path(source_file).resolve(),
                 function_name=function_name,
@@ -548,6 +575,8 @@ class RealRLTrainingService:
                 random_seed=random_seed,
                 overwrite=overwrite,
                 timeout_seconds=timeout_seconds,
+                run_greedy_baseline=run_greedy_baseline,
+                greedy_timeout_seconds=greedy_timeout_seconds,
             )
         except Exception as error:
             accumulator = self._active_diagnostic_accumulator
@@ -599,6 +628,8 @@ class RealRLTrainingService:
         random_seed: int | None = 42,
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
+        run_greedy_baseline: bool = False,
+        greedy_timeout_seconds: float | None = None,
     ) -> RealRLTrainingResult:
         """
         Seçilen fonksiyon için gerçek coverage tabanlı RL eğitimi yapar.
@@ -651,6 +682,13 @@ class RealRLTrainingService:
 
             timeout_seconds:
                 Her coverage çalıştırması için süre sınırı.
+
+            run_greedy_baseline:
+                True olduğunda RL'den bağımsız exact-coverage greedy
+                baseline çalıştırılır. Varsayılan False eski akışı korur.
+
+            greedy_timeout_seconds:
+                Yalnız minimization aşamasının toplam süre sınırı.
 
         Returns:
             Senaryoları, eğitim sonucunu, istatistikleri ve raporu
@@ -1036,6 +1074,21 @@ class RealRLTrainingService:
         diagnostic.line_coverage_percent = (
             baseline_coverage_result.line_coverage_percent
         )
+
+        minimization_result = None
+        if run_greedy_baseline:
+            minimization_result = self._scenario_minimization_service.minimize(
+                source_file=normalized_source_file,
+                module_path=normalized_module_path,
+                function_name=normalized_function_name,
+                function_start_line=function.line_number,
+                function_end_line=function.end_line_number,
+                scenarios=scenario_tuple,
+                output_root=normalized_output_directory,
+                timeout_seconds=timeout_seconds,
+                minimization_timeout_seconds=greedy_timeout_seconds,
+                full_pool_coverage=baseline_coverage_result,
+            )
         diagnostic.branch_coverage_percent = (
             baseline_coverage_result.branch_coverage_percent
         )
@@ -1189,6 +1242,7 @@ class RealRLTrainingService:
             report=report,
             reachability_result=reachability_result,
             diagnostic=diagnostic_result,
+            minimization_result=minimization_result,
         )
 
     def _write_diagnostic_checkpoint(
@@ -1806,3 +1860,12 @@ class RealRLTrainingService:
             raise ValueError(
                 "pipeline_timeout_seconds sonlu ve sıfırdan büyük olmalıdır."
             )
+
+    @staticmethod
+    def _validate_optional_timeout(value: float | None, name: str) -> None:
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} sayısal veya None olmalıdır.")
+        if not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ValueError(f"{name} sonlu ve sıfırdan büyük olmalıdır.")

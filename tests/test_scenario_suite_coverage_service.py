@@ -855,3 +855,49 @@ def test_measure_scenarios_rejects_different_scenarios_with_same_id(
             ),
             output_directory=tmp_path,
         )
+
+
+def test_measure_scenarios_accepts_safe_custom_test_file_name(
+    tmp_path: Path,
+) -> None:
+    source_file = create_source_file(tmp_path)
+    pytest_generator, file_writer, coverage_service, _ = create_dependencies(tmp_path)
+    service = ScenarioSuiteCoverageService(
+        pytest_generator=pytest_generator,
+        file_writer=file_writer,
+        coverage_service=coverage_service,
+    )
+
+    service.measure_scenarios(
+        source_file=source_file,
+        module_path="datasets.sample_code",
+        function_name="calculate_score",
+        scenarios=create_scenarios(),
+        output_directory=tmp_path,
+        test_file_name="test_calculate_score_greedy_minimized.py",
+    )
+
+    assert file_writer.write.call_args.kwargs["output_path"] == (
+        tmp_path / "test_calculate_score_greedy_minimized.py"
+    ).resolve()
+
+
+@pytest.mark.parametrize(
+    "test_file_name",
+    ("../test_escape.py", "nested/test_escape.py", "test-invalid.py", "suite.txt"),
+)
+def test_measure_scenarios_rejects_unsafe_custom_test_file_name(
+    tmp_path: Path,
+    test_file_name: str,
+) -> None:
+    source_file = create_source_file(tmp_path)
+
+    with pytest.raises(ValueError, match="test_file_name"):
+        ScenarioSuiteCoverageService().measure_scenarios(
+            source_file=source_file,
+            module_path="datasets.sample_code",
+            function_name="calculate_score",
+            scenarios=create_scenarios(),
+            output_directory=tmp_path,
+            test_file_name=test_file_name,
+        )

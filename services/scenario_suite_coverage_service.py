@@ -163,6 +163,7 @@ class ScenarioSuiteCoverageService:
         function_end_line: int | None = None,
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
+        test_file_name: str | None = None,
     ) -> ScenarioSuiteCoverageResult:
         """
         Seçilmiş senaryoları aynı pytest dosyasında çalıştırır ve
@@ -256,6 +257,14 @@ class ScenarioSuiteCoverageService:
             timeout_seconds
         )
 
+        normalized_test_file_name = (
+            self._normalize_test_file_name(test_file_name)
+            if test_file_name is not None
+            else self._create_test_file_name(
+                function_name=normalized_function_name,
+            )
+        )
+
         generated_code = self._pytest_generator.generate(
             module_path=normalized_module_path,
             function_name=normalized_function_name,
@@ -264,9 +273,7 @@ class ScenarioSuiteCoverageService:
 
         output_path = (
             normalized_output_directory
-            / self._create_test_file_name(
-                function_name=normalized_function_name,
-            )
+            / normalized_test_file_name
         )
 
         written_path = self._file_writer.write(
@@ -329,6 +336,17 @@ class ScenarioSuiteCoverageService:
         return (
             f"test_{function_name}_scenario_suite.py"
         )
+
+    @classmethod
+    def _normalize_test_file_name(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError("test_file_name string olmalıdır.")
+        if Path(value).name != value or not value.endswith(".py"):
+            raise ValueError("test_file_name güvenli bir .py dosya adı olmalıdır.")
+        stem = value[:-3]
+        if not cls._is_valid_identifier(stem):
+            raise ValueError("test_file_name geçerli bir Python identifier olmalıdır.")
+        return value
 
     @staticmethod
     def _normalize_source_file(

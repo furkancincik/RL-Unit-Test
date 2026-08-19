@@ -59,6 +59,9 @@ from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
 )
+from services.scenario_coverage_minimization_service import (
+    ScenarioCoverageMinimizationService,
+)
 
 
 def create_source_file(
@@ -368,7 +371,9 @@ def create_dependencies() -> tuple[
     )
 
 
-def create_service() -> tuple[
+def create_service(
+    scenario_minimization_service: ScenarioCoverageMinimizationService | None = None,
+) -> tuple[
     RealRLTrainingService,
     tuple[Mock, ...],
 ]:
@@ -387,6 +392,7 @@ def create_service() -> tuple[
         scenario_generator=dependencies[8],
         report_formatter=dependencies[9],
         coverage_reachability_service=dependencies[10],
+        scenario_minimization_service=scenario_minimization_service,
     )
 
     return service, dependencies
@@ -1400,6 +1406,93 @@ def test_run_uses_scenario_pool_baseline_as_environment_target(
     assert measured_scenarios == [
         result.scenarios
     ]
+
+
+@patch.object(TrainingSession, "run")
+def test_run_keeps_greedy_baseline_disabled_by_default(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    minimizer = Mock(spec=ScenarioCoverageMinimizationService)
+    service, _ = create_service(minimizer)
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    minimizer.minimize.assert_not_called()
+    assert result.minimization_result is None
+
+
+@patch.object(TrainingSession, "run")
+def test_run_optionally_minimizes_concrete_valid_pool_with_existing_target(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    minimization_result = Mock()
+    minimizer = Mock(spec=ScenarioCoverageMinimizationService)
+    minimizer.minimize.return_value = minimization_result
+    service, _ = create_service(minimizer)
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+        run_greedy_baseline=True,
+        greedy_timeout_seconds=8.0,
+    )
+
+    call = minimizer.minimize.call_args.kwargs
+    assert call["scenarios"] == result.scenarios
+    assert call["full_pool_coverage"].function_name == "calculate_score"
+    assert call["minimization_timeout_seconds"] == 8.0
+    assert result.minimization_result is minimization_result
+
+
+@patch.object(TrainingSession, "run")
+def test_run_does_not_swallow_unexpected_minimizer_runtime_error(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    minimizer = Mock(spec=ScenarioCoverageMinimizationService)
+    minimizer.minimize.side_effect = RuntimeError("unexpected minimizer failure")
+    service, _ = create_service(minimizer)
+
+    with pytest.raises(RuntimeError, match="unexpected minimizer failure"):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            episode_count=1,
+            run_greedy_baseline=True,
+        )
+
+
+@pytest.mark.parametrize("value", (0.0, True, "slow"))
+def test_run_rejects_invalid_greedy_timeout(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    service, _ = create_service()
+
+    with pytest.raises((TypeError, ValueError), match="greedy_timeout_seconds"):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            greedy_timeout_seconds=value,  # type: ignore[arg-type]
+        )
 
 
 @patch.object(

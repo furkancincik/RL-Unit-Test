@@ -13,6 +13,12 @@ from models.project_analysis_result import (
     ProjectAnalysisResult,
     ProjectRunStatus,
 )
+from models.scenario_minimization_result import (
+    CoverageMeasurementStatus,
+    ScenarioCoverageSignature,
+    ScenarioMinimizationResult,
+    ScenarioMinimizationStatus,
+)
 
 __all__ = [
     "CoverageResult",
@@ -26,4 +32,8 @@ __all__ = [
     "FunctionTarget",
     "ProjectAnalysisResult",
     "ProjectRunStatus",
+    "CoverageMeasurementStatus",
+    "ScenarioCoverageSignature",
+    "ScenarioMinimizationResult",
+    "ScenarioMinimizationStatus",
 ]
