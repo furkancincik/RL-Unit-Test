@@ -606,14 +606,14 @@ The deterministic baseline now determines whether the measured validated-pool co
         ▼
 Scenario contribution analysis
         │
-        ├── Deterministic greedy set cover (implemented)
-        └── RL-based scenario selection (comparison planned)
+        ├── Deterministic greedy set cover
+        └── Raw RL episode selection
         │
         ▼
-Greedy minimized, exactly verified subset
+Independent real pytest/coverage verification
         │
         ▼
-Validated-pool coverage target
+Exact line/branch equality and winner policy
 ```
 
 Each scenario is executed independently to obtain exact function-scoped line identities and coverage.py branch arcs. The selector uses deterministic greedy set cover, then applies backward redundancy elimination. The selected scenarios are exported under `greedy_minimized/` and executed together in a final real pytest/coverage verification; equal percentages with different identities are not accepted as preservation.
@@ -625,7 +625,11 @@ The implementation explicitly reports:
 - `coverage_preserved = true/false`
 - controlled timeout, isolated-execution failure, and non-additive coverage states
 
-A real temporary multi-branch acceptance reduced a three-scenario pool to two scenarios while preserving the exact line and branch-arc sets. The heavier 165-scenario ultracomplex contribution run was not repeated in this sprint because it requires at least one coverage subprocess per scenario; the existing ultracomplex RL checkpoint therefore remains unchanged. This deterministic baseline is ready for a later RL-versus-greedy comparison, but it does not claim a global minimum.
+A real temporary multi-branch minimization acceptance reduced a three-scenario pool to two scenarios while preserving the exact line and branch-arc sets. The exact strategy-comparison acceptance used a separate branch-heavy four-scenario pool: greedy and the best raw RL episode each used three tests, both reproduced the full-pool exact identities, and the measured winner was `TIE`.
+
+Strategy comparison keeps the existing training-session best-episode policy unchanged. It reconstructs immutable ordered scenario traces, verifies candidate raw RL suites with the same function-scoped coverage service and target used by greedy, and selects the comparison episode by exact preservation, action count, unique count, reward, then episode number. It does not apply greedy elimination to the raw RL result. A strategy cannot win on test count while missing any target line or branch arc, and every result keeps `globally_minimal = false`.
+
+The real `determine_transaction_risk` acceptance used four validated scenarios and three deterministic RL episodes. All three episodes reached the exact nine-line/seven-branch-arc target. Greedy selected four tests, raw RL selected four tests, both preserved 90% line and 87.50% branch coverage with identical identities, and the result was `TIE` with 0% reduction for both strategies. The 165-scenario ultracomplex comparison was not run because contribution measurement still requires a coverage subprocess per scenario; performance and caching work is required before that experiment.
 
 ---
 
@@ -637,9 +641,9 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,722 |
+| Passed | 1,746 |
 | Failed | 0 |
-| Duration | 99.52s |
+| Duration | 106.75s |
 
 ---
 
@@ -721,6 +725,10 @@ RL-Unit-Test
 - Deterministic Greedy Set-Cover Baseline
 - Backward Scenario Redundancy Elimination
 - Real Minimized-Suite Coverage Verification
+- Immutable Ordered RL Episode Selection Traces
+- Exact-Coverage RL vs Greedy Strategy Comparison
+- Real Raw-RL Suite Coverage Verification
+- Optional Per-Function Project Comparison Serialization
 
 ---
 
@@ -730,8 +738,8 @@ RL-Unit-Test
 - Remaining Coverage-Gap Classification
 - Duplicate and Equivalent Scenario Detection
 - Test Suite Minimization
-- RL Test Selection Efficiency Evaluation
 - Robustness Path-Explosion Reduction
+- Comparison Coverage-Execution Caching and Performance
 - Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
 
@@ -739,7 +747,6 @@ RL-Unit-Test
 
 ## Planned
 
-- RL vs Greedy Baseline Comparison
 - Reward Function Optimization
 - State Representation Experiments
 - Hyperparameter Evaluation
