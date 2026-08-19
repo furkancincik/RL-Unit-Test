@@ -25,6 +25,17 @@ from models.strategy_comparison_result import (
     StrategyComparisonStatus,
     StrategyWinner,
 )
+from models.source_acquisition_result import (
+    DiscoveredPythonModule,
+    ResolvedSourceTarget,
+    SourceAcquisitionLimits,
+    SourceAcquisitionRequest,
+    SourceAcquisitionStatus,
+    SourceDiscoveryIssue,
+    SourceIssueCategory,
+    SourceTargetKind,
+    SourceWorkspaceOwnership,
+)
 
 __all__ = [
     "CoverageResult",
@@ -46,4 +57,13 @@ __all__ = [
     "StrategyComparisonResult",
     "StrategyComparisonStatus",
     "StrategyWinner",
+    "DiscoveredPythonModule",
+    "ResolvedSourceTarget",
+    "SourceAcquisitionLimits",
+    "SourceAcquisitionRequest",
+    "SourceAcquisitionStatus",
+    "SourceDiscoveryIssue",
+    "SourceIssueCategory",
+    "SourceTargetKind",
+    "SourceWorkspaceOwnership",
 ]
