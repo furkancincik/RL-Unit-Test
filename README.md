@@ -573,7 +573,7 @@ For `determine_transaction_risk`, all five bounded paths were classified as feas
 
 The `analyze_transactions` production run reached the externally enforced 180-second orchestration timeout. The observed 96 tests are an intermediate concrete-suite count, not a final scenario-pool size and not an RL executed-test count. Because orchestration did not complete, no final line or branch coverage estimate is reported. No new expression exception was observed before timeout. The new service-level global timeout has not yet been exercised on this heavy target, so no such result is claimed. The remaining blockers are bounded-path explosion and final CLI/orchestration integration; the two smaller robustness targets complete successfully.
 
-The current small production acceptance run for `calculate_category_usage` completed with 3 bounded paths, a 3-scenario pool, 3 RL-executed tests, 3 Q-table states, 100% function line coverage, 100% function branch coverage, and a `COMPLETED` pipeline diagnostic.
+The current small production acceptance run for `calculate_category_usage` completed with 3 bounded paths, a 3-scenario pool, 3 RL-executed tests, 3 Q-table states, 100% function line coverage, 100% function branch coverage, and a `COMPLETED` pipeline diagnostic. The optional greedy baseline measured all three scenarios independently and preserved the exact six-line/four-branch-arc target in a separately generated pytest suite. Every scenario had a unique contribution, so the honest result was `NO_REDUCTION` with 0% reduction.
 
 The 36.3 production CLI acceptance also completed `determine_transaction_risk` with 4 scenarios, 4 RL-executed tests, 4 Q-table states, 90% function line coverage, and 87.50% function branch coverage. A separate real three-function fixture preserved two `COMPLETED` results around one controlled `PARTIAL` result and produced an atomic project JSON report. The heavy `analyze_transactions` all-functions run was intentionally not repeated; its final coverage remains unmeasured.
 
@@ -598,7 +598,7 @@ RL scenario selection
 88.06% line coverage / 92.31% branch coverage
 ```
 
-The next objective is to determine whether the same or higher reachable coverage can be achieved with a smaller subset:
+The deterministic baseline now determines whether the measured validated-pool coverage can be preserved by a smaller subset:
 
 ```text
 165 available scenarios
@@ -606,28 +606,26 @@ The next objective is to determine whether the same or higher reachable coverage
         ▼
 Scenario contribution analysis
         │
-        ├── Deterministic greedy baseline
-        └── RL-based scenario selection
+        ├── Deterministic greedy set cover (implemented)
+        └── RL-based scenario selection (comparison planned)
         │
         ▼
-Minimum verified scenario subset
+Greedy minimized, exactly verified subset
         │
         ▼
-Maximum reachable coverage
+Validated-pool coverage target
 ```
 
-To evaluate this objectively, scenario contribution analysis and a greedy minimum-scenario baseline will be used.
+Each scenario is executed independently to obtain exact function-scoped line identities and coverage.py branch arcs. The selector uses deterministic greedy set cover, then applies backward redundancy elimination. The selected scenarios are exported under `greedy_minimized/` and executed together in a final real pytest/coverage verification; equal percentages with different identities are not accepted as preservation.
 
-The baseline measures the marginal coverage contribution of each scenario:
+The implementation explicitly reports:
 
-$$
-\text{Marginal Contribution} =
-\text{Coverage}(\text{Current Suite} + \text{Scenario})
--
-\text{Coverage}(\text{Current Suite})
-$$
+- `algorithm = GREEDY_SET_COVER_WITH_BACKWARD_ELIMINATION`
+- `globally_minimal = false`
+- `coverage_preserved = true/false`
+- controlled timeout, isolated-execution failure, and non-additive coverage states
 
-This provides a deterministic baseline against which the RL agent's test-selection efficiency can be compared.
+A real temporary multi-branch acceptance reduced a three-scenario pool to two scenarios while preserving the exact line and branch-arc sets. The heavier 165-scenario ultracomplex contribution run was not repeated in this sprint because it requires at least one coverage subprocess per scenario; the existing ultracomplex RL checkpoint therefore remains unchanged. This deterministic baseline is ready for a later RL-versus-greedy comparison, but it does not claim a global minimum.
 
 ---
 
@@ -639,9 +637,9 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,691 |
+| Passed | 1,722 |
 | Failed | 0 |
-| Duration | 96.20s |
+| Duration | 99.52s |
 
 ---
 
@@ -719,6 +717,10 @@ RL-Unit-Test
 - Atomic Project JSON Reporting
 - `main.py` Option 1 Single/All-Functions Production Integration
 - Interactive Static Source Preview
+- Exact Function Line/Branch Scenario Contribution Signatures
+- Deterministic Greedy Set-Cover Baseline
+- Backward Scenario Redundancy Elimination
+- Real Minimized-Suite Coverage Verification
 
 ---
 
@@ -727,8 +729,6 @@ RL-Unit-Test
 - Raw vs Reachable Coverage Separation
 - Remaining Coverage-Gap Classification
 - Duplicate and Equivalent Scenario Detection
-- Scenario Marginal Coverage Analysis
-- Greedy Minimum Scenario Baseline
 - Test Suite Minimization
 - RL Test Selection Efficiency Evaluation
 - Robustness Path-Explosion Reduction
@@ -764,7 +764,7 @@ RL-Unit-Test
 - Per-function global timeout is available through the service API and `main.py` option 1; a separate total project deadline is not implemented.
 - Aggregate project coverage is reported as unmeasured because function percentages are not arithmetically averaged and a combined-suite measurement is not yet performed.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
-- Exact global minimum-suite guarantees are not yet available; minimization remains an evaluation objective.
+- The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
 
 ---
 
