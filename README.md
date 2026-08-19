@@ -230,7 +230,71 @@ Diagnostic checkpoint
         TIMED_OUT partial result
 ```
 
-Global timeout is integrated into the service API. `main.py` option 8 and multi-function project orchestration remain work for a later sprint.
+Global timeout is integrated into both the service API and the interactive project-analysis workflow. Multi-function source orchestration applies this limit independently to each supported function.
+
+---
+
+## Interactive Developer Tool
+
+Running `python main.py` opens a production-oriented menu:
+
+```text
+RL-UNIT-TEST DEVELOPER TOOL
+
+1. Kaynak Kod / Proje Analizi
+2. Hızlı Statik Ön İnceleme
+0. Çıkış
+```
+
+Option 1 asks for a real Python source file, module path, single/all-functions selection, output directory, and optionally advanced production settings. There is no implicit `datasets/sample_code.py` or `calculate_score` fallback. Example datasets remain valid only when the user selects them explicitly.
+
+Option 2 asks for a real Python source file and reports AST function, complexity, and production-support metadata without starting test generation, coverage, or RL training.
+
+The research and diagnostic operations remain available through the advanced CLI: `analyze`, `cfg`, `dqm`, `dqm-json`, `test`, `coverage`, `demo`, and `rl`. Non-interactive `rl` requires explicit source, module, and single/all-functions selection arguments.
+
+---
+
+## Multi-Function Production Orchestration
+
+- Deterministic AST-Based Function Discovery in Source Order
+- Explicit Support Metadata for Top-Level, Async, Nested, Method, Conditional, Dunder, and Ambiguous Targets
+- Single-Function and All-Functions Selection Modes
+- Function-Isolated `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, and `UNSUPPORTED` Results
+- Separate, Traversal-Safe Output Directories per Function
+- Immutable Project Result with Atomic JSON Reporting
+- Project-Level Status and Stable CLI Exit Codes
+- Function Coverage Reported Individually; Aggregate Project Coverage Marked Unmeasured
+
+```text
+Python source
+      |
+      v
+Function discovery
+      |
+      v
+Per-function isolated pipeline
+      |
+      +--> Completed result
+      +--> Partial/failed result
+      +--> Timed-out result
+      |
+      v
+Project JSON report
+```
+
+Single-function CLI example:
+
+```text
+python main.py --operation rl --source-file datasets/sample_robustness_code.py --module-path datasets.sample_robustness_code --function-name calculate_category_usage --pipeline-timeout-seconds 30
+```
+
+All-functions CLI example:
+
+```text
+python main.py --operation rl --source-file datasets/sample_robustness_code.py --module-path datasets.sample_robustness_code --all-functions --pipeline-timeout-seconds 30
+```
+
+`timeout_seconds` remains the pytest/coverage subprocess limit. `pipeline_timeout_seconds` is applied independently to each selected function. A separate project-wide deadline is not implemented; without one, every selected target is attempted in deterministic source order.
 
 ---
 
@@ -422,6 +486,10 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Persistent Partial Pipeline Diagnostics
 - ✅ Service-Level Global Orchestration Timeout
 - ✅ Windows Worker-Tree and Process-Handle Cleanup
+- ✅ Multi-Function Source Orchestration
+- ✅ `main.py` Option 1 Production Integration
+- ✅ Interactive Static Source Preview
+- ✅ Atomic Project JSON Report
 
 ---
 
@@ -507,6 +575,8 @@ The `analyze_transactions` production run reached the externally enforced 180-se
 
 The current small production acceptance run for `calculate_category_usage` completed with 3 bounded paths, a 3-scenario pool, 3 RL-executed tests, 3 Q-table states, 100% function line coverage, 100% function branch coverage, and a `COMPLETED` pipeline diagnostic.
 
+The 36.3 production CLI acceptance also completed `determine_transaction_risk` with 4 scenarios, 4 RL-executed tests, 4 Q-table states, 90% function line coverage, and 87.50% function branch coverage. A separate real three-function fixture preserved two `COMPLETED` results around one controlled `PARTIAL` result and produced an atomic project JSON report. The heavy `analyze_transactions` all-functions run was intentionally not repeated; its final coverage remains unmeasured.
+
 ---
 
 # Current Optimization Problem
@@ -569,9 +639,9 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,628 |
+| Passed | 1,691 |
 | Failed | 0 |
-| Duration | 96.67s |
+| Duration | 96.20s |
 
 ---
 
@@ -644,6 +714,11 @@ RL-Unit-Test
 - Atomic JSON Diagnostic Checkpoints
 - Service-Level Global Orchestration Timeout
 - Windows Worker Process-Tree and Process-Handle Cleanup
+- Deterministic Multi-Function Discovery and Eligibility Reporting
+- Function-Isolated Production Orchestration
+- Atomic Project JSON Reporting
+- `main.py` Option 1 Single/All-Functions Production Integration
+- Interactive Static Source Preview
 
 ---
 
@@ -657,7 +732,7 @@ RL-Unit-Test
 - Test Suite Minimization
 - RL Test Selection Efficiency Evaluation
 - Robustness Path-Explosion Reduction
-- `main.py` Option 8 and Multi-Function Timeout Orchestration
+- Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
 
 ---
@@ -668,9 +743,8 @@ RL-Unit-Test
 - Reward Function Optimization
 - State Representation Experiments
 - Hyperparameter Evaluation
-- Configurable `main.py` Command-Line Interface
 - Additional Complex Dataset Experiments
-- External Python File and Project Input
+- External Multi-File Project Input
 - Git Repository Input
 - Dependency Discovery
 - Isolated and Resource-Limited Execution
@@ -687,7 +761,8 @@ RL-Unit-Test
 - The `analyze_transactions` benchmark has only a partial concrete-suite observation because the 180-second orchestration limit expired.
 - The observed 96 temporary-suite tests are neither the final scenario-pool size nor the number of RL-executed tests.
 - Final line and branch coverage for `analyze_transactions` have not been measured.
-- Global timeout is available through the service API, but `main.py` option 8 and multi-function project orchestration are not yet integrated.
+- Per-function global timeout is available through the service API and `main.py` option 1; a separate total project deadline is not implemented.
+- Aggregate project coverage is reported as unmeasured because function percentages are not arithmetically averaged and a combined-suite measurement is not yet performed.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
 - Exact global minimum-suite guarantees are not yet available; minimization remains an evaluation objective.
 
