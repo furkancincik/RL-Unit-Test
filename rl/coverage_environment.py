@@ -316,7 +316,16 @@ class CoverageEnvironment:
             state=next_state,
             reward=reward,
             done=self.is_done,
+            action=action,
+            done_reason=self._done_reason() if self.is_done else None,
         )
+
+    def _done_reason(self) -> str:
+        if self._current_state.is_fully_covered:
+            return "FULL_COVERAGE"
+        if self.has_reached_target_coverage:
+            return "TARGET_COVERAGE_REACHED"
+        return "ACTIONS_EXHAUSTED"
 
     @staticmethod
     def _validate_initial_state(

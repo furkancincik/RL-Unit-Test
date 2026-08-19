@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from rl.coverage_environment import CoverageEnvironment
@@ -132,6 +134,7 @@ class TrainingSession:
         clear_statistics: bool = True,
         epsilon_decay_rate: float | None = None,
         minimum_epsilon: float = 0.0,
+        episode_completed_callback: Callable[[EpisodeStatistics], None] | None = None,
     ) -> TrainingSessionResult:
         """
         Belirtilen sayıda episode çalıştırır.
@@ -169,6 +172,10 @@ class TrainingSession:
         self._validate_minimum_epsilon(
             minimum_epsilon
         )
+        if episode_completed_callback is not None and not callable(
+            episode_completed_callback
+        ):
+            raise TypeError("episode_completed_callback callable veya None olmalıdır.")
 
         if clear_statistics:
             self._statistics.clear()
@@ -176,6 +183,7 @@ class TrainingSession:
         completed_episodes: list[EpisodeStatistics] = []
 
         for _ in range(episode_count):
+            episode_started = time.perf_counter()
             steps = self._trainer.train_episode(
                 environment=environment,
                 reset=True,
@@ -184,12 +192,16 @@ class TrainingSession:
             episode_statistics = (
                 self._statistics.record_episode(
                     steps=steps,
+                    duration_seconds=time.perf_counter() - episode_started,
                 )
             )
 
             completed_episodes.append(
                 episode_statistics
             )
+
+            if episode_completed_callback is not None:
+                episode_completed_callback(episode_statistics)
 
             if epsilon_decay_rate is not None:
                 self._trainer.agent.policy.decay_epsilon(

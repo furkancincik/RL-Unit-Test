@@ -186,6 +186,21 @@ def test_run_executes_requested_episode_count() -> None:
     assert trainer.train_episode.call_count == 3
 
 
+def test_run_reports_each_completed_episode_to_callback() -> None:
+    callback = Mock()
+    session = TrainingSession(trainer=create_mock_trainer())
+
+    result = session.run(
+        environment=create_environment(),
+        episode_count=2,
+        episode_completed_callback=callback,
+    )
+
+    assert callback.call_count == 2
+    assert callback.call_args_list[0].args[0] is result.episodes[0]
+    assert callback.call_args_list[1].args[0] is result.episodes[1]
+
+
 def test_run_resets_environment_for_each_episode() -> None:
     trainer = create_mock_trainer()
 

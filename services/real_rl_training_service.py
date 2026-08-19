@@ -41,6 +41,7 @@ from models.pipeline_diagnostic_result import (
     PipelineStage,
 )
 from models.scenario_minimization_result import ScenarioMinimizationResult
+from models.strategy_comparison_result import StrategyComparisonResult
 from rl.coverage_environment import CoverageEnvironment
 from rl.coverage_state import CoverageState
 from rl.epsilon_greedy_policy import EpsilonGreedyPolicy
@@ -71,6 +72,7 @@ from services.pipeline_timeout_service import (
 from services.scenario_coverage_minimization_service import (
     ScenarioCoverageMinimizationService,
 )
+from services.strategy_comparison_service import StrategyComparisonService
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +132,7 @@ class RealRLTrainingResult:
     ) = None
     diagnostic: PipelineDiagnosticResult | None = None
     minimization_result: ScenarioMinimizationResult | None = None
+    strategy_comparison_result: StrategyComparisonResult | None = None
 
     @property
     def success(self) -> bool:
@@ -404,6 +407,7 @@ class RealRLTrainingService:
         scenario_minimization_service: (
             ScenarioCoverageMinimizationService | None
         ) = None,
+        strategy_comparison_service: StrategyComparisonService | None = None,
     ) -> None:
         """Servisin analiz ve raporlama bağımlılıklarını hazırlar."""
         self._supports_process_isolation = all(
@@ -421,6 +425,7 @@ class RealRLTrainingService:
                 report_formatter,
                 coverage_reachability_service,
                 scenario_minimization_service,
+                strategy_comparison_service,
             )
         )
         self._analyzer = analyzer or PythonAnalyzer()
@@ -458,6 +463,9 @@ class RealRLTrainingService:
         self._scenario_minimization_service = (
             scenario_minimization_service
             or ScenarioCoverageMinimizationService()
+        )
+        self._strategy_comparison_service = (
+            strategy_comparison_service or StrategyComparisonService()
         )
         self._active_diagnostic_accumulator: (
             _PipelineDiagnosticAccumulator | None
@@ -497,6 +505,8 @@ class RealRLTrainingService:
         pipeline_timeout_seconds: float | None = None,
         run_greedy_baseline: bool = False,
         greedy_timeout_seconds: float | None = None,
+        run_strategy_comparison: bool = False,
+        comparison_timeout_seconds: float | None = None,
     ) -> RealRLTrainingResult | PipelineDiagnosticResult:
         """Mevcut exception davranışını koruyarak production run çalıştırır."""
         self._active_diagnostic_accumulator = None
@@ -504,9 +514,15 @@ class RealRLTrainingService:
         self._validate_pipeline_timeout(pipeline_timeout_seconds)
         if not isinstance(run_greedy_baseline, bool):
             raise TypeError("run_greedy_baseline bool olmalıdır.")
+        if not isinstance(run_strategy_comparison, bool):
+            raise TypeError("run_strategy_comparison bool olmalıdır.")
         self._validate_optional_timeout(
             greedy_timeout_seconds,
             "greedy_timeout_seconds",
+        )
+        self._validate_optional_timeout(
+            comparison_timeout_seconds,
+            "comparison_timeout_seconds",
         )
 
         if pipeline_timeout_seconds is not None:
@@ -534,6 +550,8 @@ class RealRLTrainingService:
                     "pipeline_timeout_seconds": None,
                     "run_greedy_baseline": run_greedy_baseline,
                     "greedy_timeout_seconds": greedy_timeout_seconds,
+                    "run_strategy_comparison": run_strategy_comparison,
+                    "comparison_timeout_seconds": comparison_timeout_seconds,
                 },
                 source_file=Path(source_file).resolve(),
                 function_name=function_name,
@@ -577,6 +595,8 @@ class RealRLTrainingService:
                 timeout_seconds=timeout_seconds,
                 run_greedy_baseline=run_greedy_baseline,
                 greedy_timeout_seconds=greedy_timeout_seconds,
+                run_strategy_comparison=run_strategy_comparison,
+                comparison_timeout_seconds=comparison_timeout_seconds,
             )
         except Exception as error:
             accumulator = self._active_diagnostic_accumulator
@@ -630,6 +650,8 @@ class RealRLTrainingService:
         timeout_seconds: float = 30.0,
         run_greedy_baseline: bool = False,
         greedy_timeout_seconds: float | None = None,
+        run_strategy_comparison: bool = False,
+        comparison_timeout_seconds: float | None = None,
     ) -> RealRLTrainingResult:
         """
         Seçilen fonksiyon için gerçek coverage tabanlı RL eğitimi yapar.
@@ -1076,7 +1098,7 @@ class RealRLTrainingService:
         )
 
         minimization_result = None
-        if run_greedy_baseline:
+        if run_greedy_baseline or run_strategy_comparison:
             minimization_result = self._scenario_minimization_service.minimize(
                 source_file=normalized_source_file,
                 module_path=normalized_module_path,
@@ -1169,6 +1191,51 @@ class RealRLTrainingService:
             statistics=statistics,
         )
 
+        comparison_hyperparameters = (
+            ("episode_count", episode_count),
+            ("epsilon", epsilon),
+            ("epsilon_decay_rate", epsilon_decay_rate),
+            ("minimum_epsilon", minimum_epsilon),
+            ("learning_rate", learning_rate),
+            ("discount_factor", discount_factor),
+            ("target_coverage_policy", "VALIDATED_POOL_LINE_PERCENTAGE"),
+        )
+        if run_strategy_comparison:
+            if minimization_result is None:
+                raise RuntimeError("Strategy comparison greedy baseline gerektirir.")
+            self._strategy_comparison_service.write_pending(
+                source_file=normalized_source_file,
+                function_name=normalized_function_name,
+                scenarios=scenario_tuple,
+                full_pool_coverage=baseline_coverage_result,
+                greedy_result=minimization_result,
+                requested_rl_episode_count=episode_count,
+                output_root=normalized_output_directory,
+                rl_hyperparameters=comparison_hyperparameters,
+                random_seed=random_seed,
+            )
+
+        comparison_progress_callback = None
+        if run_strategy_comparison:
+            def comparison_progress_callback(_episode: object) -> None:
+                progress_session = TrainingSessionResult(
+                    episodes=statistics.episodes,
+                    requested_episode_count=episode_count,
+                    completed_episode_count=len(statistics.episodes),
+                )
+                self._strategy_comparison_service.write_pending(
+                    source_file=normalized_source_file,
+                    function_name=normalized_function_name,
+                    scenarios=scenario_tuple,
+                    full_pool_coverage=baseline_coverage_result,
+                    greedy_result=minimization_result,
+                    requested_rl_episode_count=episode_count,
+                    output_root=normalized_output_directory,
+                    rl_hyperparameters=comparison_hyperparameters,
+                    random_seed=random_seed,
+                    session_result=progress_session,
+                )
+
         stage_started = diagnostic.start_stage(
             PipelineStage.RL_TRAINING
         )
@@ -1177,6 +1244,7 @@ class RealRLTrainingService:
             episode_count=episode_count,
             epsilon_decay_rate=epsilon_decay_rate,
             minimum_epsilon=minimum_epsilon,
+            episode_completed_callback=comparison_progress_callback,
         )
 
         final_coverage_result = (
@@ -1192,6 +1260,25 @@ class RealRLTrainingService:
         diagnostic.rl_executed_test_count = (
             statistics.best_executed_test_count
         )
+
+        strategy_comparison_result = None
+        if run_strategy_comparison:
+            strategy_comparison_result = self._strategy_comparison_service.compare(
+                source_file=normalized_source_file,
+                module_path=normalized_module_path,
+                function_name=normalized_function_name,
+                function_start_line=function.line_number,
+                function_end_line=function.end_line_number,
+                scenarios=scenario_tuple,
+                full_pool_coverage=baseline_coverage_result,
+                greedy_result=minimization_result,
+                session_result=session_result,
+                output_root=normalized_output_directory,
+                timeout_seconds=timeout_seconds,
+                comparison_timeout_seconds=comparison_timeout_seconds,
+                rl_hyperparameters=comparison_hyperparameters,
+                random_seed=random_seed,
+            )
         diagnostic.q_table_state_count = len(q_table)
         if isinstance(final_coverage_result, FunctionCoverageResult):
             diagnostic.line_coverage_percent = (
@@ -1221,6 +1308,10 @@ class RealRLTrainingService:
             coverage_result=final_coverage_result,
             reachability_result=reachability_result,
         )
+        if strategy_comparison_result is not None:
+            report = (
+                f"{report}\n\n{strategy_comparison_result.format_summary()}"
+            )
         diagnostic.complete_stage(
             PipelineStage.REPORTING, stage_started
         )
@@ -1243,6 +1334,7 @@ class RealRLTrainingService:
             reachability_result=reachability_result,
             diagnostic=diagnostic_result,
             minimization_result=minimization_result,
+            strategy_comparison_result=strategy_comparison_result,
         )
 
     def _write_diagnostic_checkpoint(

@@ -141,6 +141,8 @@ def test_train_step_applies_selected_action() -> None:
 
     assert step.state.is_fully_covered
     assert step.done is True
+    assert step.action in actions
+    assert step.done_reason == "FULL_COVERAGE"
     assert environment.current_state == step.state
     assert len(environment.available_actions) == 1
 

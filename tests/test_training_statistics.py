@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from rl.action import Action
 from rl.coverage_state import CoverageState
 from rl.environment_step import EnvironmentStep
 from rl.training_statistics import (
@@ -165,6 +166,41 @@ def test_record_episode_uses_final_executed_test_count() -> None:
     )
 
     assert result.executed_test_count == 3
+
+
+def test_record_episode_preserves_ordered_action_trace_and_done_reason() -> None:
+    statistics = TrainingStatistics()
+    steps = (
+        EnvironmentStep(
+            state=create_state(
+                coverage_percentage=50.0,
+                executed_tests=1,
+                missing_lines=(2,),
+                uncovered_branches=1,
+            ),
+            reward=1.0,
+            done=False,
+            action=Action(scenario_index=2),
+        ),
+        EnvironmentStep(
+            state=create_state(
+                coverage_percentage=100.0,
+                executed_tests=2,
+                missing_lines=(),
+                uncovered_branches=0,
+            ),
+            reward=2.0,
+            done=True,
+            action=Action(scenario_index=0),
+            done_reason="TARGET_COVERAGE_REACHED",
+        ),
+    )
+
+    episode = statistics.record_episode(steps, duration_seconds=0.25)
+
+    assert episode.ordered_action_indices == (2, 0)
+    assert episode.duration_seconds == 0.25
+    assert episode.done_reason == "TARGET_COVERAGE_REACHED"
 
 
 def test_episodes_property_returns_recorded_results() -> None:

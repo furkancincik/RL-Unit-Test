@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from models.pipeline_diagnostic_result import PipelineDiagnosticResult
+from models.strategy_comparison_result import StrategyComparisonResult
 
 
 class FunctionSelectionMode(str, Enum):
@@ -92,6 +93,7 @@ class FunctionAnalysisResult:
     output_directory: Path
     artifact_paths: tuple[Path, ...] = ()
     skip_reason: str | None = None
+    strategy_comparison: StrategyComparisonResult | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, FunctionTarget):
@@ -109,6 +111,10 @@ class FunctionAnalysisResult:
             FunctionRunStatus.UNSUPPORTED,
         } and not self.skip_reason:
             raise ValueError("Skipped/unsupported function bir reason taşımalıdır.")
+        if self.strategy_comparison is not None and not isinstance(
+            self.strategy_comparison, StrategyComparisonResult
+        ):
+            raise TypeError("strategy_comparison StrategyComparisonResult olmalıdır.")
 
     @property
     def usable(self) -> bool:
@@ -177,6 +183,11 @@ class FunctionAnalysisResult:
             "skip_reason": self.skip_reason,
             "diagnostic": (
                 diagnostic.to_dict() if diagnostic is not None else None
+            ),
+            "strategy_comparison": (
+                self.strategy_comparison.to_dict()
+                if self.strategy_comparison is not None
+                else None
             ),
         }
 

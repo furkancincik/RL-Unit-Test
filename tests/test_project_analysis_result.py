@@ -15,6 +15,11 @@ from models.project_analysis_result import (
     ProjectAnalysisResult,
     ProjectRunStatus,
 )
+from models.strategy_comparison_result import (
+    StrategyComparisonResult,
+    StrategyComparisonStatus,
+    StrategyWinner,
+)
 
 
 def _target(name: str = "first") -> FunctionTarget:
@@ -121,6 +126,53 @@ def test_project_result_serializes_null_aggregate_coverage() -> None:
     assert "expected_result" not in str(value)
     assert "actual_result" not in str(value)
     assert "traceback" not in str(value).lower()
+
+
+def test_function_result_serializes_optional_strategy_comparison() -> None:
+    comparison = StrategyComparisonResult(
+        source_file=Path("target.py"),
+        function_name="first",
+        status=StrategyComparisonStatus.NOT_COMPARABLE,
+        comparable=False,
+        non_comparable_reason="RL_TARGET_NOT_REACHED",
+        scenario_pool_count=2,
+        target_line_identities=(1,),
+        target_line_percentage=100.0,
+        target_branch_identities=(),
+        target_branch_percentage=100.0,
+        greedy_algorithm="GREEDY_SET_COVER_WITH_BACKWARD_ELIMINATION",
+        greedy_selected_scenario_ids=("first",),
+        greedy_coverage_preserved=False,
+        greedy_duration_seconds=0.1,
+        requested_rl_episode_count=1,
+        completed_rl_episode_count=0,
+        rl_hyperparameters=(("epsilon", 0.0),),
+        random_seed=42,
+        episode_traces=(),
+        exact_target_reaching_episode_count=0,
+        best_rl_episode_number=None,
+        best_rl_ordered_scenario_ids=(),
+        best_rl_executed_test_count=None,
+        best_rl_unique_scenario_count=None,
+        best_rl_duplicate_count=None,
+        best_rl_total_reward=None,
+        rl_coverage_preserved=False,
+        rl_duration_seconds=None,
+        winner=StrategyWinner.NOT_COMPARABLE,
+        coverage_equality_verified=False,
+    )
+    function_result = FunctionAnalysisResult(
+        target=_target(),
+        status=FunctionRunStatus.COMPLETED,
+        diagnostic=_diagnostic(),
+        output_directory=Path("output/first"),
+        strategy_comparison=comparison,
+    )
+
+    value = function_result.to_dict()
+
+    assert value["strategy_comparison"]["winner"] == "NOT_COMPARABLE"
+    assert "keyword_arguments" not in str(value)
 
 
 def test_unsupported_target_requires_a_reason() -> None:

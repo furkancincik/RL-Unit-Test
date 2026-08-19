@@ -62,6 +62,7 @@ from services.real_rl_training_service import (
 from services.scenario_coverage_minimization_service import (
     ScenarioCoverageMinimizationService,
 )
+from services.strategy_comparison_service import StrategyComparisonService
 
 
 def create_source_file(
@@ -373,6 +374,7 @@ def create_dependencies() -> tuple[
 
 def create_service(
     scenario_minimization_service: ScenarioCoverageMinimizationService | None = None,
+    strategy_comparison_service: StrategyComparisonService | None = None,
 ) -> tuple[
     RealRLTrainingService,
     tuple[Mock, ...],
@@ -393,6 +395,7 @@ def create_service(
         report_formatter=dependencies[9],
         coverage_reachability_service=dependencies[10],
         scenario_minimization_service=scenario_minimization_service,
+        strategy_comparison_service=strategy_comparison_service,
     )
 
     return service, dependencies
@@ -1475,6 +1478,89 @@ def test_run_does_not_swallow_unexpected_minimizer_runtime_error(
             output_directory=tmp_path,
             episode_count=1,
             run_greedy_baseline=True,
+        )
+
+
+@patch.object(TrainingSession, "run")
+def test_run_keeps_strategy_comparison_disabled_by_default(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    comparison = Mock(spec=StrategyComparisonService)
+    service, _ = create_service(strategy_comparison_service=comparison)
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    comparison.compare.assert_not_called()
+    assert result.strategy_comparison_result is None
+
+
+@patch.object(TrainingSession, "run")
+def test_run_strategy_comparison_reuses_full_pool_and_enables_greedy(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    session_result = create_session_result()
+    mock_run.return_value = session_result
+    minimization_result = Mock()
+    minimizer = Mock(spec=ScenarioCoverageMinimizationService)
+    minimizer.minimize.return_value = minimization_result
+    comparison_result = Mock()
+    comparison_result.format_summary.return_value = "STRATEGY COMPARISON"
+    comparison = Mock(spec=StrategyComparisonService)
+    comparison.compare.return_value = comparison_result
+    service, _ = create_service(minimizer, comparison)
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+        run_strategy_comparison=True,
+        comparison_timeout_seconds=9.0,
+    )
+
+    minimizer.minimize.assert_called_once()
+    comparison.write_pending.assert_called_once()
+    call = comparison.compare.call_args.kwargs
+    assert call["full_pool_coverage"] is minimizer.minimize.call_args.kwargs[
+        "full_pool_coverage"
+    ]
+    assert call["greedy_result"] is minimization_result
+    assert call["session_result"] is session_result
+    assert call["comparison_timeout_seconds"] == 9.0
+    assert result.strategy_comparison_result is comparison_result
+    assert "STRATEGY COMPARISON" in result.report
+
+
+@patch.object(TrainingSession, "run")
+def test_run_does_not_swallow_unexpected_comparison_runtime_error(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    minimizer = Mock(spec=ScenarioCoverageMinimizationService)
+    minimizer.minimize.return_value = Mock()
+    comparison = Mock(spec=StrategyComparisonService)
+    comparison.compare.side_effect = RuntimeError("unexpected comparison failure")
+    service, _ = create_service(minimizer, comparison)
+
+    with pytest.raises(RuntimeError, match="unexpected comparison failure"):
+        service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            episode_count=1,
+            run_strategy_comparison=True,
         )
 
 

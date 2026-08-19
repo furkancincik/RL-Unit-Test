@@ -18,6 +18,9 @@ class EpisodeStatistics:
     final_coverage_percentage: float
     full_coverage: bool
     executed_test_count: int
+    ordered_action_indices: tuple[int, ...] = ()
+    duration_seconds: float | None = None
+    done_reason: str | None = None
 
     def __post_init__(self) -> None:
         self._validate_positive_integer(
@@ -28,6 +31,21 @@ class EpisodeStatistics:
             name="step_count",
             value=self.step_count,
         )
+        if not isinstance(self.ordered_action_indices, tuple):
+            raise TypeError("ordered_action_indices tuple olmalıdır.")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in self.ordered_action_indices
+        ):
+            raise ValueError("ordered_action_indices negatif olmayan tam sayılar içermelidir.")
+        if self.duration_seconds is not None:
+            self._validate_finite_number("duration_seconds", self.duration_seconds)
+            if self.duration_seconds < 0.0:
+                raise ValueError("duration_seconds negatif olamaz.")
+        if self.done_reason is not None and (
+            not isinstance(self.done_reason, str) or not self.done_reason
+        ):
+            raise TypeError("done_reason string veya None olmalıdır.")
         self._validate_finite_number(
             name="total_reward",
             value=self.total_reward,
@@ -287,6 +305,8 @@ class TrainingStatistics:
     def record_episode(
         self,
         steps: tuple[EnvironmentStep, ...],
+        *,
+        duration_seconds: float | None = None,
     ) -> EpisodeStatistics:
         """
         Tamamlanmış bir episode'un adımlarından istatistik üretir.
@@ -314,6 +334,13 @@ class TrainingStatistics:
             executed_test_count=(
                 final_step.state.executed_tests
             ),
+            ordered_action_indices=tuple(
+                step.action.scenario_index
+                for step in steps
+                if step.action is not None
+            ),
+            duration_seconds=duration_seconds,
+            done_reason=final_step.done_reason,
         )
 
         self._episodes.append(

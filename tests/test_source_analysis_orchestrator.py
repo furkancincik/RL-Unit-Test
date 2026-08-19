@@ -156,6 +156,27 @@ def test_single_function_selection_and_timeout_forwarding(
     assert result.status is ProjectRunStatus.COMPLETED
 
 
+def test_strategy_comparison_flag_and_timeout_are_forwarded(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        "first": _diagnostic(source_file, "first", PipelineRunStatus.COMPLETED)
+    }
+
+    _orchestrator(outcomes, calls).run(
+        **_run_arguments(source_file, tmp_path / "output"),
+        function_name="first",
+        all_functions=False,
+        run_strategy_comparison=True,
+        comparison_timeout_seconds=1.5,
+    )
+
+    assert calls[0]["run_strategy_comparison"] is True
+    assert calls[0]["comparison_timeout_seconds"] == 1.5
+
+
 def test_all_functions_preserves_discovery_and_unsupported_results(
     source_file: Path,
     tmp_path: Path,

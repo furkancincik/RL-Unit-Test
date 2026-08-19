@@ -67,6 +67,8 @@ class SourceAnalysisOrchestrator:
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
         per_function_timeout_seconds: float | None = None,
+        run_strategy_comparison: bool = False,
+        comparison_timeout_seconds: float | None = None,
     ) -> ProjectAnalysisResult:
         started_at = time.perf_counter()
         normalized_source = self._normalize_source_file(source_file)
@@ -74,6 +76,11 @@ class SourceAnalysisOrchestrator:
         normalized_output = self._normalize_output_root(output_root)
         self._validate_selection(function_name, all_functions)
         self._validate_optional_timeout(per_function_timeout_seconds)
+        self._validate_optional_timeout(comparison_timeout_seconds)
+        if not isinstance(run_strategy_comparison, bool):
+            raise SourceAnalysisValidationError(
+                "run_strategy_comparison bool olmalıdır."
+            )
 
         analysis = self._analyzer.analyze_file(normalized_source)
         discovered_targets = self._resolve_duplicate_targets(
@@ -120,6 +127,8 @@ class SourceAnalysisOrchestrator:
                 overwrite=overwrite,
                 timeout_seconds=timeout_seconds,
                 pipeline_timeout_seconds=per_function_timeout_seconds,
+                run_strategy_comparison=run_strategy_comparison,
+                comparison_timeout_seconds=comparison_timeout_seconds,
             )
             diagnostic = self._extract_diagnostic(pipeline_result)
             function_results.append(
@@ -129,6 +138,11 @@ class SourceAnalysisOrchestrator:
                     diagnostic=diagnostic,
                     output_directory=function_output,
                     artifact_paths=self._artifact_paths(function_output),
+                    strategy_comparison=(
+                        pipeline_result.strategy_comparison_result
+                        if isinstance(pipeline_result, RealRLTrainingResult)
+                        else None
+                    ),
                 )
             )
 

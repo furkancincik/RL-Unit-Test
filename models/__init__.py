@@ -19,6 +19,12 @@ from models.scenario_minimization_result import (
     ScenarioMinimizationResult,
     ScenarioMinimizationStatus,
 )
+from models.strategy_comparison_result import (
+    EpisodeSelectionTrace,
+    StrategyComparisonResult,
+    StrategyComparisonStatus,
+    StrategyWinner,
+)
 
 __all__ = [
     "CoverageResult",
@@ -36,4 +42,8 @@ __all__ = [
     "ScenarioCoverageSignature",
     "ScenarioMinimizationResult",
     "ScenarioMinimizationStatus",
+    "EpisodeSelectionTrace",
+    "StrategyComparisonResult",
+    "StrategyComparisonStatus",
+    "StrategyWinner",
 ]

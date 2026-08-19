@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from rl.action import Action
 from rl.coverage_state import CoverageState
 
 
@@ -26,6 +27,8 @@ class EnvironmentStep:
     state: CoverageState
     reward: float
     done: bool
+    action: Action | None = None
+    done_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Environment step alanlarını doğrular."""
@@ -38,6 +41,12 @@ class EnvironmentStep:
         self._validate_done(
             self.done
         )
+        if self.action is not None and not isinstance(self.action, Action):
+            raise TypeError("action must be an Action instance or None.")
+        if self.done_reason is not None and (
+            not isinstance(self.done_reason, str) or not self.done_reason
+        ):
+            raise TypeError("done_reason must be a non-empty string or None.")
 
     @staticmethod
     def _validate_state(
