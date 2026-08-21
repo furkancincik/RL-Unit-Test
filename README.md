@@ -367,7 +367,45 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1892 passed, 1 skipped in 145.13s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1924 passed, 1 skipped in 155.43s`.
+
+---
+
+## FastAPI Asynchronous Analysis Jobs
+
+The `api.app.create_app(...)` application factory exposes an import-safe asynchronous job backend. Importing the API does not start Uvicorn, a worker, or an analysis pipeline. Uvicorn starts only through the guarded `api.server` entry point.
+
+Source submission remains explicit and separate:
+
+- `POST /api/v1/jobs/inline` accepts inline Python JSON.
+- `POST /api/v1/jobs/upload` accepts one multipart `.py` upload.
+- `POST /api/v1/jobs/github` accepts a public GitHub repository URL.
+- No API endpoint accepts an arbitrary local server filesystem path. Local project selection remains terminal-only.
+
+```text
+Inline JSON -----+
+Multipart .py ---+--> Bounded job queue --> Worker thread
+GitHub HTTPS ----+          |                    |
+                            |                    +--> Existing external analysis service
+                            |                           +--> Static discovery by default
+                            |                           +--> Trusted dynamic pipeline
+                            v
+                  QUEUED -> RUNNING -> COMPLETED / PARTIAL / FAILED / TIMED_OUT
+                            |
+                            +--> Safe polling result
+                            +--> Opaque artifact IDs
+                            +--> Contained JSON / generated-pytest downloads
+```
+
+`GET /api/v1/jobs/{job_id}` returns safe status and progress metadata. The `/result` endpoint returns `409` until a result exists, `/artifacts` lists allowlisted persistent artifacts, and `/artifacts/{artifact_id}` downloads by server-generated opaque ID without accepting client paths. `GET /api/v1/health` reports bounded queue capacity without running a pipeline.
+
+The backend limits concurrent and queued jobs, inline/upload bytes, and terminal-job retention. Expired terminal records and their server-owned output directories are removed lazily and idempotently; running jobs and user-owned sources are not retention cleanup targets. Raw source, upload bytes, kwargs, expected/actual values, tracebacks, credentials, environment values, and tool-temp paths are not stored in public job models.
+
+`STATIC_DISCOVERY_ONLY` remains the default. `TRUSTED_DYNAMIC_ANALYSIS` requires both `trusted_execution_acknowledged: true` and a positive per-function pipeline timeout. Strategy comparison enables its production greedy baseline. Timeout is not a security sandbox; dynamic execution is only for trusted sources.
+
+Queued jobs can be cancelled before execution. Running jobs are not falsely reported as cancelled because the production pipeline does not expose a safe job-level worker termination handle; a cancellation request is recorded and the API returns `409` while existing per-function timeout protection remains active. Terminal jobs cannot be cancelled again.
+
+CORS is disabled unless an explicit origin allowlist is supplied. Anonymous public GitHub acquisition uses the existing resolver; private credentials and dependency installation are unsupported. Authentication and rate limiting are not implemented yet. The Web UI remains planned for sprint 39.2.
 
 ---
 
@@ -820,6 +858,8 @@ RL-Unit-Test
 - External Source to Coverage, Greedy, and RL Comparison Integration
 - Atomic JSON-Safe External Analysis Reporting
 - Interactive External Source Menu Integration
+- FastAPI Asynchronous Analysis Job Backend
+- Bounded Job Queue, Safe Polling, and Artifact Downloads
 
 ---
 
@@ -846,7 +886,6 @@ RL-Unit-Test
 - Dependency Discovery
 - Isolated and Resource-Limited Execution
 - Tree-sitter Integration
-- FastAPI Backend
 - Web Interface
 
 ---
@@ -865,7 +904,7 @@ RL-Unit-Test
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
 - A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
-- FastAPI and the Web UI remain planned for day 39. The terminal menu keeps upload/paste and GitHub inputs separate but is not a browser upload interface.
+- The FastAPI job backend is complete, but authentication and rate limiting still require hardening. The Web UI remains planned for sprint 39.2. The terminal menu keeps upload/paste and GitHub inputs separate but is not a browser upload interface.
 
 ---
 
