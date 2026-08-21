@@ -53,6 +53,14 @@ from models.external_source_analysis_result import (
     PublicGitHubRepository,
     UploadedPythonFile,
 )
+from models.analysis_job_result import (
+    AnalysisArtifactSummary,
+    AnalysisFunctionSummary,
+    AnalysisJobResultSummary,
+    AnalysisJobStatus,
+    AnalysisJobSummary,
+    AnalysisModuleSummary,
+)
 
 __all__ = [
     "CoverageResult",
@@ -98,4 +106,10 @@ __all__ = [
     "LocalProjectDirectory",
     "PublicGitHubRepository",
     "UploadedPythonFile",
+    "AnalysisArtifactSummary",
+    "AnalysisFunctionSummary",
+    "AnalysisJobResultSummary",
+    "AnalysisJobStatus",
+    "AnalysisJobSummary",
+    "AnalysisModuleSummary",
 ]
