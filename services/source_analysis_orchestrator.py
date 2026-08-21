@@ -67,6 +67,9 @@ class SourceAnalysisOrchestrator:
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
         per_function_timeout_seconds: float | None = None,
+        maximum_functions: int | None = None,
+        import_root: str | Path | None = None,
+        run_greedy_baseline: bool = False,
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
     ) -> ProjectAnalysisResult:
@@ -74,9 +77,18 @@ class SourceAnalysisOrchestrator:
         normalized_source = self._normalize_source_file(source_file)
         normalized_module = self._normalize_module_path(module_path)
         normalized_output = self._normalize_output_root(output_root)
+        normalized_import_root = self._normalize_import_root(
+            import_root,
+            normalized_source,
+        )
         self._validate_selection(function_name, all_functions)
+        self._validate_maximum_functions(maximum_functions)
         self._validate_optional_timeout(per_function_timeout_seconds)
         self._validate_optional_timeout(comparison_timeout_seconds)
+        if not isinstance(run_greedy_baseline, bool):
+            raise SourceAnalysisValidationError(
+                "run_greedy_baseline bool olmalıdır."
+            )
         if not isinstance(run_strategy_comparison, bool):
             raise SourceAnalysisValidationError(
                 "run_strategy_comparison bool olmalıdır."
@@ -90,6 +102,10 @@ class SourceAnalysisOrchestrator:
             discovered_targets,
             function_name=function_name,
             all_functions=all_functions,
+        )
+        limit_skipped_ordinals = self._limit_skipped_ordinals(
+            selected_targets,
+            maximum_functions,
         )
         report_path = normalized_output / "project_analysis_report.json"
         function_results: list[FunctionAnalysisResult] = []
@@ -106,6 +122,18 @@ class SourceAnalysisOrchestrator:
                         diagnostic=None,
                         output_directory=function_output,
                         skip_reason=target.unsupported_reason,
+                    )
+                )
+                continue
+
+            if ordinal in limit_skipped_ordinals:
+                function_results.append(
+                    FunctionAnalysisResult(
+                        target=target,
+                        status=FunctionRunStatus.SKIPPED_LIMIT,
+                        diagnostic=None,
+                        output_directory=function_output,
+                        skip_reason="FUNCTION_LIMIT_EXCEEDED",
                     )
                 )
                 continue
@@ -127,6 +155,8 @@ class SourceAnalysisOrchestrator:
                 overwrite=overwrite,
                 timeout_seconds=timeout_seconds,
                 pipeline_timeout_seconds=per_function_timeout_seconds,
+                import_root=normalized_import_root,
+                run_greedy_baseline=run_greedy_baseline,
                 run_strategy_comparison=run_strategy_comparison,
                 comparison_timeout_seconds=comparison_timeout_seconds,
             )
@@ -298,6 +328,55 @@ class SourceAnalysisOrchestrator:
         if isinstance(value, str) and not value.strip():
             raise SourceAnalysisValidationError("output_root boş olamaz.")
         return Path(value).resolve()
+
+    @staticmethod
+    def _normalize_import_root(
+        value: str | Path | None,
+        source_file: Path,
+    ) -> Path | None:
+        if value is None:
+            return None
+        if not isinstance(value, (str, Path)):
+            raise SourceAnalysisValidationError("import_root path olmalıdır.")
+        if isinstance(value, str) and not value.strip():
+            raise SourceAnalysisValidationError("import_root boş olamaz.")
+        path = Path(value).resolve()
+        if not path.is_dir():
+            raise SourceAnalysisValidationError(
+                "import_root var olan bir klasör olmalıdır."
+            )
+        if not source_file.is_relative_to(path):
+            raise SourceAnalysisValidationError(
+                "source_file import_root dışında olamaz."
+            )
+        return path
+
+    @staticmethod
+    def _validate_maximum_functions(value: int | None) -> None:
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise SourceAnalysisValidationError(
+                "maximum_functions pozitif bir tam sayı olmalıdır."
+            )
+
+    @staticmethod
+    def _limit_skipped_ordinals(
+        targets: tuple[FunctionTarget, ...],
+        maximum_functions: int | None,
+    ) -> frozenset[int]:
+        if maximum_functions is None:
+            return frozenset()
+        eligible_count = 0
+        skipped: set[int] = set()
+        for ordinal, target in enumerate(targets, start=1):
+            if not target.is_supported:
+                continue
+            if eligible_count >= maximum_functions:
+                skipped.add(ordinal)
+                continue
+            eligible_count += 1
+        return frozenset(skipped)
 
     @staticmethod
     def _validate_selection(

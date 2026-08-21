@@ -36,6 +36,23 @@ from models.source_acquisition_result import (
     SourceTargetKind,
     SourceWorkspaceOwnership,
 )
+from models.external_source_analysis_result import (
+    ExternalAnalysisConfiguration,
+    ExternalAnalysisStatus,
+    ExternalExecutionPolicy,
+    ExternalModuleAnalysisResult,
+    ExternalModuleSelection,
+    ExternalModuleSelectionMode,
+    ExternalModuleStatus,
+    ExternalSourceAnalysisRequest,
+    ExternalSourceAnalysisResult,
+    ExternalSourceKind,
+    ExternalWorkspaceCleanupStatus,
+    InlinePythonSource,
+    LocalProjectDirectory,
+    PublicGitHubRepository,
+    UploadedPythonFile,
+)
 
 __all__ = [
     "CoverageResult",
@@ -66,4 +83,19 @@ __all__ = [
     "SourceIssueCategory",
     "SourceTargetKind",
     "SourceWorkspaceOwnership",
+    "ExternalAnalysisConfiguration",
+    "ExternalAnalysisStatus",
+    "ExternalExecutionPolicy",
+    "ExternalModuleAnalysisResult",
+    "ExternalModuleSelection",
+    "ExternalModuleSelectionMode",
+    "ExternalModuleStatus",
+    "ExternalSourceAnalysisRequest",
+    "ExternalSourceAnalysisResult",
+    "ExternalSourceKind",
+    "ExternalWorkspaceCleanupStatus",
+    "InlinePythonSource",
+    "LocalProjectDirectory",
+    "PublicGitHubRepository",
+    "UploadedPythonFile",
 ]

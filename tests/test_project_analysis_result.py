@@ -189,3 +189,68 @@ def test_unsupported_target_requires_a_reason() -> None:
             is_method=False,
             is_supported=False,
         )
+
+
+def test_limit_skipped_function_is_explicit_and_unmeasured() -> None:
+    function_result = FunctionAnalysisResult(
+        target=_target("limited"),
+        status=FunctionRunStatus.SKIPPED_LIMIT,
+        diagnostic=None,
+        output_directory=Path("output/limited"),
+        skip_reason="FUNCTION_LIMIT_EXCEEDED",
+    )
+    result = ProjectAnalysisResult(
+        source_file=Path("target.py"),
+        module_path="target",
+        selection_mode=FunctionSelectionMode.ALL,
+        discovered_targets=(function_result.target,),
+        function_results=(function_result,),
+        total_duration_seconds=0.1,
+        status=ProjectRunStatus.FAILED,
+        output_root=Path("output"),
+        report_path=Path("output/project_analysis_report.json"),
+    )
+
+    value = result.to_dict()
+
+    assert function_result.scenario_count is None
+    assert function_result.rl_test_count is None
+    assert value["functions"][0]["status"] == "SKIPPED_LIMIT"
+    assert value["functions"][0]["line_coverage_percent"] is None
+    assert value["functions"][0]["skip_reason"] == "FUNCTION_LIMIT_EXCEEDED"
+    assert value["summary"]["limit_skipped_function_count"] == 1
+    assert value["summary"]["skipped_function_count"] == 1
+    assert value["summary"]["executed_function_count"] == 0
+
+
+def test_existing_skipped_status_remains_distinct_from_limit_skip() -> None:
+    skipped = FunctionAnalysisResult(
+        target=_target("ordinary_skip"),
+        status=FunctionRunStatus.SKIPPED,
+        diagnostic=None,
+        output_directory=Path("output/ordinary_skip"),
+        skip_reason="ORDINARY_SKIP",
+    )
+    limited = FunctionAnalysisResult(
+        target=_target("limited"),
+        status=FunctionRunStatus.SKIPPED_LIMIT,
+        diagnostic=None,
+        output_directory=Path("output/limited"),
+        skip_reason="FUNCTION_LIMIT_EXCEEDED",
+    )
+    result = ProjectAnalysisResult(
+        source_file=Path("target.py"),
+        module_path="target",
+        selection_mode=FunctionSelectionMode.ALL,
+        discovered_targets=(skipped.target, limited.target),
+        function_results=(skipped, limited),
+        total_duration_seconds=0.1,
+        status=ProjectRunStatus.FAILED,
+        output_root=Path("output"),
+        report_path=Path("output/project_analysis_report.json"),
+    )
+
+    assert result.skipped_count == 1
+    assert result.limit_skipped_count == 1
+    assert result.limit_skipped_function_count == 1
+    assert result.skipped_function_count == 2

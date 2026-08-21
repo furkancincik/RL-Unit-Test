@@ -51,6 +51,7 @@ class ScenarioSuiteCoverageTransition:
         "_coverage_service",
         "_overwrite",
         "_timeout_seconds",
+        "_import_root",
         "_selected_scenarios",
         "_last_coverage_result",
     )
@@ -67,6 +68,7 @@ class ScenarioSuiteCoverageTransition:
         coverage_service: ScenarioSuiteCoverageService | None = None,
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
+        import_root: str | Path | None = None,
     ) -> None:
         """Kümülatif coverage geçiş bileşenini hazırlar."""
         self._source_file = self._normalize_source_file(
@@ -106,6 +108,12 @@ class ScenarioSuiteCoverageTransition:
         self._timeout_seconds = self._validate_timeout(
             timeout_seconds
         )
+        self._import_root = Path(import_root).resolve() if import_root is not None else None
+        if self._import_root is not None and (
+            not self._import_root.is_dir()
+            or not self._source_file.is_relative_to(self._import_root)
+        ):
+            raise ValueError("import_root source_file için geçersiz.")
 
         self._selected_scenarios: list[Scenario] = []
         self._last_coverage_result: (
@@ -252,19 +260,20 @@ class ScenarioSuiteCoverageTransition:
             scenarios
         )
 
-        suite_result = (
-            self._coverage_service.measure_scenarios(
-                source_file=self._source_file,
-                module_path=self._module_path,
-                function_name=self._function_name,
-                scenarios=scenarios,
-                output_directory=self._output_directory,
-                function_start_line=self._function_start_line,
-                function_end_line=self._function_end_line,
-                overwrite=self._overwrite,
-                timeout_seconds=self._timeout_seconds,
-            )
+        arguments = dict(
+            source_file=self._source_file,
+            module_path=self._module_path,
+            function_name=self._function_name,
+            scenarios=scenarios,
+            output_directory=self._output_directory,
+            function_start_line=self._function_start_line,
+            function_end_line=self._function_end_line,
+            overwrite=self._overwrite,
+            timeout_seconds=self._timeout_seconds,
         )
+        if self._import_root is not None:
+            arguments["import_root"] = self._import_root
+        suite_result = self._coverage_service.measure_scenarios(**arguments)
 
         if not suite_result.success:
             coverage_result = (
@@ -331,19 +340,20 @@ class ScenarioSuiteCoverageTransition:
         )
 
         try:
-            suite_result = (
-                self._coverage_service.measure_scenarios(
-                    source_file=self._source_file,
-                    module_path=self._module_path,
-                    function_name=self._function_name,
-                    scenarios=self.selected_scenarios,
-                    output_directory=self._output_directory,
-                    function_start_line=self._function_start_line,
-                    function_end_line=self._function_end_line,
-                    overwrite=self._overwrite,
-                    timeout_seconds=self._timeout_seconds,
-                )
+            arguments = dict(
+                source_file=self._source_file,
+                module_path=self._module_path,
+                function_name=self._function_name,
+                scenarios=self.selected_scenarios,
+                output_directory=self._output_directory,
+                function_start_line=self._function_start_line,
+                function_end_line=self._function_end_line,
+                overwrite=self._overwrite,
+                timeout_seconds=self._timeout_seconds,
             )
+            if self._import_root is not None:
+                arguments["import_root"] = self._import_root
+            suite_result = self._coverage_service.measure_scenarios(**arguments)
         except Exception:
             self._selected_scenarios.pop()
             raise

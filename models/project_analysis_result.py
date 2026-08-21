@@ -25,6 +25,7 @@ class FunctionRunStatus(str, Enum):
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
     SKIPPED = "SKIPPED"
+    SKIPPED_LIMIT = "SKIPPED_LIMIT"
     UNSUPPORTED = "UNSUPPORTED"
 
 
@@ -108,6 +109,7 @@ class FunctionAnalysisResult:
             raise TypeError("output_directory Path olmalıdır.")
         if self.status in {
             FunctionRunStatus.SKIPPED,
+            FunctionRunStatus.SKIPPED_LIMIT,
             FunctionRunStatus.UNSUPPORTED,
         } and not self.skip_reason:
             raise ValueError("Skipped/unsupported function bir reason taşımalıdır.")
@@ -249,7 +251,11 @@ class ProjectAnalysisResult:
     def executed_function_count(self) -> int:
         return sum(
             item.status
-            not in {FunctionRunStatus.SKIPPED, FunctionRunStatus.UNSUPPORTED}
+            not in {
+                FunctionRunStatus.SKIPPED,
+                FunctionRunStatus.SKIPPED_LIMIT,
+                FunctionRunStatus.UNSUPPORTED,
+            }
             for item in self.function_results
         )
 
@@ -275,6 +281,18 @@ class ProjectAnalysisResult:
     @property
     def skipped_count(self) -> int:
         return self._count(FunctionRunStatus.SKIPPED)
+
+    @property
+    def limit_skipped_count(self) -> int:
+        return self.limit_skipped_function_count
+
+    @property
+    def limit_skipped_function_count(self) -> int:
+        return self._count(FunctionRunStatus.SKIPPED_LIMIT)
+
+    @property
+    def skipped_function_count(self) -> int:
+        return self.skipped_count + self.limit_skipped_function_count
 
     @property
     def unsupported_count(self) -> int:
@@ -303,6 +321,8 @@ class ProjectAnalysisResult:
                 "failed_count": self.failed_count,
                 "timed_out_count": self.timed_out_count,
                 "skipped_count": self.skipped_count,
+                "skipped_function_count": self.skipped_function_count,
+                "limit_skipped_function_count": self.limit_skipped_function_count,
                 "unsupported_count": self.unsupported_count,
             },
             "aggregate_project_coverage": {

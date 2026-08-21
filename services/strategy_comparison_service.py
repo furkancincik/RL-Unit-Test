@@ -117,6 +117,7 @@ class StrategyComparisonService:
         comparison_timeout_seconds: float | None,
         rl_hyperparameters: tuple[tuple[str, object], ...],
         random_seed: int | None,
+        import_root: str | Path | None = None,
     ) -> StrategyComparisonResult:
         started = self._clock()
         source = Path(source_file).resolve()
@@ -202,6 +203,7 @@ class StrategyComparisonService:
                             timeout_seconds,
                             comparison_timeout_seconds,
                         ),
+                        import_root=import_root,
                     )
                     verification_cache[suite_key] = coverage
                 coverage_by_episode[trace.episode_number] = coverage
@@ -348,6 +350,7 @@ class StrategyComparisonService:
         output_directory: Path,
         test_file_name: str,
         timeout: float,
+        import_root: str | Path | None,
     ) -> FunctionCoverageResult:
         result = self._suite_service.measure_scenarios(
             source_file=source,
@@ -360,6 +363,7 @@ class StrategyComparisonService:
             overwrite=True,
             timeout_seconds=timeout,
             test_file_name=test_file_name,
+            import_root=import_root,
         )
         if not isinstance(result.coverage, FunctionCoverageResult):
             raise RuntimeError("FunctionCoverageResult gerekli.")

@@ -164,6 +164,7 @@ class ScenarioSuiteCoverageService:
         overwrite: bool = True,
         timeout_seconds: float = 30.0,
         test_file_name: str | None = None,
+        import_root: str | Path | None = None,
     ) -> ScenarioSuiteCoverageResult:
         """
         Seçilmiş senaryoları aynı pytest dosyasında çalıştırır ve
@@ -288,6 +289,7 @@ class ScenarioSuiteCoverageService:
             function_name=normalized_function_name,
             function_range=normalized_function_range,
             timeout_seconds=normalized_timeout,
+            import_root=import_root,
         )
 
         return ScenarioSuiteCoverageResult(
@@ -304,22 +306,26 @@ class ScenarioSuiteCoverageService:
         function_name: str,
         function_range: tuple[int, int] | None,
         timeout_seconds: float,
+        import_root: str | Path | None,
     ) -> CoverageOutput:
         """
         Satır aralığına göre dosya veya fonksiyon coverage ölçümü yapar.
         """
         if function_range is None:
-            return self._coverage_service.measure(
+            arguments = dict(
                 source_file=source_file,
                 test_file=test_file,
                 timeout_seconds=timeout_seconds,
             )
+            if import_root is not None:
+                arguments["import_root"] = import_root
+            return self._coverage_service.measure(**arguments)
 
         function_start_line, function_end_line = (
             function_range
         )
 
-        return self._coverage_service.measure_function(
+        arguments = dict(
             source_file=source_file,
             test_file=test_file,
             function_name=function_name,
@@ -327,6 +333,9 @@ class ScenarioSuiteCoverageService:
             end_line=function_end_line,
             timeout_seconds=timeout_seconds,
         )
+        if import_root is not None:
+            arguments["import_root"] = import_root
+        return self._coverage_service.measure_function(**arguments)
 
     @staticmethod
     def _create_test_file_name(

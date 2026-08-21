@@ -40,6 +40,7 @@ class CoverageService:
         test_file: str | Path,
         *,
         timeout_seconds: float = 30.0,
+        import_root: str | Path | None = None,
     ) -> CoverageResult:
         """
         Kaynak dosyanın pytest testiyle elde edilen coverage değerini ölçer.
@@ -84,6 +85,7 @@ class CoverageService:
             source_file=source_file,
             test_file=test_file,
             timeout_seconds=timeout_seconds,
+            import_root=import_root,
         )
 
         file_summary = self._read_file_summary(
@@ -107,6 +109,7 @@ class CoverageService:
         end_line: int,
         *,
         timeout_seconds: float = 30.0,
+        import_root: str | Path | None = None,
     ) -> FunctionCoverageResult:
         """
         Belirli bir fonksiyon için coverage ölçümü gerçekleştirir.
@@ -176,6 +179,7 @@ class CoverageService:
             source_file=source_file,
             test_file=test_file,
             timeout_seconds=timeout_seconds,
+            import_root=import_root,
         )
 
         file_summary = self._read_file_summary(
@@ -294,6 +298,7 @@ class CoverageService:
         source_file: str | Path,
         test_file: str | Path,
         timeout_seconds: float,
+        import_root: str | Path | None = None,
     ) -> tuple[
         Path,
         Path,
@@ -323,7 +328,11 @@ class CoverageService:
         )
 
         start_time = time.perf_counter()
-        working_directory = Path.cwd().resolve()
+        normalized_import_root = self._normalize_import_root(
+            import_root,
+            normalized_source_file,
+        )
+        working_directory = normalized_import_root or Path.cwd().resolve()
 
         with tempfile.TemporaryDirectory(
             prefix="rl_unit_test_coverage_"
@@ -341,6 +350,9 @@ class CoverageService:
             )
 
             environment = os.environ.copy()
+
+            if normalized_import_root is not None:
+                environment["PYTHONPATH"] = str(normalized_import_root)
 
             environment["COVERAGE_FILE"] = str(
                 coverage_data_file
@@ -423,6 +435,7 @@ class CoverageService:
             file_data = self._find_file_data(
                 report_data=report_data,
                 source_file=normalized_source_file,
+                relative_path_root=working_directory,
             )
 
         duration_seconds = (
@@ -437,6 +450,24 @@ class CoverageService:
             duration_seconds,
             file_data,
         )
+
+    @staticmethod
+    def _normalize_import_root(
+        import_root: str | Path | None,
+        source_file: Path,
+    ) -> Path | None:
+        if import_root is None:
+            return None
+        if not isinstance(import_root, (str, Path)):
+            raise TypeError("import_root string, Path veya None olmalıdır.")
+        if isinstance(import_root, str) and not import_root.strip():
+            raise ValueError("import_root boş olamaz.")
+        root = Path(import_root).resolve()
+        if not root.is_dir():
+            raise ValueError("import_root mevcut bir directory olmalıdır.")
+        if not source_file.resolve().is_relative_to(root):
+            raise ValueError("source_file import_root dışında olamaz.")
+        return root
 
     @staticmethod
     def _create_run_command(
@@ -696,6 +727,7 @@ class CoverageService:
     def _find_file_data(
         report_data: dict[str, Any],
         source_file: Path,
+        relative_path_root: Path | None = None,
     ) -> dict[str, Any]:
         """Raporda hedef kaynak dosyaya ait tüm bilgiyi bulur."""
         files = report_data.get(
@@ -733,7 +765,7 @@ class CoverageService:
 
             if not candidate_path.is_absolute():
                 candidate_path = (
-                    Path.cwd()
+                    (relative_path_root or Path.cwd())
                     / candidate_path
                 )
 

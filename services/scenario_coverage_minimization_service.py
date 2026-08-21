@@ -140,6 +140,7 @@ class ScenarioCoverageMinimizationService:
         timeout_seconds: float = 30.0,
         minimization_timeout_seconds: float | None = None,
         full_pool_coverage: FunctionCoverageResult | None = None,
+        import_root: str | Path | None = None,
     ) -> ScenarioMinimizationResult:
         started = self._clock()
         source = Path(source_file).resolve()
@@ -191,6 +192,7 @@ class ScenarioCoverageMinimizationService:
                     timeout=self._effective_timeout(
                         started, timeout_seconds, minimization_timeout_seconds
                     ),
+                    import_root=import_root,
                 )
         except CoverageExecutionTimeoutError as error:
             result = self._result(
@@ -250,6 +252,7 @@ class ScenarioCoverageMinimizationService:
                         output_directory=work_directory / "measurements" / f"{index:04d}",
                         test_file_name=f"test_{function_name}_contribution.py",
                         timeout=remaining,
+                        import_root=import_root,
                     )
                     cache[key] = coverage
                 contributions.append(self._signature(scenario, index, coverage))
@@ -351,6 +354,7 @@ class ScenarioCoverageMinimizationService:
                 timeout=self._effective_timeout(
                     started, timeout_seconds, minimization_timeout_seconds
                 ),
+                import_root=import_root,
             )
         except CoverageExecutionTimeoutError as error:
             result = self._result(
@@ -416,6 +420,7 @@ class ScenarioCoverageMinimizationService:
         output_directory: Path,
         test_file_name: str,
         timeout: float,
+        import_root: str | Path | None,
     ) -> FunctionCoverageResult:
         result = self._suite_service.measure_scenarios(
             source_file=source,
@@ -428,6 +433,7 @@ class ScenarioCoverageMinimizationService:
             overwrite=True,
             timeout_seconds=timeout,
             test_file_name=test_file_name,
+            import_root=import_root,
         )
         if not isinstance(result.coverage, FunctionCoverageResult):
             raise RuntimeError("FunctionCoverageResult gerekli.")

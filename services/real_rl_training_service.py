@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import importlib.util
 import math
 import random
+import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -507,6 +509,7 @@ class RealRLTrainingService:
         greedy_timeout_seconds: float | None = None,
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
+        import_root: str | Path | None = None,
     ) -> RealRLTrainingResult | PipelineDiagnosticResult:
         """Mevcut exception davranışını koruyarak production run çalıştırır."""
         self._active_diagnostic_accumulator = None
@@ -552,6 +555,7 @@ class RealRLTrainingService:
                     "greedy_timeout_seconds": greedy_timeout_seconds,
                     "run_strategy_comparison": run_strategy_comparison,
                     "comparison_timeout_seconds": comparison_timeout_seconds,
+                    "import_root": import_root,
                 },
                 source_file=Path(source_file).resolve(),
                 function_name=function_name,
@@ -597,6 +601,7 @@ class RealRLTrainingService:
                 greedy_timeout_seconds=greedy_timeout_seconds,
                 run_strategy_comparison=run_strategy_comparison,
                 comparison_timeout_seconds=comparison_timeout_seconds,
+                import_root=import_root,
             )
         except Exception as error:
             accumulator = self._active_diagnostic_accumulator
@@ -652,6 +657,7 @@ class RealRLTrainingService:
         greedy_timeout_seconds: float | None = None,
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
+        import_root: str | Path | None = None,
     ) -> RealRLTrainingResult:
         """
         Seçilen fonksiyon için gerçek coverage tabanlı RL eğitimi yapar.
@@ -740,6 +746,10 @@ class RealRLTrainingService:
             self._normalize_output_directory(
                 output_directory
             )
+        )
+        normalized_import_root = self._normalize_import_root(
+            import_root,
+            normalized_source_file,
         )
 
         self._validate_max_visits_per_node(
@@ -1014,8 +1024,10 @@ class RealRLTrainingService:
         )
         scenario_tuple = self._filter_executable_scenarios(
             source_file=normalized_source_file,
+            module_path=normalized_module_path,
             function_name=normalized_function_name,
             scenarios=tuple(scenarios),
+            import_root=normalized_import_root,
         )
 
         concrete_rejected_count = len(scenarios) - len(scenario_tuple)
@@ -1054,6 +1066,7 @@ class RealRLTrainingService:
             function_end_line=function.end_line_number,
             overwrite=overwrite,
             timeout_seconds=timeout_seconds,
+            import_root=normalized_import_root,
         )
 
         stage_started = diagnostic.start_stage(
@@ -1110,6 +1123,7 @@ class RealRLTrainingService:
                 timeout_seconds=timeout_seconds,
                 minimization_timeout_seconds=greedy_timeout_seconds,
                 full_pool_coverage=baseline_coverage_result,
+                import_root=normalized_import_root,
             )
         diagnostic.branch_coverage_percent = (
             baseline_coverage_result.branch_coverage_percent
@@ -1278,6 +1292,7 @@ class RealRLTrainingService:
                 comparison_timeout_seconds=comparison_timeout_seconds,
                 rl_hyperparameters=comparison_hyperparameters,
                 random_seed=random_seed,
+                import_root=normalized_import_root,
             )
         diagnostic.q_table_state_count = len(q_table)
         if isinstance(final_coverage_result, FunctionCoverageResult):
@@ -1443,8 +1458,10 @@ class RealRLTrainingService:
         self,
         *,
         source_file: Path,
+        module_path: str | None = None,
         function_name: str,
         scenarios: tuple[Scenario, ...],
+        import_root: Path | None = None,
     ) -> tuple[Scenario, ...]:
         """
         Senaryoları hedef fonksiyonda somut olarak çalıştırır.
@@ -1453,51 +1470,68 @@ class RealRLTrainingService:
         uyuşmuyorsa senaryo ulaşılamaz veya yanlış modellenmiş kabul
         edilir ve RL aksiyon kümesine eklenmez.
         """
-        target_function = self._load_target_function(
-            source_file=source_file,
-            function_name=function_name,
-        )
+        previous_path = tuple(sys.path)
+        previous_modules = frozenset(sys.modules)
+        if import_root is not None:
+            sys.path.insert(0, str(import_root))
+        try:
+            target_function = self._load_target_function(
+                source_file=source_file,
+                module_path=(
+                    module_path
+                    if import_root is not None and module_path is not None
+                    else None
+                ),
+                function_name=function_name,
+            )
 
-        executable_scenarios: list[Scenario] = []
-
-        for scenario in scenarios:
-            if self._scenario_matches_execution(
-                target_function=target_function,
-                scenario=scenario,
-            ):
-                executable_scenarios.append(scenario)
-
-        return tuple(executable_scenarios)
+            executable_scenarios: list[Scenario] = []
+            for scenario in scenarios:
+                if self._scenario_matches_execution(
+                    target_function=target_function,
+                    scenario=scenario,
+                ):
+                    executable_scenarios.append(scenario)
+            return tuple(executable_scenarios)
+        finally:
+            if import_root is not None:
+                sys.path[:] = previous_path
+                for imported_name in tuple(set(sys.modules) - previous_modules):
+                    sys.modules.pop(imported_name, None)
 
     @staticmethod
     def _load_target_function(
         *,
         source_file: Path,
+        module_path: str | None,
         function_name: str,
     ) -> Callable[..., Any]:
         """
         Kaynak dosyayı izole bir modül adıyla yükler ve hedef
         fonksiyonu döndürür.
         """
-        module_name = (
-            "_rl_unit_test_validation_"
-            f"{abs(hash(source_file.resolve()))}"
-        )
-
-        spec = importlib.util.spec_from_file_location(
-            module_name,
-            source_file,
-        )
-
-        if spec is None or spec.loader is None:
-            raise RuntimeError(
-                "Somut senaryo doğrulaması için kaynak modül "
-                "yüklenemedi: "
-                f"{source_file}"
+        if module_path is not None:
+            module = importlib.import_module(module_path)
+        else:
+            module_name = (
+                "_rl_unit_test_validation_"
+                f"{abs(hash(source_file.resolve()))}"
             )
 
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                source_file,
+            )
+
+            if spec is None or spec.loader is None:
+                raise RuntimeError(
+                    "Somut senaryo doğrulaması için kaynak modül "
+                    "yüklenemedi: "
+                    f"{source_file}"
+                )
+
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
 
         target_function = getattr(
             module,
@@ -1703,6 +1737,25 @@ class RealRLTrainingService:
             )
 
         return path.resolve()
+
+    @staticmethod
+    def _normalize_import_root(
+        import_root: str | Path | None,
+        source_file: Path,
+    ) -> Path | None:
+        """Harici modül kökünü parent interpreter'a eklemeden doğrular."""
+        if import_root is None:
+            return None
+        if not isinstance(import_root, (str, Path)):
+            raise TypeError("import_root string veya Path olmalıdır.")
+        if isinstance(import_root, str) and not import_root.strip():
+            raise ValueError("import_root boş olamaz.")
+        normalized = Path(import_root).resolve()
+        if not normalized.is_dir():
+            raise ValueError("import_root var olan bir klasör olmalıdır.")
+        if not source_file.is_relative_to(normalized):
+            raise ValueError("source_file import_root dışında olamaz.")
+        return normalized
 
     @staticmethod
     def _normalize_module_path(

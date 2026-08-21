@@ -149,6 +149,7 @@ def test_single_function_selection_and_timeout_forwarding(
         **_run_arguments(source_file, tmp_path / "output"),
         function_name="first",
         all_functions=False,
+        maximum_functions=1,
     )
 
     assert [item.target.name for item in result.function_results] == ["first"]
@@ -208,6 +209,66 @@ def test_all_functions_preserves_discovery_and_unsupported_results(
     ]
     assert result.unsupported_count == 3
     assert result.status is ProjectRunStatus.PARTIAL
+
+
+def test_function_limit_preserves_source_order_and_explicit_skip_results(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        name: _diagnostic(source_file, name, PipelineRunStatus.COMPLETED)
+        for name in ("first", "outer", "last")
+    }
+
+    result = _orchestrator(outcomes, calls).run(
+        **_run_arguments(source_file, tmp_path / "output"),
+        function_name=None,
+        all_functions=True,
+        maximum_functions=2,
+        run_greedy_baseline=True,
+        run_strategy_comparison=True,
+    )
+
+    assert [item.target.qualified_name for item in result.function_results] == [
+        "first",
+        "async_target",
+        "outer",
+        "outer.nested",
+        "Handler.method",
+        "last",
+    ]
+    assert [call["function_name"] for call in calls] == ["first", "outer"]
+    assert all(call["run_greedy_baseline"] is True for call in calls)
+    assert all(call["run_strategy_comparison"] is True for call in calls)
+    assert result.unsupported_count == 3
+    assert result.limit_skipped_count == 1
+    assert result.executed_function_count == 2
+    assert result.status is ProjectRunStatus.PARTIAL
+    limited = result.function_results[-1]
+    assert limited.target.name == "last"
+    assert limited.status is FunctionRunStatus.SKIPPED_LIMIT
+    assert limited.skip_reason == "FUNCTION_LIMIT_EXCEEDED"
+    assert limited.diagnostic is None
+    assert limited.scenario_count is None
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["summary"]["limit_skipped_function_count"] == 1
+    assert report["functions"][-1]["status"] == "SKIPPED_LIMIT"
+
+
+@pytest.mark.parametrize("maximum_functions", (True, 0, -1))
+def test_function_limit_validation_is_preserved(
+    source_file: Path,
+    tmp_path: Path,
+    maximum_functions: object,
+) -> None:
+    with pytest.raises(SourceAnalysisValidationError, match="maximum_functions"):
+        _orchestrator({}, []).run(
+            **_run_arguments(source_file, tmp_path / "output"),
+            function_name=None,
+            all_functions=True,
+            maximum_functions=maximum_functions,
+        )
 
 
 def test_missing_function_lists_available_targets(
@@ -393,6 +454,38 @@ def test_two_runs_do_not_reuse_training_service_state(
     )
 
     assert len(created_services) == 2
+
+
+def test_function_limit_state_is_isolated_between_runs(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        name: _diagnostic(source_file, name, PipelineRunStatus.COMPLETED)
+        for name in ("first", "outer", "last")
+    }
+    orchestrator = _orchestrator(outcomes, calls)
+
+    first = orchestrator.run(
+        **_run_arguments(source_file, tmp_path / "first_output"),
+        function_name=None,
+        all_functions=True,
+        maximum_functions=1,
+    )
+    second = orchestrator.run(
+        **_run_arguments(source_file, tmp_path / "second_output"),
+        function_name=None,
+        all_functions=True,
+        maximum_functions=1,
+    )
+
+    assert [call["function_name"] for call in calls] == ["first", "first"]
+    assert first.limit_skipped_count == 2
+    assert second.limit_skipped_count == 2
+    assert [item.status for item in first.function_results] == [
+        item.status for item in second.function_results
+    ]
 
 
 def test_all_failed_functions_produce_failed_project(
