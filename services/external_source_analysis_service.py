@@ -41,6 +41,10 @@ _INLINE_WORKSPACE_PREFIX = "rl-unit-test-inline-"
 _UPLOAD_WORKSPACE_PREFIX = "rl-unit-test-upload-"
 
 
+class ExternalSourceAnalysisValidationError(ValueError):
+    """External analysis isteği production validation politikasını ihlal etti."""
+
+
 class ExternalSourceAnalysisService:
     """Harici Python kaynaklarını güvenli discovery veya açıkça trusted analiz eder."""
 
@@ -65,7 +69,7 @@ class ExternalSourceAnalysisService:
             request.execution_policy is ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS
             and request.configuration.per_function_pipeline_timeout_seconds is None
         ):
-            raise ValueError(
+            raise ExternalSourceAnalysisValidationError(
                 "Trusted external dynamic analysis per-function pipeline timeout gerektirir."
             )
         temporary_workspace: Path | None = None
@@ -169,9 +173,8 @@ class ExternalSourceAnalysisService:
                 acquired=acquired,
                 temporary_workspace=temporary_workspace,
             )
-        except Exception:
+        finally:
             self._cleanup(acquired, temporary_workspace)
-            raise
 
     def _analyze_modules(
         self,
@@ -318,12 +321,16 @@ class ExternalSourceAnalysisService:
             for value in selection.values:
                 path = PurePosixPath(value.replace("\\", "/"))
                 if path.is_absolute() or ".." in path.parts or path.suffix.lower() != ".py":
-                    raise ValueError("Explicit relative module path geçersiz.")
+                    raise ExternalSourceAnalysisValidationError(
+                        "Explicit relative module path geçersiz."
+                    )
                 normalized.add(path.as_posix())
             return frozenset(normalized)
         requested = frozenset(selection.values)
         if any(any(not part.isidentifier() for part in value.split(".")) for value in requested):
-            raise ValueError("Explicit module name geçersiz.")
+            raise ExternalSourceAnalysisValidationError(
+                "Explicit module name geçersiz."
+            )
         return frozenset(
             item.relative_path for item in modules if item.module_path in requested
         )
@@ -460,7 +467,9 @@ class ExternalSourceAnalysisService:
         root = project_root.resolve()
         output = output_root.resolve()
         if root.exists() and output.is_relative_to(root):
-            raise ValueError("output root source project içinde olamaz.")
+            raise ExternalSourceAnalysisValidationError(
+                "output root source project içinde olamaz."
+            )
 
     def _failed_result(
         self,
@@ -603,7 +612,7 @@ class ExternalSourceAnalysisService:
                 self._acquisition_service.cleanup(acquired)
             if temporary_workspace is not None and temporary_workspace.exists():
                 self._remove_temporary_workspace(temporary_workspace)
-        except Exception:
+        except (OSError, RuntimeError):
             return ExternalWorkspaceCleanupStatus.FAILED
         return ExternalWorkspaceCleanupStatus.COMPLETED
 

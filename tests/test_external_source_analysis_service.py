@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -47,6 +48,33 @@ def test_inline_static_discovery_writes_no_source_to_json_and_cleans(tmp_path: P
     report = result.report_path.read_text(encoding="utf-8")
     assert marker not in report
     assert "rl-unit-test-inline-" not in report
+
+
+def test_keyboard_interrupt_cleans_inline_workspace() -> None:
+    acquisition = Mock()
+    acquisition.resolve.side_effect = KeyboardInterrupt
+    original_mkdtemp = tempfile.mkdtemp
+    created: list[Path] = []
+
+    def tracked_mkdtemp(*, prefix: str) -> str:
+        path = Path(original_mkdtemp(prefix=prefix)).resolve()
+        created.append(path)
+        return str(path)
+
+    request = ExternalSourceAnalysisRequest(
+        source=InlinePythonSource("def target():\n    return 1\n"),
+        execution_policy=ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
+        configuration=ExternalAnalysisConfiguration(output_root=Path("output/interrupt")),
+    )
+    with patch(
+        "services.external_source_analysis_service.tempfile.mkdtemp",
+        side_effect=tracked_mkdtemp,
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            ExternalSourceAnalysisService(acquisition_service=acquisition).run(request)
+
+    assert len(created) == 1
+    assert not created[0].exists()
 
 
 @pytest.mark.parametrize(

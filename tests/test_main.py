@@ -109,7 +109,7 @@ def test_parse_cli_arguments_preserves_default_configuration(
     assert configuration.timeout_seconds == 30.0
 
 
-def test_interactive_menu_exposes_only_production_and_preview_choices(
+def test_interactive_menu_exposes_production_preview_and_external_choices(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     print_menu()
@@ -118,6 +118,7 @@ def test_interactive_menu_exposes_only_production_and_preview_choices(
     assert "RL-UNIT-TEST DEVELOPER TOOL" in output
     assert "1. Kaynak Kod / Proje Analizi" in output
     assert "2. Hızlı Statik Ön İnceleme" in output
+    assert "3. Dış Kaynak Analizi" in output
     assert "0. Çıkış" in output
     assert "Control Flow Graph" not in output
     assert "DQM" not in output
@@ -749,7 +750,40 @@ def test_old_option_eight_is_invalid_and_does_not_start_analysis(
 
     assert main([]) == 0
     source_runner.assert_not_called()
-    assert "Lütfen 0, 1 veya 2 girin" in capsys.readouterr().out
+    assert "Lütfen 0, 1, 2 veya 3 girin" in capsys.readouterr().out
+
+
+def test_menu_external_analysis_uses_terminal_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter_type = Mock(return_value=adapter)
+    responses = iter(("3", "0"))
+    monkeypatch.setattr("main.ExternalSourceTerminalAdapter", adapter_type)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
+
+    assert main([]) == 0
+
+    adapter_type.assert_called_once()
+    adapter.run_menu.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "error",
+    (TypeError("bug"), RuntimeError("bug"), AssertionError("bug")),
+)
+def test_menu_external_analysis_propagates_programming_errors(
+    error: BaseException,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.run_menu.side_effect = error
+    responses = iter(("3",))
+    monkeypatch.setattr("main.ExternalSourceTerminalAdapter", Mock(return_value=adapter))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
+
+    with pytest.raises(type(error), match="bug"):
+        main([])
 
 
 def test_advanced_cli_operations_retain_explicit_demo_defaults() -> None:

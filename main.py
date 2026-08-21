@@ -33,6 +33,7 @@ from services.source_analysis_orchestrator import (
     SourceAnalysisOrchestrator,
     SourceAnalysisValidationError,
 )
+from services.external_source_terminal_service import ExternalSourceTerminalAdapter
 
 
 SOURCE_FILE = "datasets/sample_code.py"
@@ -1259,6 +1260,7 @@ def print_menu() -> None:
     print("=" * 55)
     print("1. Kaynak Kod / Proje Analizi")
     print("2. Hızlı Statik Ön İnceleme")
+    print("3. Dış Kaynak Analizi")
     print("0. Çıkış")
 
 
@@ -1313,13 +1315,18 @@ def main(
 
             continue
 
+        if choice == "3":
+            print()
+            ExternalSourceTerminalAdapter(input_fn=input, output_fn=print).run_menu()
+            continue
+
         if choice == "0":
             print("\nProgram sonlandırıldı.")
             return 0
 
         print(
             "\nGeçersiz seçim. "
-            "Lütfen 0, 1 veya 2 girin."
+            "Lütfen 0, 1, 2 veya 3 girin."
         )
 
 
