@@ -243,12 +243,29 @@ RL-UNIT-TEST DEVELOPER TOOL
 
 1. Kaynak Kod / Proje Analizi
 2. Hızlı Statik Ön İnceleme
+3. Dış Kaynak Analizi
 0. Çıkış
 ```
 
 Option 1 asks for a real Python source file, module path, single/all-functions selection, output directory, and optionally advanced production settings. There is no implicit `datasets/sample_code.py` or `calculate_score` fallback. Example datasets remain valid only when the user selects them explicitly.
 
 Option 2 asks for a real Python source file and reports AST function, complexity, and production-support metadata without starting test generation, coverage, or RL training.
+
+Option 3 opens a dedicated external-source submenu. Each entry remains a separate request model; the terminal never guesses whether one ambiguous string is source code, a path, or a URL:
+
+```text
+DIŞ KAYNAK ANALİZİ
+
+1. Python kodu yapıştır
+2. Python dosyası seç
+3. Yerel proje klasörü seç
+4. Public GitHub URL gir
+0. Ana menüye dön
+```
+
+Pasted Python is collected as multiline input until a line containing only `__END__`; the marker is not included in the source. Empty input is rejected. File selection accepts an explicit existing `.py` path, while local projects require an existing directory. GitHub URLs use the existing acquisition-service validation and are never combined with paste or upload input.
+
+External analysis defaults to `STATIC_DISCOVERY_ONLY`. `TRUSTED_DYNAMIC_ANALYSIS` requires a separate explicit `EVET` confirmation after warning that source code will execute and that timeout is not a sandbox. Dynamic settings expose output root, module-selection mode, module/function limits, per-function pipeline timeout, episode count, random seed, greedy minimization, and RL–greedy comparison. Enabling comparison also enables its production greedy baseline.
 
 The research and diagnostic operations remain available through the advanced CLI: `analyze`, `cfg`, `dqm`, `dqm-json`, `test`, `coverage`, `demo`, and `rl`. Non-interactive `rl` requires explicit source, module, and single/all-functions selection arguments.
 
@@ -350,7 +367,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.2 run did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1866 passed, 1 skipped in 126.81s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1892 passed, 1 skipped in 145.13s`.
 
 ---
 
@@ -802,6 +819,7 @@ RL-Unit-Test
 - Subprocess/Worker Import-Root Isolation
 - External Source to Coverage, Greedy, and RL Comparison Integration
 - Atomic JSON-Safe External Analysis Reporting
+- Interactive External Source Menu Integration
 
 ---
 
@@ -847,7 +865,7 @@ RL-Unit-Test
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
 - A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
-- FastAPI and the separate upload/paste versus GitHub web interface remain planned for day 39.
+- FastAPI and the Web UI remain planned for day 39. The terminal menu keeps upload/paste and GitHub inputs separate but is not a browser upload interface.
 
 ---
 
