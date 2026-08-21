@@ -324,7 +324,33 @@ Ignored directories come from one general policy covering Git metadata, virtual 
 
 Public GitHub acquisition uses a unique tool-owned system-temp workspace and a shallow, single-branch, no-tags clone. Git runs with `shell=False`, credential prompting and helpers disabled, process-local Git configuration, disabled LFS smudge, no submodule recursion, and a disabled hook path. Clone output is discarded; only the validated 40-character commit SHA is captured. Failed or timed-out clones clean their partial workspace, while local user-owned sources are never cleanup targets. No dependency manifest, setup script, package manager, or repository code is executed.
 
-The real local-project acceptance discovered top-level, package, and `src/` modules, excluded tests by default, included them on request, ignored `.venv`, and preserved the user-owned workspace. A real temporary local Git fixture verified commit-SHA resolution. Anonymous `ls-remote` access succeeded for both the current origin and GitHub's official small public connectivity fixture. The single official resolver acceptance completed the clone in 1.133 seconds and resolved commit `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`. The fixture contained no Python files; this is reported as a non-fatal `NO_PYTHON_FILES` partial inventory rather than `CLONE_FAILED`. That run exposed Windows read-only Git pack cleanup behavior, which now has a regression-tested writable-retry path; the tool-owned workspace was removed and no Git process remained. Repository inventory handoff into multi-file RL analysis remains a 38.2 task.
+The real local-project acceptance discovered top-level, package, and `src/` modules, excluded tests by default, included them on request, ignored `.venv`, and preserved the user-owned workspace. A real temporary local Git fixture verified commit-SHA resolution. Anonymous `ls-remote` access succeeded for both the current origin and GitHub's official small public connectivity fixture. The single official resolver acceptance completed the clone in 1.133 seconds and resolved commit `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`. The fixture contained no Python files; this is reported as a non-fatal `NO_PYTHON_FILES` partial inventory rather than `CLONE_FAILED`. That run exposed Windows read-only Git pack cleanup behavior, which now has a regression-tested writable-retry path; the tool-owned workspace was removed and no Git process remained.
+
+---
+
+## External Source-to-Analysis Integration
+
+The backend keeps four input modes distinct: `INLINE_PYTHON_SOURCE`, `UPLOADED_PYTHON_FILE`, `LOCAL_PROJECT_DIRECTORY`, and `PUBLIC_GITHUB_REPOSITORY`. Inline text, uploaded bytes, local paths, and GitHub URLs are not multiplexed through one ambiguous field. Module selection supports deterministic `ALL_ELIGIBLE_WITH_LIMIT`, `EXPLICIT_RELATIVE_PATHS`, and `EXPLICIT_MODULE_NAMES` policies, with configurable module and per-module function limits. Discovered modules and functions beyond those limits remain visible in reports as `SKIPPED_LIMIT` instead of disappearing from the inventory.
+
+```text
+Inline Python -----------+                         +--> Static metadata only
+Uploaded .py ------------+--> Secure acquisition -+
+Local project directory -+          |              +--> Trusted dynamic analysis
+Public GitHub URL -------+          v                        |
+                               Module selection              v
+                                      |             Multi-function pipeline
+                                      |               +--> pytest/coverage
+                                      |               +--> greedy minimization
+                                      +-------------->+--> RL vs greedy report
+```
+
+`STATIC_DISCOVERY_ONLY` is the default and never starts pytest, coverage, greedy minimization, or RL. Real execution requires the caller to select `TRUSTED_DYNAMIC_ANALYSIS` explicitly. A timeout bounds work; it is not a security sandbox. Trusted external code can still access host resources, so arbitrary untrusted execution remains unsupported.
+
+Inline and upload payloads are byte-limited, encoding/syntax checked, written to unique tool-owned system-temp files, retained through analysis, and cleaned afterward. Their source text and bytes are never serialized. Local directories remain user-owned. Public GitHub sources retain the secure anonymous clone and commit-SHA policy, and their tool-owned clone survives until persistent artifacts and the atomic external report are written.
+
+Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
+
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.2 run did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1866 passed, 1 skipped in 126.81s`.
 
 ---
 
@@ -520,6 +546,10 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ `main.py` Option 1 Production Integration
 - ✅ Interactive Static Source Preview
 - ✅ Atomic Project JSON Report
+- ✅ Four-Mode External Source Analysis API
+- ✅ Static-Only Default and Explicit Trusted Dynamic Policy
+- ✅ Module/Function Selection Limits and Import-Root Isolation
+- ✅ External Coverage, Greedy, and RL Comparison Reporting
 
 ---
 
@@ -765,6 +795,13 @@ RL-Unit-Test
 - Deterministic Python Project Discovery and Module-Path Inference
 - Tool-Owned Temporary Workspace Cleanup
 - Source Discovery Resource and Path-Containment Limits
+- Separate Inline, Upload, Local Directory, and Public GitHub Source Models
+- Static-Only External Discovery Default
+- Explicit Trusted External Dynamic Analysis
+- Deterministic External Module and Function Limits
+- Subprocess/Worker Import-Root Isolation
+- External Source to Coverage, Greedy, and RL Comparison Integration
+- Atomic JSON-Safe External Analysis Reporting
 
 ---
 
@@ -778,7 +815,7 @@ RL-Unit-Test
 - Comparison Coverage-Execution Caching and Performance
 - Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
-- Repository Inventory to Multi-Function Analysis Integration (38.2)
+- External Analysis Performance and Project-Wide Deadline
 
 ---
 
@@ -807,8 +844,10 @@ RL-Unit-Test
 - Aggregate project coverage is reported as unmeasured because function percentages are not arithmetically averaged and a combined-suite measurement is not yet performed.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
-- Source acquisition currently produces a safe project inventory only; repository-wide RL/coverage orchestration is not connected until 38.2.
-- Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, dependency installation, and untrusted project execution are intentionally unsupported.
+- External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
+- A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
+- Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
+- FastAPI and the separate upload/paste versus GitHub web interface remain planned for day 39.
 
 ---
 
