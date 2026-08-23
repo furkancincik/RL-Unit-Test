@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from analyzer.python_analyzer import FunctionInfo, PythonAnalyzer
+from models.coverage_result import FunctionCoverageResult
 from models.pipeline_diagnostic_result import (
     PipelineDiagnosticResult,
     PipelineRunStatus,
@@ -171,6 +172,25 @@ class SourceAnalysisOrchestrator:
                     strategy_comparison=(
                         pipeline_result.strategy_comparison_result
                         if isinstance(pipeline_result, RealRLTrainingResult)
+                        else None
+                    ),
+                    scenario_pool_coverage=(
+                        pipeline_result.scenario_pool_coverage_result
+                        if isinstance(pipeline_result, RealRLTrainingResult)
+                        else None
+                    ),
+                    minimization_result=(
+                        pipeline_result.minimization_result
+                        if isinstance(pipeline_result, RealRLTrainingResult)
+                        else None
+                    ),
+                    best_rl_coverage=(
+                        pipeline_result.final_coverage_result
+                        if isinstance(pipeline_result, RealRLTrainingResult)
+                        and isinstance(
+                            pipeline_result.final_coverage_result,
+                            FunctionCoverageResult,
+                        )
                         else None
                     ),
                 )

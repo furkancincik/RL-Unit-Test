@@ -338,6 +338,25 @@ def test_successful_github_clone_without_python_files_is_not_acquisition_failure
     assert service.cleanup(result) is True
 
 
+def test_static_discovery_retains_safe_top_level_function_names(tmp_path: Path) -> None:
+    source = tmp_path / "inventory.py"
+    source.write_text(
+        "def calculate_total(price, quantity):\n    return price * quantity\n\n"
+        "async def classify_stock(stock):\n    return stock\n",
+        encoding="utf-8",
+    )
+
+    result = SourceAcquisitionService().resolve(
+        _request(SourceTargetKind.LOCAL_FILE, source)
+    )
+
+    assert result.discovered_modules[0].top_level_function_names == (
+        "calculate_total",
+        "classify_stock",
+    )
+    assert "return price" not in json.dumps(result.to_dict())
+
+
 @pytest.mark.parametrize(
     ("error", "category"),
     ((subprocess.TimeoutExpired("git", 1), SourceIssueCategory.CLONE_TIMEOUT),),

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Harici Python kaynakları için güvenli keşif, coverage ve test takımı optimizasyon arayüzü.">
+  <title>RL Unit Test · Analiz Merkezi</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#analysis-form">Analiz formuna geç</a>
+  <div class="page-shell">
+    <header class="hero" aria-labelledby="page-title">
+      <div class="brand-mark" aria-hidden="true">RL</div>
+      <div class="hero-copy">
+        <p class="eyebrow">Yerel Python analiz çalışma alanı</p>
+        <h1 id="page-title">RL Unit Test</h1>
+        <p class="hero-lead">Maksimum coverage, minimum test. Kaynağınızı güvenle keşfedin; doğrulanmış sonuçları ve küçültülmüş test takımlarını tek ekranda inceleyin.</p>
+      </div>
+      <div class="system-status" aria-label="Sistem durumu">
+        <div class="status-line">
+          <span id="health-dot" class="status-dot status-dot-pending" aria-hidden="true"></span>
+          <span id="health-status" aria-live="polite">API kontrol ediliyor</span>
+        </div>
+        <p><strong>Güvenlik modu:</strong> Statik keşif varsayılan</p>
+        <p id="capacity-status">Kuyruk bilgisi bekleniyor</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="workspace-card" aria-labelledby="source-heading">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">01 · Kaynak</p>
+            <h2 id="source-heading">Analiz kaynağını seçin</h2>
+          </div>
+          <p>Kaynak türleri bilinçli olarak ayrıdır; içerik türü tahmin edilmez.</p>
+        </div>
+
+        <form id="analysis-form" novalidate>
+          <div class="source-tabs" role="tablist" aria-label="Kaynak türü">
+            <button class="source-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="inline-panel" id="inline-tab" data-source-tab="inline">
+              <span class="tab-index">01</span>
+              <span>Kod Yapıştır</span>
+            </button>
+            <button class="source-tab" type="button" role="tab" aria-selected="false" aria-controls="upload-panel" id="upload-tab" data-source-tab="upload">
+              <span class="tab-index">02</span>
+              <span>Python Dosyası Yükle</span>
+            </button>
+            <button class="source-tab" type="button" role="tab" aria-selected="false" aria-controls="github-panel" id="github-tab" data-source-tab="github">
+              <span class="tab-index">03</span>
+              <span>GitHub URL</span>
+            </button>
+          </div>
+
+          <div class="source-panel" id="inline-panel" role="tabpanel" aria-labelledby="inline-tab" data-source-panel="inline">
+            <div class="field-header">
+              <label for="inline-source">Python kaynak kodu</label>
+              <span id="source-byte-count">0 / 2.000.000 byte</span>
+            </div>
+            <textarea id="inline-source" rows="14" spellcheck="false" autocomplete="off" placeholder="def classify(value: int) -> str:&#10;    if value > 0:&#10;        return 'positive'&#10;    return 'other'"></textarea>
+            <p class="field-help">Kaynak yalnız analiz isteğinde gönderilir; sonuçlara, URL’ye veya tarayıcı depolamasına yazılmaz.</p>
+          </div>
+
+          <div class="source-panel" id="upload-panel" role="tabpanel" aria-labelledby="upload-tab" data-source-panel="upload" hidden>
+            <label class="drop-zone" id="drop-zone" for="python-file">
+              <span class="drop-symbol" aria-hidden="true">.py</span>
+              <strong>Dosyayı buraya bırakın</strong>
+              <span>veya bilgisayarınızdan tek bir Python dosyası seçin</span>
+              <span class="button-like">Dosya Seç</span>
+            </label>
+            <input id="python-file" class="visually-hidden" type="file" accept=".py,text/x-python" aria-describedby="upload-help">
+            <p id="upload-help" class="field-help">Yalnız `.py`, en fazla 2.000.000 byte. Klasör veya sunucu yolu kabul edilmez.</p>
+            <div id="file-preview" class="file-preview" hidden>
+              <div>
+                <strong id="file-name"></strong>
+                <span id="file-size"></span>
+              </div>
+              <button id="remove-file" type="button" class="text-button">Dosyayı kaldır</button>
+            </div>
+          </div>
+
+          <div class="source-panel" id="github-panel" role="tabpanel" aria-labelledby="github-tab" data-source-panel="github" hidden>
+            <label for="github-url">Public GitHub repository URL</label>
+            <input id="github-url" type="url" inputmode="url" autocomplete="off" placeholder="https://github.com/owner/repository" aria-describedby="github-help">
+            <p id="github-help" class="field-help">Yalnız anonim erişilebilen public repository desteklenir. Token, kullanıcı adı veya parola alınmaz; son doğrulamayı backend yapar.</p>
+          </div>
+
+          <div class="mode-layout">
+            <fieldset class="mode-selector">
+              <legend>Analiz modu</legend>
+              <label class="choice-card is-selected">
+                <input type="radio" name="analysis-mode" value="STATIC_DISCOVERY_ONLY" checked>
+                <span>
+                  <strong>Güvenli Statik Keşif</strong>
+                  <small>Kodu çalıştırmadan modül ve fonksiyon envanteri üretir.</small>
+                </span>
+              </label>
+              <label class="choice-card">
+                <input type="radio" name="analysis-mode" value="TRUSTED_DYNAMIC_ANALYSIS">
+                <span>
+                  <strong>Güvenilir Dinamik Analiz</strong>
+                  <small>Coverage, pytest, greedy ve RL pipeline’ını çalıştırır.</small>
+                </span>
+              </label>
+            </fieldset>
+
+            <aside id="trusted-warning" class="warning-card" hidden>
+              <strong>Kaynak kod gerçekten çalıştırılır.</strong>
+              <p>Timeout bir sandbox değildir. Bu modu yalnız kaynağın tüm davranışlarına güvendiğinizde kullanın.</p>
+              <label class="acknowledgement" for="trusted-acknowledgement">
+                <input id="trusted-acknowledgement" type="checkbox">
+                <span>Bu kaynağa güvendiğimi ve kodun çalıştırılacağını kabul ediyorum.</span>
+              </label>
+            </aside>
+          </div>
+
+          <details class="advanced-settings" id="advanced-settings">
+            <summary>
+              <span>Gelişmiş Ayarlar</span>
+              <small>Modül seçimi, limitler ve optimizasyon</small>
+            </summary>
+            <div class="settings-grid">
+              <div class="field span-two">
+                <label for="selection-mode">Module selection mode</label>
+                <select id="selection-mode">
+                  <option value="ALL_ELIGIBLE_WITH_LIMIT">Limit dahil tüm uygun modüller</option>
+                  <option value="EXPLICIT_RELATIVE_PATHS">Explicit relative paths</option>
+                  <option value="EXPLICIT_MODULE_NAMES">Explicit module names</option>
+                </select>
+              </div>
+              <div class="field span-two" id="explicit-values-field" hidden>
+                <label id="explicit-values-label" for="explicit-values">Explicit değerler</label>
+                <input id="explicit-values" type="text" autocomplete="off" placeholder="package/core.py, package/utils.py">
+                <small>Virgülle ayırın; boşluklar ve tekrarlar temizlenir.</small>
+              </div>
+              <div class="field">
+                <label for="maximum-module-count">Maksimum modül</label>
+                <input id="maximum-module-count" type="number" min="1" max="100" value="10">
+              </div>
+              <div class="field">
+                <label for="maximum-function-count">Modül başına maksimum fonksiyon</label>
+                <input id="maximum-function-count" type="number" min="1" max="100" value="10">
+              </div>
+              <div class="field dynamic-setting">
+                <label for="episode-count">RL episode sayısı</label>
+                <input id="episode-count" type="number" min="1" max="1000" value="3" disabled>
+              </div>
+              <div class="field dynamic-setting">
+                <label for="random-seed">Random seed</label>
+                <input id="random-seed" type="number" value="42" disabled>
+              </div>
+              <div class="field dynamic-setting">
+                <label for="pytest-timeout">Pytest / coverage timeout</label>
+                <input id="pytest-timeout" type="number" min="0.1" max="3600" step="0.1" value="30" disabled>
+              </div>
+              <div class="field dynamic-setting">
+                <label for="pipeline-timeout">Fonksiyon pipeline timeout</label>
+                <input id="pipeline-timeout" type="number" min="0.1" max="7200" step="0.1" value="120" disabled>
+              </div>
+              <label class="toggle-row dynamic-setting" for="greedy-minimization">
+                <input id="greedy-minimization" type="checkbox" checked disabled>
+                <span><strong>Greedy minimization</strong><small>Deterministik küçültülmüş test takımı üret.</small></span>
+              </label>
+              <label class="toggle-row dynamic-setting" for="strategy-comparison">
+                <input id="strategy-comparison" type="checkbox" disabled>
+                <span><strong>RL–greedy karşılaştırması</strong><small>Etkinleştirilirse greedy baseline otomatik gereklidir.</small></span>
+              </label>
+            </div>
+          </details>
+
+          <div id="form-message" class="form-message" role="alert" hidden></div>
+          <div class="submit-row">
+            <div>
+              <strong id="submit-summary">Statik keşif başlatılacak</strong>
+              <span>Gönderim aynı origin API üzerinden yapılır.</span>
+            </div>
+            <button id="submit-analysis" type="submit" class="primary-button">
+              <span class="button-label">Analizi Başlat</span>
+              <span class="loading-label" hidden>İstek gönderiliyor…</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section id="job-section" class="workspace-card job-card" aria-labelledby="job-heading" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="step-label">02 · Pipeline</p>
+            <h2 id="job-heading">Analiz durumu</h2>
+          </div>
+          <span id="job-status-badge" class="status-badge">QUEUED</span>
+        </div>
+        <div id="job-live-status" class="job-stage" aria-live="polite" aria-atomic="true">İş kuyruğa alındı.</div>
+        <dl class="metric-grid compact" id="job-metrics">
+          <div><dt>Aşama</dt><dd id="job-stage">QUEUED</dd></div>
+          <div><dt>Kaynak</dt><dd id="job-source-kind">Ölçülmedi</dd></div>
+          <div><dt>Politika</dt><dd id="job-policy">Ölçülmedi</dd></div>
+          <div><dt>Başlangıç</dt><dd id="job-started-at">Bekleniyor</dd></div>
+          <div><dt>Bitiş</dt><dd id="job-finished-at">Bekleniyor</dd></div>
+          <div><dt>Geçen süre</dt><dd id="job-elapsed">0 sn</dd></div>
+        </dl>
+        <div class="job-actions">
+          <button id="cancel-job" type="button" class="secondary-button">Analizi İptal Et</button>
+          <p id="cancel-help">Yalnız kuyruktaki iş gerçekten iptal edilebilir.</p>
+        </div>
+      </section>
+
+      <section id="error-section" class="workspace-card error-card" aria-labelledby="error-heading" hidden>
+        <p class="step-label">Kontrollü hata</p>
+        <h2 id="error-heading">Analiz tamamlanamadı</h2>
+        <dl class="metric-grid compact">
+          <div><dt>Kategori</dt><dd id="error-category">ANALYSIS_FAILED</dd></div>
+          <div><dt>Durulan aşama</dt><dd id="error-stage">Ölçülmedi</dd></div>
+        </dl>
+        <p id="error-message">Güvenli hata ayrıntısı mevcut değil.</p>
+        <button id="retry-analysis" type="button" class="secondary-button">Forma Dön ve Yeniden Dene</button>
+      </section>
+
+      <section id="result-section" class="workspace-card result-card" aria-labelledby="result-heading" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="step-label">03 · Sonuç</p>
+            <h2 id="result-heading">Doğrulanmış analiz özeti</h2>
+            <p id="result-description" class="result-context" hidden></p>
+            <p id="result-info" class="result-context" hidden></p>
+          </div>
+          <span id="result-status-badge" class="status-badge">COMPLETED</span>
+        </div>
+        <dl class="metric-grid" id="result-summary"></dl>
+        <div class="coverage-note">
+          <strong>Project coverage</strong>
+          <span id="project-coverage">Ölçülmedi</span>
+          <small>Fonksiyon yüzdelerinin aritmetik ortalaması alınmaz.</small>
+        </div>
+        <div id="module-results" class="module-list"></div>
+
+        <div class="artifact-section" aria-labelledby="artifact-heading">
+          <div>
+            <p class="step-label">Artifact’ler</p>
+            <h3 id="artifact-heading">Üretilen dosyalar</h3>
+          </div>
+          <div id="artifact-list" class="artifact-list">
+            <p class="empty-state">Artifact bilgisi bekleniyor.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Yerel developer tool · Aynı-origin API · Authentication ve rate limiting henüz uygulanmadı.</p>
+      <a href="/docs">API dokümantasyonu</a>
+    </footer>
+  </div>
+</body>
+</html>

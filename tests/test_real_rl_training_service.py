@@ -717,6 +717,131 @@ def test_successful_run_exposes_completed_diagnostic(
         episode_count=1,
     )
 
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_keeps_full_pool_coverage_separate_from_lower_rl_coverage(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = TrainingSessionResult(
+        episodes=(
+            EpisodeStatistics(
+                episode_number=1,
+                step_count=1,
+                total_reward=5.0,
+                final_coverage_percentage=75.0,
+                full_coverage=False,
+                executed_test_count=1,
+            ),
+        ),
+        requested_episode_count=1,
+        completed_episode_count=1,
+    )
+    full_pool = create_function_coverage_result(tmp_path)
+    lower_rl = create_function_coverage_result(
+        tmp_path,
+        line_coverage_percent=75.0,
+        branch_coverage_percent=50.0,
+    )
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "measure_scenarios",
+        lambda self, scenarios: full_pool,
+    )
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "last_coverage_result",
+        property(lambda self: lower_rl),
+    )
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=1,
+    )
+
+    assert result.scenario_pool_coverage_result is full_pool
+    assert result.final_coverage_result is lower_rl
+    assert result.diagnostic is not None
+    assert result.diagnostic.line_coverage_percent == 100.0
+    assert result.diagnostic.branch_coverage_percent == 100.0
+
+
+@patch.object(
+    TrainingSession,
+    "run",
+)
+def test_run_reports_recorded_best_episode_coverage_instead_of_last_episode(
+    mock_run: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first_coverage = create_function_coverage_result(tmp_path)
+    last_coverage = create_function_coverage_result(
+        tmp_path,
+        line_coverage_percent=75.0,
+        branch_coverage_percent=50.0,
+    )
+    current = {"coverage": first_coverage}
+    monkeypatch.setattr(
+        ScenarioSuiteCoverageTransition,
+        "last_coverage_result",
+        property(lambda self: current["coverage"]),
+    )
+
+    episodes = (
+        EpisodeStatistics(
+            episode_number=1,
+            step_count=1,
+            total_reward=10.0,
+            final_coverage_percentage=100.0,
+            full_coverage=True,
+            executed_test_count=1,
+        ),
+        EpisodeStatistics(
+            episode_number=2,
+            step_count=1,
+            total_reward=5.0,
+            final_coverage_percentage=75.0,
+            full_coverage=False,
+            executed_test_count=1,
+        ),
+    )
+
+    def run_session(**arguments: object) -> TrainingSessionResult:
+        callback = arguments["episode_completed_callback"]
+        current["coverage"] = first_coverage
+        callback(episodes[0])
+        current["coverage"] = last_coverage
+        callback(episodes[1])
+        return TrainingSessionResult(
+            episodes=episodes,
+            requested_episode_count=2,
+            completed_episode_count=2,
+        )
+
+    mock_run.side_effect = run_session
+    service, _ = create_service()
+
+    result = service.run(
+        source_file=create_source_file(tmp_path),
+        module_path="sample_code",
+        function_name="calculate_score",
+        output_directory=tmp_path,
+        episode_count=2,
+    )
+
+    assert result.session_result.best_episode is episodes[0]
+    assert result.final_coverage_result is first_coverage
+    assert result.final_coverage_result is not last_coverage
+
     assert result.diagnostic.status is PipelineRunStatus.COMPLETED
     assert result.diagnostic.last_completed_stage is PipelineStage.REPORTING
     assert result.diagnostic.funnel.bounded_path_count == 1

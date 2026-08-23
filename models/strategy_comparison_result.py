@@ -130,6 +130,10 @@ class StrategyComparisonResult:
     greedy_verified_branch_identities: tuple[tuple[int, int], ...] = ()
     rl_verified_line_identities: tuple[int, ...] = ()
     rl_verified_branch_identities: tuple[tuple[int, int], ...] = ()
+    greedy_verified_line_percentage: float | None = None
+    greedy_verified_branch_percentage: float | None = None
+    rl_verified_line_percentage: float | None = None
+    rl_verified_branch_percentage: float | None = None
     globally_minimal: bool = False
 
     def __post_init__(self) -> None:
@@ -168,6 +172,15 @@ class StrategyComparisonResult:
             raise ValueError("Comparable sonuç non_comparable_reason taşıyamaz.")
         if not self.comparable and not self.non_comparable_reason:
             raise ValueError("Non-comparable sonuç reason taşımalıdır.")
+        for name in (
+            "greedy_verified_line_percentage",
+            "greedy_verified_branch_percentage",
+            "rl_verified_line_percentage",
+            "rl_verified_branch_percentage",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                EpisodeSelectionTrace._validate_percentage(value)
 
     @property
     def target_line_count(self) -> int:
@@ -248,6 +261,8 @@ class StrategyComparisonResult:
             "greedy_verified_branch_identities": [
                 list(value) for value in self.greedy_verified_branch_identities
             ],
+            "greedy_verified_line_percentage": self.greedy_verified_line_percentage,
+            "greedy_verified_branch_percentage": self.greedy_verified_branch_percentage,
             "greedy_duration_seconds": self.greedy_duration_seconds,
             "requested_rl_episode_count": self.requested_rl_episode_count,
             "completed_rl_episode_count": self.completed_rl_episode_count,
@@ -266,6 +281,8 @@ class StrategyComparisonResult:
             "rl_verified_branch_identities": [
                 list(value) for value in self.rl_verified_branch_identities
             ],
+            "rl_verified_line_percentage": self.rl_verified_line_percentage,
+            "rl_verified_branch_percentage": self.rl_verified_branch_percentage,
             "rl_duration_seconds": self.rl_duration_seconds,
             "winner": self.winner.value,
             "test_count_difference": self.test_count_difference,

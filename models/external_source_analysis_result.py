@@ -292,6 +292,7 @@ class ExternalModuleAnalysisResult:
     issue_category: str | None
     issue_message: str | None
     artifact_paths: tuple[Path, ...]
+    discovered_function_names: tuple[str, ...] = ()
 
     @property
     def analyzed_function_count(self) -> int:
@@ -344,13 +345,54 @@ class ExternalModuleAnalysisResult:
         for item in getattr(self.project_result, "function_results", ()) if self.project_result is not None else ():
             diagnostic = getattr(item, "diagnostic", None)
             comparison = getattr(item, "strategy_comparison", None)
+            scenario_pool = getattr(item, "scenario_pool_coverage", None)
+            minimization = getattr(item, "minimization_result", None)
+            best_rl = getattr(item, "best_rl_coverage", None)
+            verified_rl_line = getattr(
+                comparison, "rl_verified_line_percentage", None
+            )
+            verified_rl_branch = getattr(
+                comparison, "rl_verified_branch_percentage", None
+            )
+            scenario_pool_line = getattr(
+                scenario_pool,
+                "line_coverage_percent",
+                getattr(diagnostic, "line_coverage_percent", None),
+            )
+            scenario_pool_branch = getattr(
+                scenario_pool,
+                "branch_coverage_percent",
+                getattr(diagnostic, "branch_coverage_percent", None),
+            )
             functions.append(
                 {
                     "qualified_name": item.target.qualified_name,
                     "status": item.status.value,
                     "skip_reason": item.skip_reason,
-                    "line_coverage_percent": getattr(diagnostic, "line_coverage_percent", None),
-                    "branch_coverage_percent": getattr(diagnostic, "branch_coverage_percent", None),
+                    "line_coverage_percent": scenario_pool_line,
+                    "branch_coverage_percent": scenario_pool_branch,
+                    "scenario_pool_line_coverage_percent": scenario_pool_line,
+                    "scenario_pool_branch_coverage_percent": scenario_pool_branch,
+                    "greedy_line_coverage_percent": getattr(
+                        minimization, "final_verified_line_percentage", None
+                    ),
+                    "greedy_branch_coverage_percent": getattr(
+                        minimization, "final_verified_branch_percentage", None
+                    ),
+                    "greedy_coverage_preserved": getattr(
+                        minimization, "coverage_preserved", None
+                    ),
+                    "best_rl_line_coverage_percent": getattr(
+                        best_rl, "line_coverage_percent", None
+                    ) if verified_rl_line is None else verified_rl_line,
+                    "best_rl_branch_coverage_percent": getattr(
+                        best_rl, "branch_coverage_percent", None
+                    ) if verified_rl_branch is None else verified_rl_branch,
+                    "best_rl_coverage_preserved": getattr(
+                        comparison,
+                        "rl_coverage_preserved",
+                        getattr(item, "best_rl_coverage_preserved", None),
+                    ),
                     "scenario_count": getattr(item, "scenario_count", None),
                     "rl_test_count": getattr(item, "rl_test_count", None),
                     "strategy_comparison": (
@@ -359,6 +401,12 @@ class ExternalModuleAnalysisResult:
                             "greedy_selected_count": comparison.greedy_selected_count,
                             "rl_executed_test_count": comparison.best_rl_executed_test_count,
                             "coverage_equality_verified": comparison.coverage_equality_verified,
+                            "target_line_coverage_percent": comparison.target_line_percentage,
+                            "target_branch_coverage_percent": comparison.target_branch_percentage,
+                            "greedy_line_coverage_percent": comparison.greedy_verified_line_percentage,
+                            "greedy_branch_coverage_percent": comparison.greedy_verified_branch_percentage,
+                            "best_rl_line_coverage_percent": comparison.rl_verified_line_percentage,
+                            "best_rl_branch_coverage_percent": comparison.rl_verified_branch_percentage,
                         }
                         if comparison is not None
                         else None
@@ -372,6 +420,12 @@ class ExternalModuleAnalysisResult:
                         "greedy_selected_count": comparison.greedy_selected_count,
                         "rl_executed_test_count": comparison.best_rl_executed_test_count,
                         "coverage_equality_verified": comparison.coverage_equality_verified,
+                        "target_line_coverage_percent": comparison.target_line_percentage,
+                        "target_branch_coverage_percent": comparison.target_branch_percentage,
+                        "greedy_line_coverage_percent": comparison.greedy_verified_line_percentage,
+                        "greedy_branch_coverage_percent": comparison.greedy_verified_branch_percentage,
+                        "best_rl_line_coverage_percent": comparison.rl_verified_line_percentage,
+                        "best_rl_branch_coverage_percent": comparison.rl_verified_branch_percentage,
                     }
                 )
         for path in self.artifact_paths:
@@ -394,6 +448,7 @@ class ExternalModuleAnalysisResult:
             "module_name": self.module_name,
             "status": self.status.value,
             "discovered_function_count": self.discovered_function_count,
+            "discovered_function_names": list(self.discovered_function_names),
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
             "line_coverage_percent": self.line_coverage_percent,

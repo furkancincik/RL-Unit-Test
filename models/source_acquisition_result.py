@@ -143,6 +143,7 @@ class DiscoveredPythonModule:
     module_path_candidates: tuple[str, ...]
     package_root: str | None
     supported: bool
+    top_level_function_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.relative_path, str) or not self.relative_path:
@@ -158,6 +159,11 @@ class DiscoveredPythonModule:
             for value in self.module_path_candidates
         ):
             raise TypeError("module_path_candidates string tuple'ı olmalıdır.")
+        if not isinstance(self.top_level_function_names, tuple) or any(
+            not isinstance(value, str) or not value
+            for value in self.top_level_function_names
+        ):
+            raise TypeError("top_level_function_names string tuple'ı olmalıdır.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +172,7 @@ class DiscoveredPythonModule:
             "encoding": self.encoding,
             "syntax_valid": self.syntax_valid,
             "top_level_function_count": self.top_level_function_count,
+            "top_level_function_names": list(self.top_level_function_names),
             "module_path": self.module_path,
             "module_path_candidates": list(self.module_path_candidates),
             "package_root": self.package_root,

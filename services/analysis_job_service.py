@@ -242,7 +242,7 @@ class AnalysisJobService:
                     entry.summary,
                     status=terminal,
                     finished_at=self._utc_now(),
-                    progress_stage="COMPLETED",
+                    progress_stage=terminal.value,
                     safe_error_category=(result.issues[0] if result.issues and terminal is AnalysisJobStatus.FAILED else None),
                     artifact_count=len(artifacts),
                 )
@@ -308,18 +308,114 @@ class AnalysisJobService:
             for function in getattr(project, "function_results", ()) if project is not None else ():
                 diagnostic = function.diagnostic
                 comparison = function.strategy_comparison
+                scenario_pool = function.scenario_pool_coverage
+                minimization = function.minimization_result
+                best_rl_coverage = function.best_rl_coverage
+                verified_rl_line = getattr(
+                    comparison, "rl_verified_line_percentage", None
+                )
+                verified_rl_branch = getattr(
+                    comparison, "rl_verified_branch_percentage", None
+                )
+                scenario_pool_line = getattr(
+                    scenario_pool,
+                    "line_coverage_percent",
+                    getattr(diagnostic, "line_coverage_percent", None),
+                )
+                scenario_pool_branch = getattr(
+                    scenario_pool,
+                    "branch_coverage_percent",
+                    getattr(diagnostic, "branch_coverage_percent", None),
+                )
+                best_trace = next(
+                    (
+                        trace
+                        for trace in getattr(comparison, "episode_traces", ())
+                        if trace.episode_number
+                        == getattr(comparison, "best_rl_episode_number", None)
+                    ),
+                    None,
+                )
                 functions.append(
                     AnalysisFunctionSummary(
                         qualified_name=function.target.qualified_name,
                         status=function.status.value,
                         skip_reason=function.skip_reason,
                         scenario_count=function.scenario_count,
+                        concrete_accepted_count=function.concrete_accepted_count,
+                        concrete_rejected_count=function.concrete_rejected_count,
                         rl_test_count=function.rl_test_count,
-                        line_coverage_percent=getattr(diagnostic, "line_coverage_percent", None),
-                        branch_coverage_percent=getattr(diagnostic, "branch_coverage_percent", None),
-                        greedy_selected_count=getattr(comparison, "greedy_selected_count", None),
-                        rl_selected_count=getattr(comparison, "best_rl_executed_test_count", None),
+                        q_table_state_count=function.q_table_state_count,
+                        line_coverage_percent=scenario_pool_line,
+                        branch_coverage_percent=scenario_pool_branch,
+                        scenario_pool_line_coverage_percent=scenario_pool_line,
+                        scenario_pool_branch_coverage_percent=scenario_pool_branch,
+                        greedy_line_coverage_percent=getattr(
+                            minimization, "final_verified_line_percentage", None
+                        ),
+                        greedy_branch_coverage_percent=getattr(
+                            minimization, "final_verified_branch_percentage", None
+                        ),
+                        greedy_coverage_preserved=getattr(
+                            minimization, "coverage_preserved", None
+                        ),
+                        best_rl_line_coverage_percent=getattr(
+                            best_rl_coverage,
+                            "line_coverage_percent",
+                            None,
+                        ) if verified_rl_line is None else verified_rl_line,
+                        best_rl_branch_coverage_percent=getattr(
+                            best_rl_coverage,
+                            "branch_coverage_percent",
+                            None,
+                        ) if verified_rl_branch is None else verified_rl_branch,
+                        best_rl_coverage_preserved=(
+                            getattr(
+                                comparison,
+                                "rl_coverage_preserved",
+                                function.best_rl_coverage_preserved,
+                            )
+                        ),
+                        duration_seconds=getattr(diagnostic, "total_duration_seconds", None),
+                        stopped_stage=getattr(
+                            getattr(diagnostic, "stopped_stage", None), "value", None
+                        ),
+                        error_category=getattr(diagnostic, "error_category", None),
+                        greedy_selected_count=getattr(
+                            minimization, "final_selected_count", None
+                        ),
+                        rl_selected_count=(
+                            getattr(
+                                comparison,
+                                "best_rl_executed_test_count",
+                                None,
+                            )
+                            or function.rl_test_count
+                        ),
                         strategy_winner=getattr(getattr(comparison, "winner", None), "value", None),
+                        comparison_status=getattr(
+                            getattr(comparison, "status", None), "value", None
+                        ),
+                        comparison_scenario_pool_count=getattr(
+                            comparison,
+                            "scenario_pool_count",
+                            getattr(minimization, "full_pool_scenario_count", None),
+                        ),
+                        greedy_reduction_percentage=getattr(
+                            minimization, "reduction_percentage", None
+                        ),
+                        rl_reduction_percentage=getattr(
+                            comparison, "rl_reduction_percentage", None
+                        ),
+                        coverage_equality_verified=getattr(
+                            comparison, "coverage_equality_verified", None
+                        ),
+                        globally_minimal=getattr(
+                            comparison,
+                            "globally_minimal",
+                            getattr(minimization, "globally_minimal", None),
+                        ),
+                        rl_done_reason=getattr(best_trace, "done_reason", None),
                     )
                 )
             modules.append(
@@ -330,6 +426,7 @@ class AnalysisJobService:
                     discovered_function_count=module.discovered_function_count,
                     analyzed_function_count=module.analyzed_function_count,
                     limit_skipped_function_count=module.limit_skipped_function_count,
+                    discovered_function_names=module.discovered_function_names,
                     functions=tuple(functions),
                 )
             )
@@ -346,6 +443,8 @@ class AnalysisJobService:
             limit_skipped_function_count=result.limit_skipped_function_count,
             project_line_coverage_percent=None,
             project_branch_coverage_percent=None,
+            duration_seconds=result.duration_seconds,
+            cleanup_status=result.cleanup_status.value,
             modules=tuple(modules),
             issues=result.issues,
         )

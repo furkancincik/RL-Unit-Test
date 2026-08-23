@@ -105,8 +105,8 @@ class RealRLTrainingResult:
             Eğitim sonunda Q-Table içerisinde bulunan state sayısı.
 
         final_coverage_result:
-            Eğitim sonunda elde edilen son başarılı dosya veya
-            fonksiyon bazlı coverage sonucu.
+            Eğitim oturumunun en iyi episode'u için kaydedilmiş dosya
+            veya fonksiyon bazlı coverage sonucu.
 
         reachability_result:
             Senaryo havuzu coverage sonucu ile bounded execution path
@@ -118,6 +118,10 @@ class RealRLTrainingResult:
         minimization_result:
             Açıkça etkinleştirildiğinde validated scenario havuzu için
             üretilen deterministic greedy baseline sonucu.
+
+        scenario_pool_coverage_result:
+            Concrete-valid senaryo havuzunun erişebildiği immutable
+            coverage hedefi.
     """
 
     source_file: Path
@@ -135,6 +139,7 @@ class RealRLTrainingResult:
     diagnostic: PipelineDiagnosticResult | None = None
     minimization_result: ScenarioMinimizationResult | None = None
     strategy_comparison_result: StrategyComparisonResult | None = None
+    scenario_pool_coverage_result: FunctionCoverageResult | None = None
 
     @property
     def success(self) -> bool:
@@ -1229,9 +1234,16 @@ class RealRLTrainingService:
                 random_seed=random_seed,
             )
 
-        comparison_progress_callback = None
-        if run_strategy_comparison:
-            def comparison_progress_callback(_episode: object) -> None:
+        episode_coverage_results: dict[
+            int, CoverageResult | FunctionCoverageResult
+        ] = {}
+
+        def episode_completed_callback(episode: object) -> None:
+            episode_number = getattr(episode, "episode_number", None)
+            episode_coverage = suite_transition.last_coverage_result
+            if isinstance(episode_number, int) and episode_coverage is not None:
+                episode_coverage_results[episode_number] = episode_coverage
+            if run_strategy_comparison:
                 progress_session = TrainingSessionResult(
                     episodes=statistics.episodes,
                     requested_episode_count=episode_count,
@@ -1258,11 +1270,15 @@ class RealRLTrainingService:
             episode_count=episode_count,
             epsilon_decay_rate=epsilon_decay_rate,
             minimum_epsilon=minimum_epsilon,
-            episode_completed_callback=comparison_progress_callback,
+            episode_completed_callback=episode_completed_callback,
         )
 
-        final_coverage_result = (
-            suite_transition.last_coverage_result
+        best_episode = session_result.best_episode
+        final_coverage_result = episode_coverage_results.get(
+            best_episode.episode_number
+            if best_episode is not None
+            else -1,
+            suite_transition.last_coverage_result,
         )
 
         if final_coverage_result is None:
@@ -1295,20 +1311,6 @@ class RealRLTrainingService:
                 import_root=normalized_import_root,
             )
         diagnostic.q_table_state_count = len(q_table)
-        if isinstance(final_coverage_result, FunctionCoverageResult):
-            diagnostic.line_coverage_percent = (
-                final_coverage_result.line_coverage_percent
-            )
-            diagnostic.branch_coverage_percent = (
-                final_coverage_result.branch_coverage_percent
-            )
-        else:
-            diagnostic.line_coverage_percent = (
-                final_coverage_result.line_coverage_percent
-            )
-            diagnostic.branch_coverage_percent = (
-                final_coverage_result.branch_coverage_percent
-            )
         diagnostic.complete_stage(
             PipelineStage.RL_TRAINING, stage_started
         )
@@ -1350,6 +1352,7 @@ class RealRLTrainingService:
             diagnostic=diagnostic_result,
             minimization_result=minimization_result,
             strategy_comparison_result=strategy_comparison_result,
+            scenario_pool_coverage_result=baseline_coverage_result,
         )
 
     def _write_diagnostic_checkpoint(

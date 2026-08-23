@@ -1,0 +1,912 @@
+"use strict";
+
+const API_ROOT = "/api/v1";
+const ENDPOINTS = Object.freeze({
+  inline: "/api/v1/jobs/inline",
+  upload: "/api/v1/jobs/upload",
+  github: "/api/v1/jobs/github",
+});
+const TERMINAL_STATUSES = new Set([
+  "COMPLETED",
+  "PARTIAL",
+  "FAILED",
+  "TIMED_OUT",
+  "CANCELLED",
+]);
+const MAX_SOURCE_BYTES = 2000000;
+const MAX_RETRY_ATTEMPTS = 5;
+const POLL_INTERVAL_MS = 1000;
+
+const state = {
+  activeSource: "inline",
+  selectedFile: null,
+  currentJobId: null,
+  currentStatus: null,
+  submitInFlight: false,
+  pollTimer: null,
+  pollAbortController: null,
+  retryAttempt: 0,
+  createdAt: null,
+};
+
+const byId = (id) => document.getElementById(id);
+const sourceTabs = Array.from(document.querySelectorAll("[data-source-tab]"));
+const sourcePanels = Array.from(document.querySelectorAll("[data-source-panel]"));
+const trustedAcknowledgement = byId("trusted-acknowledgement");
+
+function createNode(tagName, className, text) {
+  const node = document.createElement(tagName);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined && text !== null) {
+    node.textContent = String(text);
+  }
+  return node;
+}
+
+function measured(value, suffix = "") {
+  if (value === null || value === undefined || value === "") {
+    return "Ölçülmedi";
+  }
+  return `${value}${suffix}`;
+}
+
+function percentage(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+    return null;
+  }
+  return value;
+}
+
+function formatPercentage(value) {
+  const valid = percentage(value);
+  return valid === null ? "Ölçülmedi" : `%${valid.toFixed(2)}`;
+}
+
+function formatDuration(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return "Ölçülmedi";
+  }
+  return `${value.toFixed(2)} sn`;
+}
+
+function formatDate(value) {
+  if (!value) {
+    return "Bekleniyor";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Ölçülmedi"
+    : date.toLocaleString("tr-TR", { dateStyle: "short", timeStyle: "medium" });
+}
+
+function sourceKindLabel(value) {
+  return {
+    INLINE_PYTHON_SOURCE: "Yapıştırılan Python kodu",
+    UPLOADED_PYTHON_FILE: "Yüklenen Python dosyası",
+    PUBLIC_GITHUB_REPOSITORY: "Public GitHub repository",
+  }[value] || measured(value);
+}
+
+function policyLabel(value) {
+  return value === "STATIC_DISCOVERY_ONLY"
+    ? "Güvenli Statik Keşif"
+    : value === "TRUSTED_DYNAMIC_ANALYSIS"
+      ? "Güvenilir Dinamik Analiz"
+      : measured(value);
+}
+
+function setMessage(message) {
+  const target = byId("form-message");
+  target.textContent = message || "";
+  target.hidden = !message;
+}
+
+function setSubmitting(submitting) {
+  state.submitInFlight = submitting;
+  const button = byId("submit-analysis");
+  button.disabled = submitting;
+  button.querySelector(".button-label").hidden = submitting;
+  button.querySelector(".loading-label").hidden = !submitting;
+}
+
+function activateSource(source, focusPanel = false) {
+  state.activeSource = source;
+  for (const tab of sourceTabs) {
+    const active = tab.dataset.sourceTab === source;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  }
+  for (const panel of sourcePanels) {
+    const active = panel.dataset.sourcePanel === source;
+    panel.hidden = !active;
+    if (active && focusPanel) {
+      const control = panel.querySelector("textarea, input");
+      if (control) {
+        control.focus();
+      }
+    }
+  }
+  setMessage("");
+}
+
+function handleTabKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+    return;
+  }
+  event.preventDefault();
+  const current = sourceTabs.indexOf(event.currentTarget);
+  let next = current;
+  if (event.key === "ArrowRight") {
+    next = (current + 1) % sourceTabs.length;
+  } else if (event.key === "ArrowLeft") {
+    next = (current - 1 + sourceTabs.length) % sourceTabs.length;
+  } else if (event.key === "Home") {
+    next = 0;
+  } else if (event.key === "End") {
+    next = sourceTabs.length - 1;
+  }
+  sourceTabs[next].focus();
+  activateSource(sourceTabs[next].dataset.sourceTab, false);
+}
+
+function selectedPolicy() {
+  return document.querySelector('input[name="analysis-mode"]:checked').value;
+}
+
+function updateModeControls() {
+  const dynamic = selectedPolicy() === "TRUSTED_DYNAMIC_ANALYSIS";
+  byId("trusted-warning").hidden = !dynamic;
+  byId("submit-summary").textContent = dynamic
+    ? "Güvenilir dinamik pipeline başlatılacak"
+    : "Statik keşif başlatılacak";
+
+  for (const control of document.querySelectorAll(".dynamic-setting input")) {
+    control.disabled = !dynamic;
+  }
+  for (const row of document.querySelectorAll(".dynamic-setting")) {
+    row.classList.toggle("is-disabled", !dynamic);
+  }
+  for (const card of document.querySelectorAll(".choice-card")) {
+    card.classList.toggle("is-selected", card.querySelector("input").checked);
+  }
+  if (!dynamic) {
+    trustedAcknowledgement.checked = false;
+  }
+}
+
+function updateSelectionControls() {
+  const mode = byId("selection-mode").value;
+  const explicit = mode !== "ALL_ELIGIBLE_WITH_LIMIT";
+  byId("explicit-values-field").hidden = !explicit;
+  byId("explicit-values-label").textContent =
+    mode === "EXPLICIT_RELATIVE_PATHS" ? "Relative Python paths" : "Python module names";
+  byId("explicit-values").placeholder =
+    mode === "EXPLICIT_RELATIVE_PATHS"
+      ? "package/core.py, package/utils.py"
+      : "package.core, package.utils";
+}
+
+function csvValues(raw) {
+  return Array.from(
+    new Set(raw.split(",").map((value) => value.trim()).filter(Boolean)),
+  );
+}
+
+function numericValue(id, label, { integer = false, nullable = false } = {}) {
+  const raw = byId(id).value.trim();
+  if (nullable && raw === "") {
+    return null;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || (integer && !Number.isInteger(value))) {
+    throw new Error(`${label} geçerli bir sayı olmalıdır.`);
+  }
+  return value;
+}
+
+function buildAnalysisOptions() {
+  const policy = selectedPolicy();
+  const selectionMode = byId("selection-mode").value;
+  const values = csvValues(byId("explicit-values").value);
+  if (selectionMode !== "ALL_ELIGIBLE_WITH_LIMIT" && values.length === 0) {
+    throw new Error("Explicit modül seçimi en az bir değer gerektirir.");
+  }
+
+  const options = {
+    policy,
+    trusted_execution_acknowledged: policy === "TRUSTED_DYNAMIC_ANALYSIS"
+      ? trustedAcknowledgement.checked
+      : false,
+    selection_mode: selectionMode,
+    explicit_relative_paths: selectionMode === "EXPLICIT_RELATIVE_PATHS" ? values : [],
+    explicit_module_names: selectionMode === "EXPLICIT_MODULE_NAMES" ? values : [],
+    maximum_module_count: numericValue("maximum-module-count", "Maksimum modül", { integer: true }),
+    maximum_function_count: numericValue("maximum-function-count", "Maksimum fonksiyon", { integer: true }),
+  };
+
+  if (policy === "TRUSTED_DYNAMIC_ANALYSIS") {
+    if (!trustedAcknowledgement.checked) {
+      throw new Error("Dinamik analiz için kaynak güveni onaylanmalıdır.");
+    }
+    const comparison = byId("strategy-comparison").checked;
+    options.episode_count = numericValue("episode-count", "Episode sayısı", { integer: true });
+    options.random_seed = numericValue("random-seed", "Random seed", { integer: true, nullable: true });
+    options.pytest_coverage_timeout_seconds = numericValue("pytest-timeout", "Pytest timeout");
+    options.function_pipeline_timeout_seconds = numericValue("pipeline-timeout", "Pipeline timeout");
+    options.greedy_minimization = byId("greedy-minimization").checked || comparison;
+    options.strategy_comparison = comparison;
+  }
+  return options;
+}
+
+function validateFile(file) {
+  if (!file) {
+    throw new Error("Bir Python dosyası seçin.");
+  }
+  if (!file.name.toLowerCase().endsWith(".py")) {
+    throw new Error("Yalnız .py uzantılı dosya yüklenebilir.");
+  }
+  if (file.size > MAX_SOURCE_BYTES) {
+    throw new Error("Dosya 2.000.000 byte sınırını aşıyor.");
+  }
+  return file;
+}
+
+function selectFile(file) {
+  try {
+    state.selectedFile = validateFile(file);
+    byId("file-name").textContent = state.selectedFile.name;
+    byId("file-size").textContent = `${state.selectedFile.size.toLocaleString("tr-TR")} byte`;
+    byId("file-preview").hidden = false;
+    setMessage("");
+  } catch (error) {
+    state.selectedFile = null;
+    byId("python-file").value = "";
+    byId("file-preview").hidden = true;
+    setMessage(error.message);
+  }
+}
+
+function clearSelectedFile() {
+  state.selectedFile = null;
+  byId("python-file").value = "";
+  byId("file-preview").hidden = true;
+  byId("file-name").textContent = "";
+  byId("file-size").textContent = "";
+}
+
+function sourceRequest(options) {
+  if (state.activeSource === "inline") {
+    const sourceCode = byId("inline-source").value;
+    if (!sourceCode.trim()) {
+      throw new Error("Python kaynak kodu boş bırakılamaz.");
+    }
+    if (new TextEncoder().encode(sourceCode).length > MAX_SOURCE_BYTES) {
+      throw new Error("Python kaynak kodu byte sınırını aşıyor.");
+    }
+    return {
+      url: ENDPOINTS.inline,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_code: sourceCode, analysis: options }),
+      },
+    };
+  }
+
+  if (state.activeSource === "upload") {
+    const file = validateFile(state.selectedFile);
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("analysis", JSON.stringify(options));
+    return { url: ENDPOINTS.upload, init: { method: "POST", body: form } };
+  }
+
+  const repositoryUrl = byId("github-url").value.trim();
+  if (!repositoryUrl) {
+    throw new Error("Public GitHub URL boş bırakılamaz.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(repositoryUrl);
+  } catch {
+    throw new Error("GitHub URL biçimi geçerli değil.");
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "github.com") {
+    throw new Error("Beklenen biçim: https://github.com/owner/repository");
+  }
+  return {
+    url: ENDPOINTS.github,
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repository_url: repositoryUrl, analysis: options }),
+    },
+  };
+}
+
+async function safeResponseMessage(response, fallback) {
+  try {
+    const payload = await response.json();
+    if (typeof payload.detail === "string" && payload.detail.length <= 300) {
+      return payload.detail;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
+function stopPolling() {
+  if (state.pollTimer !== null) {
+    window.clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+  if (state.pollAbortController !== null) {
+    state.pollAbortController.abort();
+    state.pollAbortController = null;
+  }
+  state.retryAttempt = 0;
+}
+
+function resetOutput() {
+  byId("result-section").hidden = true;
+  byId("error-section").hidden = true;
+  byId("module-results").replaceChildren();
+  byId("result-summary").replaceChildren();
+  byId("artifact-list").replaceChildren(
+    createNode("p", "empty-state", "Artifact bilgisi bekleniyor."),
+  );
+  byId("result-heading").textContent = "Doğrulanmış analiz özeti";
+  for (const id of ["result-description", "result-info"]) {
+    byId(id).textContent = "";
+    byId(id).hidden = true;
+  }
+}
+
+function statusDescription(status) {
+  return {
+    QUEUED: "İş bounded kuyruğa alındı; worker bekleniyor.",
+    RUNNING: "Analiz pipeline’ı çalışıyor.",
+    COMPLETED: "Analiz eksiksiz tamamlandı.",
+    PARTIAL: "Kullanılabilir kısmi sonuç üretildi.",
+    FAILED: "Analiz kontrollü bir hata ile durdu.",
+    TIMED_OUT: "Pipeline zaman sınırına ulaştı.",
+    CANCELLED: "Kuyruktaki iş çalıştırılmadan iptal edildi.",
+  }[status] || "Job durumu güncellendi.";
+}
+
+function updateJobStatus(snapshot) {
+  state.currentStatus = snapshot.status;
+  const badge = byId("job-status-badge");
+  badge.textContent = snapshot.status;
+  badge.dataset.status = snapshot.status;
+  byId("job-live-status").textContent = statusDescription(snapshot.status);
+  byId("job-stage").textContent = measured(snapshot.progress_stage);
+  byId("job-source-kind").textContent = sourceKindLabel(snapshot.source_kind);
+  byId("job-policy").textContent = policyLabel(snapshot.analysis_policy);
+  byId("job-started-at").textContent = formatDate(snapshot.started_at);
+  byId("job-finished-at").textContent = formatDate(snapshot.finished_at);
+
+  const beginning = snapshot.started_at || snapshot.created_at || state.createdAt;
+  const ending = snapshot.finished_at || new Date().toISOString();
+  const elapsed = beginning
+    ? Math.max(0, (new Date(ending).getTime() - new Date(beginning).getTime()) / 1000)
+    : null;
+  byId("job-elapsed").textContent = formatDuration(elapsed);
+
+  const cancel = byId("cancel-job");
+  cancel.hidden = TERMINAL_STATUSES.has(snapshot.status);
+  cancel.disabled = snapshot.status !== "QUEUED";
+  byId("cancel-help").textContent = snapshot.status === "RUNNING"
+    ? "Çalışan iş güvenle sonlandırılamaz; mevcut pipeline timeout’u geçerlidir."
+    : snapshot.status === "QUEUED"
+      ? "Kuyruktaki iş çalıştırılmadan gerçekten iptal edilebilir."
+      : "Terminal iş için iptal işlemi kullanılamaz.";
+}
+
+function schedulePoll(delay) {
+  state.pollTimer = window.setTimeout(pollJob, delay);
+}
+
+async function pollJob() {
+  if (!state.currentJobId) {
+    return;
+  }
+  state.pollAbortController = new AbortController();
+  try {
+    const response = await fetch(
+      `${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}`,
+      { signal: state.pollAbortController.signal },
+    );
+    if (!response.ok) {
+      throw new Error(await safeResponseMessage(response, "Job durumu alınamadı."));
+    }
+    const snapshot = await response.json();
+    state.retryAttempt = 0;
+    state.pollAbortController = null;
+    updateJobStatus(snapshot);
+    if (TERMINAL_STATUSES.has(snapshot.status)) {
+      await loadTerminalResult(snapshot);
+      return;
+    }
+    schedulePoll(POLL_INTERVAL_MS);
+  } catch (error) {
+    if (error.name === "AbortError") {
+      return;
+    }
+    state.pollAbortController = null;
+    state.retryAttempt += 1;
+    if (state.retryAttempt <= MAX_RETRY_ATTEMPTS) {
+      const delay = Math.min(POLL_INTERVAL_MS * (2 ** state.retryAttempt), 8000);
+      byId("job-live-status").textContent = `Ağ bağlantısı bekleniyor; yeniden deneme ${state.retryAttempt}/${MAX_RETRY_ATTEMPTS}.`;
+      schedulePoll(delay);
+      return;
+    }
+    showError("NETWORK_POLLING_FAILED", measured(state.currentStatus), "Job durumu güvenli retry sınırı içinde alınamadı.");
+  }
+}
+
+function beginJob(snapshot) {
+  stopPolling();
+  resetOutput();
+  state.currentJobId = snapshot.job_id;
+  state.currentStatus = snapshot.status;
+  state.createdAt = snapshot.created_at;
+  byId("job-section").hidden = false;
+  updateJobStatus(snapshot);
+  byId("job-section").scrollIntoView({ behavior: "smooth", block: "start" });
+  schedulePoll(250);
+}
+
+async function submitAnalysis(event) {
+  event.preventDefault();
+  if (state.submitInFlight) {
+    return;
+  }
+  setMessage("");
+  try {
+    const request = sourceRequest(buildAnalysisOptions());
+    setSubmitting(true);
+    const response = await fetch(request.url, request.init);
+    if (!response.ok) {
+      throw new Error(await safeResponseMessage(response, "Analiz isteği kabul edilmedi."));
+    }
+    const snapshot = await response.json();
+    if (state.activeSource === "inline") {
+      byId("inline-source").value = "";
+      updateSourceByteCount();
+    } else if (state.activeSource === "upload") {
+      clearSelectedFile();
+    } else {
+      byId("github-url").value = "";
+    }
+    beginJob(snapshot);
+  } catch (error) {
+    setMessage(error.message || "Analiz isteği gönderilemedi.");
+  } finally {
+    setSubmitting(false);
+  }
+}
+
+function appendMetric(container, label, value) {
+  const wrapper = createNode("div");
+  wrapper.append(createNode("dt", "", label), createNode("dd", "", value));
+  container.append(wrapper);
+}
+
+function renderCoverage(container, label, value) {
+  const row = createNode("div", "coverage-row");
+  row.append(createNode("span", "", label));
+  const track = createNode("div", "coverage-track");
+  const valid = percentage(value);
+  if (valid === null) {
+    track.setAttribute("aria-hidden", "true");
+  } else {
+    const progress = createNode("progress", "coverage-fill");
+    progress.max = 100;
+    progress.value = valid;
+    progress.setAttribute("aria-label", `${label} ${valid.toFixed(2)} yüzde`);
+    track.append(progress);
+  }
+  row.append(track, createNode("strong", "", formatPercentage(value)));
+  container.append(row);
+}
+
+function renderCoverageStrategy(
+  container,
+  title,
+  lineCoverage,
+  branchCoverage,
+  coveragePreserved = null,
+) {
+  if (
+    lineCoverage === null
+    && branchCoverage === null
+    && coveragePreserved === null
+  ) {
+    return;
+  }
+  const section = createNode("section", "coverage-strategy");
+  section.append(createNode("h5", "", title));
+  renderCoverage(section, "Line", lineCoverage);
+  renderCoverage(section, "Branch", branchCoverage);
+  if (coveragePreserved !== null) {
+    section.append(
+      createNode(
+        "p",
+        "coverage-preservation",
+        coveragePreserved ? "Exact hedef korundu" : "Exact hedef korunmadı",
+      ),
+    );
+  }
+  container.append(section);
+}
+
+function renderComparison(functionResult, card) {
+  if (!functionResult.comparison_status && !functionResult.strategy_winner) {
+    return;
+  }
+  const comparison = createNode("section", "comparison-card");
+  comparison.append(createNode("h5", "", "RL–greedy karşılaştırması"));
+  const metrics = createNode("dl", "mini-metrics");
+  appendMetric(metrics, "Full scenario pool", measured(functionResult.comparison_scenario_pool_count));
+  if (functionResult.greedy_coverage_preserved === true) {
+    appendMetric(metrics, "Greedy test", measured(functionResult.greedy_selected_count));
+    appendMetric(metrics, "Greedy reduction", formatPercentage(functionResult.greedy_reduction_percentage));
+  } else if (functionResult.greedy_coverage_preserved === false) {
+    appendMetric(metrics, "Greedy durum", "Exact hedef korunmadı");
+  }
+  appendMetric(metrics, "RL test", measured(functionResult.rl_selected_count));
+  appendMetric(metrics, "RL reduction", formatPercentage(functionResult.rl_reduction_percentage));
+  appendMetric(metrics, "Winner", measured(functionResult.strategy_winner));
+  appendMetric(
+    metrics,
+    "Exact coverage",
+    functionResult.coverage_equality_verified === null
+      ? "Ölçülmedi"
+      : functionResult.coverage_equality_verified ? "Korundu" : "Korunmadı",
+  );
+  appendMetric(metrics, "Durma nedeni", measured(functionResult.rl_done_reason));
+  comparison.append(metrics);
+  if (functionResult.globally_minimal === false) {
+    comparison.append(
+      createNode(
+        "p",
+        "",
+        "Seçilen küçültülmüş takım global optimum garantisi taşımaz; sonuç doğrulanmış strateji çıktısıdır.",
+      ),
+    );
+  }
+  card.append(comparison);
+}
+
+function renderFunction(functionResult) {
+  const card = createNode("article", "function-card");
+  const title = createNode("div", "function-title");
+  title.append(
+    createNode("h4", "", functionResult.qualified_name),
+    createNode("span", "status-badge", functionResult.status),
+  );
+  title.lastChild.dataset.status = functionResult.status;
+  card.append(title);
+
+  const metrics = createNode("dl", "mini-metrics");
+  appendMetric(metrics, "Scenario pool", measured(functionResult.scenario_count));
+  appendMetric(metrics, "Concrete kabul", measured(functionResult.concrete_accepted_count));
+  appendMetric(metrics, "Concrete red", measured(functionResult.concrete_rejected_count));
+  appendMetric(metrics, "RL test", measured(functionResult.rl_test_count));
+  appendMetric(metrics, "Q-table state", measured(functionResult.q_table_state_count));
+  appendMetric(metrics, "Süre", formatDuration(functionResult.duration_seconds));
+  appendMetric(metrics, "Durulan aşama", measured(functionResult.stopped_stage));
+  appendMetric(metrics, "Hata kategorisi", measured(functionResult.error_category));
+  appendMetric(metrics, "Skip nedeni", measured(functionResult.skip_reason));
+  card.append(metrics);
+  renderCoverageStrategy(
+    card,
+    "Hedef / Senaryo Havuzu Coverage",
+    functionResult.scenario_pool_line_coverage_percent,
+    functionResult.scenario_pool_branch_coverage_percent,
+  );
+  renderCoverageStrategy(
+    card,
+    "Greedy Coverage",
+    functionResult.greedy_line_coverage_percent,
+    functionResult.greedy_branch_coverage_percent,
+    functionResult.greedy_coverage_preserved,
+  );
+  renderCoverageStrategy(
+    card,
+    "En İyi RL Coverage",
+    functionResult.best_rl_line_coverage_percent,
+    functionResult.best_rl_branch_coverage_percent,
+    functionResult.best_rl_coverage_preserved,
+  );
+  renderComparison(functionResult, card);
+  return card;
+}
+
+function renderModules(modules) {
+  const container = byId("module-results");
+  container.replaceChildren();
+  if (!Array.isArray(modules) || modules.length === 0) {
+    container.append(createNode("p", "empty-state", "Fonksiyon sonucu üretilmedi."));
+    return;
+  }
+  for (const moduleResult of modules) {
+    const card = createNode("article", "module-card");
+    const header = createNode("header", "module-header");
+    const copy = createNode("div");
+    copy.append(
+      createNode("h3", "", moduleResult.module_name || moduleResult.relative_path),
+      createNode("p", "", moduleResult.relative_path),
+    );
+    const badge = createNode("span", "status-badge", moduleResult.status);
+    badge.dataset.status = moduleResult.status;
+    header.append(copy, badge);
+    card.append(header);
+    const functions = createNode("div", "function-list");
+    if (Array.isArray(moduleResult.functions) && moduleResult.functions.length > 0) {
+      for (const functionResult of moduleResult.functions) {
+        functions.append(renderFunction(functionResult));
+      }
+    } else {
+      const inventory = Array.isArray(moduleResult.discovered_function_names)
+        ? moduleResult.discovered_function_names
+        : [];
+      if (inventory.length > 0) {
+        functions.append(createNode("h4", "inventory-heading", "Statik fonksiyon envanteri"));
+        for (const qualifiedName of inventory) {
+          const item = createNode("article", "function-card");
+          item.append(
+            createNode("h4", "", qualifiedName),
+            createNode("p", "empty-state", "Dinamik olarak çalıştırılmadı"),
+          );
+          functions.append(item);
+        }
+      } else {
+        functions.append(createNode("p", "empty-state", "Bu modül için dinamik fonksiyon metriği yok."));
+      }
+    }
+    card.append(functions);
+    container.append(card);
+  }
+}
+
+function renderResult(result) {
+  const section = byId("result-section");
+  section.hidden = false;
+  const badge = byId("result-status-badge");
+  badge.textContent = result.status;
+  badge.dataset.status = result.status;
+  const noPythonRepository =
+    result.source_kind === "PUBLIC_GITHUB_REPOSITORY"
+    && result.status === "PARTIAL"
+    && Array.isArray(result.issues)
+    && result.issues.includes("NO_PYTHON_FILES");
+  if (noPythonRepository) {
+    byId("result-heading").textContent = "Repository keşfi tamamlandı";
+    byId("result-description").textContent =
+      "Repository başarıyla alındı ancak desteklenen Python kaynak dosyası bulunamadı.";
+    byId("result-description").hidden = false;
+    byId("result-info").textContent =
+      "Bu araç şu anda yalnız Python projelerini analiz eder.";
+    byId("result-info").hidden = false;
+    byId("job-live-status").textContent =
+      "Repository başarıyla alındı; Python kaynak keşfi kısmi sonuçla tamamlandı.";
+  }
+  const summary = byId("result-summary");
+  summary.replaceChildren();
+  appendMetric(summary, "Kaynak", sourceKindLabel(result.source_kind));
+  appendMetric(summary, "Politika", policyLabel(result.analysis_policy));
+  appendMetric(summary, "Keşfedilen modül", measured(result.discovered_module_count));
+  appendMetric(summary, "Seçilen modül", measured(result.selected_module_count));
+  appendMetric(summary, "Keşfedilen fonksiyon", measured(result.discovered_function_count));
+  appendMetric(summary, "Çalıştırılan fonksiyon", measured(result.analyzed_function_count));
+  appendMetric(summary, "SKIPPED_LIMIT", measured(result.limit_skipped_function_count));
+  appendMetric(summary, "Toplam süre", formatDuration(result.duration_seconds));
+  appendMetric(summary, "Cleanup", measured(result.cleanup_status));
+  appendMetric(summary, "Kategori", measured(result.issues?.[0]));
+  byId("project-coverage").textContent =
+    result.project_line_coverage_percent === null && result.project_branch_coverage_percent === null
+      ? "Ölçülmedi"
+      : `Line ${formatPercentage(result.project_line_coverage_percent)} · Branch ${formatPercentage(result.project_branch_coverage_percent)}`;
+  renderModules(result.modules);
+}
+
+function artifactKind(artifact) {
+  if (artifact.content_type === "application/json") {
+    return "JSON raporu";
+  }
+  if (artifact.content_type === "text/x-python") {
+    return "Generated pytest";
+  }
+  return "Artifact";
+}
+
+function renderArtifacts(artifacts) {
+  const container = byId("artifact-list");
+  container.replaceChildren();
+  if (!Array.isArray(artifacts) || artifacts.length === 0) {
+    container.append(createNode("p", "empty-state", "İndirilebilir artifact üretilmedi."));
+    return;
+  }
+  for (const artifact of artifacts) {
+    const item = createNode("article", "artifact-item");
+    const copy = createNode("div");
+    copy.append(
+      createNode("strong", "", artifact.filename),
+      createNode("small", "", `${artifactKind(artifact)} · ${measured(artifact.size_bytes, " byte")}`),
+    );
+    const link = createNode("a", "artifact-link", "İndir");
+    link.href = `${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`;
+    link.setAttribute("download", "");
+    link.setAttribute("aria-label", `${artifact.filename} artifact dosyasını indir`);
+    item.append(copy, link);
+    container.append(item);
+  }
+}
+
+function showError(category, stage, message) {
+  const section = byId("error-section");
+  section.hidden = false;
+  byId("error-category").textContent = measured(category);
+  byId("error-stage").textContent = measured(stage);
+  byId("error-message").textContent = message || "Analiz güvenli bir hata ile durdu.";
+}
+
+async function loadTerminalResult(snapshot) {
+  state.pollTimer = null;
+  state.pollAbortController = null;
+  if (snapshot.status === "CANCELLED") {
+    showError("CANCELLED", snapshot.progress_stage, "Kuyruktaki iş çalıştırılmadan iptal edildi.");
+    return;
+  }
+  try {
+    const [resultResponse, artifactResponse] = await Promise.all([
+      fetch(`${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/result`),
+      fetch(`${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/artifacts`),
+    ]);
+    if (!resultResponse.ok) {
+      if (resultResponse.status === 409) {
+        showError(
+          snapshot.safe_error_category || "RESULT_UNAVAILABLE",
+          snapshot.progress_stage,
+          "Terminal durum için güvenli sonuç özeti henüz mevcut değil.",
+        );
+        return;
+      }
+      throw new Error(await safeResponseMessage(resultResponse, "Analiz sonucu alınamadı."));
+    }
+    const result = await resultResponse.json();
+    renderResult(result);
+    if (artifactResponse.ok) {
+      const artifactPayload = await artifactResponse.json();
+      renderArtifacts(artifactPayload.artifacts);
+    } else {
+      renderArtifacts([]);
+    }
+    if (["FAILED", "TIMED_OUT"].includes(snapshot.status)) {
+      showError(
+        snapshot.safe_error_category || result.issues?.[0] || snapshot.status,
+        snapshot.progress_stage,
+        "Pipeline kontrollü bir terminal durumla tamamlandı; mevcut kısmi sonuçlar korunmuştur.",
+      );
+    }
+    byId("result-section").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    showError("RESULT_FETCH_FAILED", snapshot.progress_stage, error.message);
+  }
+}
+
+async function cancelCurrentJob() {
+  if (!state.currentJobId || state.currentStatus !== "QUEUED") {
+    byId("job-live-status").textContent =
+      "Çalışan veya terminal iş iptal edilmiş gibi gösterilemez; pipeline timeout’u geçerlidir.";
+    return;
+  }
+  const button = byId("cancel-job");
+  button.disabled = true;
+  try {
+    const response = await fetch(
+      `${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/cancel`,
+      { method: "POST" },
+    );
+    if (response.status === 409) {
+      byId("job-live-status").textContent =
+        "İş çalışmaya başladı; cancellation başarı sayılmadı. Pipeline timeout’u geçerlidir.";
+      schedulePoll(250);
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(await safeResponseMessage(response, "İptal isteği kabul edilmedi."));
+    }
+    const snapshot = await response.json();
+    updateJobStatus(snapshot);
+    if (snapshot.status === "CANCELLED") {
+      stopPolling();
+      await loadTerminalResult(snapshot);
+    }
+  } catch (error) {
+    byId("job-live-status").textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+function updateSourceByteCount() {
+  const bytes = new TextEncoder().encode(byId("inline-source").value).length;
+  byId("source-byte-count").textContent = `${bytes.toLocaleString("tr-TR")} / 2.000.000 byte`;
+  byId("source-byte-count").classList.toggle("is-over-limit", bytes > MAX_SOURCE_BYTES);
+}
+
+async function checkHealth() {
+  try {
+    const response = await fetch(`${API_ROOT}/health`);
+    if (!response.ok) {
+      throw new Error("health unavailable");
+    }
+    const health = await response.json();
+    byId("health-dot").className = "status-dot status-dot-ok";
+    byId("health-status").textContent = "API hazır";
+    byId("capacity-status").textContent = `${health.running_jobs} çalışan · ${health.queued_jobs} kuyrukta · ${health.maximum_active_jobs} kapasite`;
+  } catch {
+    byId("health-dot").className = "status-dot status-dot-error";
+    byId("health-status").textContent = "API erişilemiyor";
+    byId("capacity-status").textContent = "Sunucu bağlantısını kontrol edin";
+  }
+}
+
+for (const tab of sourceTabs) {
+  tab.addEventListener("click", () => activateSource(tab.dataset.sourceTab, true));
+  tab.addEventListener("keydown", handleTabKeydown);
+}
+
+for (const radio of document.querySelectorAll('input[name="analysis-mode"]')) {
+  radio.addEventListener("change", updateModeControls);
+}
+
+byId("selection-mode").addEventListener("change", updateSelectionControls);
+byId("strategy-comparison").addEventListener("change", (event) => {
+  if (event.currentTarget.checked) {
+    byId("greedy-minimization").checked = true;
+  }
+});
+byId("inline-source").addEventListener("input", updateSourceByteCount);
+byId("python-file").addEventListener("change", (event) => selectFile(event.target.files[0]));
+byId("remove-file").addEventListener("click", clearSelectedFile);
+byId("analysis-form").addEventListener("submit", submitAnalysis);
+byId("cancel-job").addEventListener("click", cancelCurrentJob);
+byId("retry-analysis").addEventListener("click", () => {
+  byId("error-section").hidden = true;
+  byId("analysis-form").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+const dropZone = byId("drop-zone");
+for (const eventName of ["dragenter", "dragover"]) {
+  dropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropZone.classList.add("is-dragging");
+  });
+}
+for (const eventName of ["dragleave", "drop"]) {
+  dropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropZone.classList.remove("is-dragging");
+  });
+}
+dropZone.addEventListener("drop", (event) => {
+  if (event.dataTransfer.files.length !== 1) {
+    setMessage("Yalnız tek bir .py dosyası bırakın.");
+    return;
+  }
+  selectFile(event.dataTransfer.files[0]);
+});
+
+window.addEventListener("beforeunload", stopPolling);
+updateModeControls();
+updateSelectionControls();
+updateSourceByteCount();
+checkHealth();

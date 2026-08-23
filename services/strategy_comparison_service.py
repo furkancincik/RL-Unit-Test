@@ -498,6 +498,16 @@ class StrategyComparisonService:
             rl_verified_branch_identities=(
                 tuple(rl_verified.covered_branches or ()) if rl_verified else ()
             ),
+            greedy_verified_line_percentage=greedy.final_verified_line_percentage,
+            greedy_verified_branch_percentage=(
+                greedy.final_verified_branch_percentage
+            ),
+            rl_verified_line_percentage=(
+                rl_verified.line_coverage_percent if rl_verified else None
+            ),
+            rl_verified_branch_percentage=(
+                rl_verified.branch_coverage_percent if rl_verified else None
+            ),
         )
 
     @staticmethod

@@ -357,6 +357,10 @@ def test_service_verifies_exact_identities_and_selects_best_rl_episode(
     assert result.coverage_equality_verified is True
     assert result.rl_verified_line_identities == result.target_line_identities
     assert result.rl_verified_branch_identities == result.target_branch_identities
+    assert result.greedy_verified_line_percentage == full.line_coverage_percent
+    assert result.greedy_verified_branch_percentage == full.branch_coverage_percent
+    assert result.rl_verified_line_percentage == full.line_coverage_percent
+    assert result.rl_verified_branch_percentage == full.branch_coverage_percent
     assert result.artifact_paths[0].name == "test_target_rl_selected.py"
     assert result.artifact_paths[0].is_file()
     report = json.loads(result.artifact_paths[1].read_text(encoding="utf-8"))

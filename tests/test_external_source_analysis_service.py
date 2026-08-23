@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ from models.external_source_analysis_result import (
 )
 from models.project_analysis_result import ProjectRunStatus
 from services.external_source_analysis_service import ExternalSourceAnalysisService
+from services.source_acquisition_service import SourceAcquisitionService
 
 
 def _configuration(tmp_path: Path, **kwargs: object) -> ExternalAnalysisConfiguration:
@@ -161,8 +163,76 @@ def test_static_discovery_keeps_function_inventory_despite_execution_limit(
     )
 
     assert result.module_results[0].discovered_function_count == 3
+    assert result.module_results[0].discovered_function_names == (
+        "first",
+        "second",
+        "third",
+    )
     assert result.module_results[0].analyzed_function_count == 0
     assert result.module_results[0].limit_skipped_function_count == 0
+
+
+def test_successful_github_acquisition_without_python_is_partial_and_never_executes(
+    tmp_path: Path,
+) -> None:
+    def runner(
+        arguments: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        destination = Path(arguments[-1])
+        if "clone" in arguments:
+            destination.mkdir(parents=True)
+            (destination / "README.md").write_text("public fixture\n", encoding="utf-8")
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        return subprocess.CompletedProcess(arguments, 0, "a" * 40, "")
+
+    acquisition = SourceAcquisitionService(
+        subprocess_runner=runner,
+        git_executable="git",
+    )
+    orchestrator_factory = Mock()
+    result = ExternalSourceAnalysisService(
+        acquisition_service=acquisition,
+        orchestrator_factory=orchestrator_factory,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            PublicGitHubRepository("https://github.com/owner/repository"),
+            configuration=_configuration(tmp_path),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.PARTIAL
+    assert result.acquisition_status == "PARTIAL"
+    assert result.discovered_module_count == 0
+    assert result.discovered_function_count == 0
+    assert result.module_results == ()
+    assert result.to_dict()["aggregate_project_coverage"] == {
+        "line_percent": None,
+        "branch_percent": None,
+        "status": "UNMEASURED",
+    }
+    assert result.cleanup_status is ExternalWorkspaceCleanupStatus.COMPLETED
+    assert result.issues == ("NO_PYTHON_FILES",)
+    orchestrator_factory.assert_not_called()
+
+
+def test_github_clone_failure_remains_failed(tmp_path: Path) -> None:
+    runner = Mock(
+        return_value=subprocess.CompletedProcess(("git",), 128, "", "private detail")
+    )
+    result = ExternalSourceAnalysisService(
+        acquisition_service=SourceAcquisitionService(
+            subprocess_runner=runner,
+            git_executable="git",
+        )
+    ).run(
+        ExternalSourceAnalysisRequest(
+            PublicGitHubRepository("https://github.com/owner/repository"),
+            configuration=_configuration(tmp_path),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.FAILED
+    assert result.issues == ("CLONE_FAILED",)
 
 
 def test_github_is_static_by_default(tmp_path: Path) -> None:
@@ -456,6 +526,7 @@ def test_cleanup_failure_is_reported_without_source_leak(tmp_path: Path) -> None
             )
         )
     assert result.cleanup_status is ExternalWorkspaceCleanupStatus.FAILED
+    assert result.status is ExternalAnalysisStatus.FAILED
     report = result.report_path.read_text(encoding="utf-8")
     assert "CLEANUP_FAILED" in report
     assert "secret_marker" not in report

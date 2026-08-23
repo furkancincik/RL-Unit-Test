@@ -6,7 +6,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
+from models.coverage_result import FunctionCoverageResult
 from models.pipeline_diagnostic_result import PipelineDiagnosticResult
+from models.scenario_minimization_result import ScenarioMinimizationResult
 from models.strategy_comparison_result import StrategyComparisonResult
 
 
@@ -95,6 +97,9 @@ class FunctionAnalysisResult:
     artifact_paths: tuple[Path, ...] = ()
     skip_reason: str | None = None
     strategy_comparison: StrategyComparisonResult | None = None
+    scenario_pool_coverage: FunctionCoverageResult | None = None
+    minimization_result: ScenarioMinimizationResult | None = None
+    best_rl_coverage: FunctionCoverageResult | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, FunctionTarget):
@@ -117,6 +122,40 @@ class FunctionAnalysisResult:
             self.strategy_comparison, StrategyComparisonResult
         ):
             raise TypeError("strategy_comparison StrategyComparisonResult olmalıdır.")
+        for value, expected_type, name in (
+            (self.scenario_pool_coverage, FunctionCoverageResult, "scenario_pool_coverage"),
+            (self.minimization_result, ScenarioMinimizationResult, "minimization_result"),
+            (self.best_rl_coverage, FunctionCoverageResult, "best_rl_coverage"),
+        ):
+            if value is not None and not isinstance(value, expected_type):
+                raise TypeError(f"{name} {expected_type.__name__} olmalıdır.")
+
+    @property
+    def best_rl_coverage_preserved(self) -> bool | None:
+        target = self.scenario_pool_coverage
+        actual = self.best_rl_coverage
+        if target is None or actual is None:
+            return None
+        return (
+            actual.covered_lines == target.covered_lines
+            and tuple(actual.covered_branches or ())
+            == tuple(target.covered_branches or ())
+        )
+
+    @staticmethod
+    def _coverage_summary(
+        coverage: FunctionCoverageResult | None,
+    ) -> dict[str, Any] | None:
+        if coverage is None:
+            return None
+        return {
+            "line_coverage_percent": coverage.line_coverage_percent,
+            "branch_coverage_percent": coverage.branch_coverage_percent,
+            "covered_line_identities": list(coverage.covered_lines),
+            "covered_branch_identities": [
+                list(branch) for branch in (coverage.covered_branches or ())
+            ],
+        }
 
     @property
     def usable(self) -> bool:
@@ -191,6 +230,16 @@ class FunctionAnalysisResult:
                 if self.strategy_comparison is not None
                 else None
             ),
+            "scenario_pool_coverage": self._coverage_summary(
+                self.scenario_pool_coverage
+            ),
+            "greedy_minimization": (
+                self.minimization_result.to_dict()
+                if self.minimization_result is not None
+                else None
+            ),
+            "best_rl_coverage": self._coverage_summary(self.best_rl_coverage),
+            "best_rl_coverage_preserved": self.best_rl_coverage_preserved,
         }
 
 

@@ -91,12 +91,33 @@ class FunctionResultResponse(BaseModel):
     status: str
     skip_reason: str | None
     scenario_count: int | None
+    concrete_accepted_count: int | None
+    concrete_rejected_count: int | None
     rl_test_count: int | None
+    q_table_state_count: int | None
     line_coverage_percent: float | None
     branch_coverage_percent: float | None
+    scenario_pool_line_coverage_percent: float | None
+    scenario_pool_branch_coverage_percent: float | None
+    greedy_line_coverage_percent: float | None
+    greedy_branch_coverage_percent: float | None
+    greedy_coverage_preserved: bool | None
+    best_rl_line_coverage_percent: float | None
+    best_rl_branch_coverage_percent: float | None
+    best_rl_coverage_preserved: bool | None
+    duration_seconds: float | None
+    stopped_stage: str | None
+    error_category: str | None
     greedy_selected_count: int | None
     rl_selected_count: int | None
     strategy_winner: str | None
+    comparison_status: str | None
+    comparison_scenario_pool_count: int | None
+    greedy_reduction_percentage: float | None
+    rl_reduction_percentage: float | None
+    coverage_equality_verified: bool | None
+    globally_minimal: bool | None
+    rl_done_reason: str | None
 
 
 class ModuleResultResponse(BaseModel):
@@ -106,6 +127,7 @@ class ModuleResultResponse(BaseModel):
     discovered_function_count: int
     analyzed_function_count: int
     limit_skipped_function_count: int
+    discovered_function_names: list[str]
     functions: list[FunctionResultResponse]
 
 
@@ -122,6 +144,8 @@ class JobResultResponse(BaseModel):
     limit_skipped_function_count: int
     project_line_coverage_percent: float | None
     project_branch_coverage_percent: float | None
+    duration_seconds: float
+    cleanup_status: str
     modules: list[ModuleResultResponse]
     issues: list[str]
 

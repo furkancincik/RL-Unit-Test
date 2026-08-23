@@ -15,6 +15,7 @@ from models.external_source_analysis_result import (
     ExternalSourceKind,
     ExternalWorkspaceCleanupStatus,
     InlinePythonSource,
+    PublicGitHubRepository,
 )
 from services.analysis_job_service import (
     AnalysisJobQueueFullError,
@@ -188,5 +189,56 @@ def test_external_terminal_status_is_preserved(
     job = service.submit(_request(tmp_path / "source"))
     service.wait(job.job_id, timeout=5)
     assert service.get(job.job_id).status is job_status
+    assert service.get(job.job_id).progress_stage == job_status.value
     assert service.get_result(job.job_id).status is job_status
+    service.shutdown()
+
+
+def test_no_python_github_partial_job_keeps_safe_terminal_summary(tmp_path: Path) -> None:
+    runner = Mock()
+
+    def run(request: ExternalSourceAnalysisRequest) -> ExternalSourceAnalysisResult:
+        result = _result(request.configuration.output_root, ExternalAnalysisStatus.PARTIAL)
+        return ExternalSourceAnalysisResult(
+            source_kind=ExternalSourceKind.PUBLIC_GITHUB_REPOSITORY,
+            execution_policy=result.execution_policy,
+            status=result.status,
+            acquisition_status="PARTIAL",
+            repository_name="repository",
+            github_owner="owner",
+            github_repository="repository",
+            resolved_commit_sha="a" * 40,
+            discovered_module_count=0,
+            selected_module_count=0,
+            module_results=(),
+            output_root=result.output_root,
+            report_path=result.report_path,
+            duration_seconds=result.duration_seconds,
+            cleanup_status=ExternalWorkspaceCleanupStatus.COMPLETED,
+            issues=("NO_PYTHON_FILES",),
+        )
+
+    runner.run.side_effect = run
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+    job = service.submit(
+        ExternalSourceAnalysisRequest(
+            PublicGitHubRepository("https://github.com/owner/repository"),
+            configuration=ExternalAnalysisConfiguration(output_root=tmp_path / "ignored"),
+        )
+    )
+    service.wait(job.job_id, timeout=5)
+
+    snapshot = service.get(job.job_id)
+    result = service.get_result(job.job_id)
+    assert snapshot.status is AnalysisJobStatus.PARTIAL
+    assert snapshot.progress_stage == "PARTIAL"
+    assert snapshot.safe_error_category is None
+    assert result.status is AnalysisJobStatus.PARTIAL
+    assert result.project_line_coverage_percent is None
+    assert result.project_branch_coverage_percent is None
+    assert result.cleanup_status == "COMPLETED"
+    assert result.issues == ("NO_PYTHON_FILES",)
     service.shutdown()

@@ -30,7 +30,9 @@ from models.external_source_analysis_result import (
 from models.source_acquisition_result import (
     DiscoveredPythonModule,
     ResolvedSourceTarget,
+    SourceAcquisitionStatus,
     SourceAcquisitionRequest,
+    SourceIssueCategory,
     SourceTargetKind,
 )
 from services.source_acquisition_service import SourceAcquisitionService
@@ -146,7 +148,11 @@ class ExternalSourceAnalysisService:
             self._validate_output_separation(output_root, acquired.resolved_project_root)
 
             module_results = self._analyze_modules(request, acquired, output_root)
-            status = self._derive_status(request.execution_policy, module_results)
+            status = self._derive_status(
+                request.execution_policy,
+                module_results,
+                acquired,
+            )
             result = ExternalSourceAnalysisResult(
                 source_kind=request.source.source_kind,
                 execution_policy=request.execution_policy,
@@ -373,6 +379,7 @@ class ExternalSourceAnalysisService:
             issue_category=issue_category,
             issue_message=issue_message,
             artifact_paths=artifact_paths,
+            discovered_function_names=module.top_level_function_names,
         )
 
     @staticmethod
@@ -389,6 +396,7 @@ class ExternalSourceAnalysisService:
     def _derive_status(
         policy: ExternalExecutionPolicy,
         modules: tuple[ExternalModuleAnalysisResult, ...],
+        acquired: ResolvedSourceTarget,
     ) -> ExternalAnalysisStatus:
         considered = tuple(
             item.status
@@ -396,6 +404,18 @@ class ExternalSourceAnalysisService:
             if item.status is not ExternalModuleStatus.SKIPPED_LIMIT
         )
         if policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
+            if (
+                not considered
+                and acquired.source_kind
+                is SourceTargetKind.PUBLIC_GITHUB_REPOSITORY
+                and acquired.status is SourceAcquisitionStatus.PARTIAL
+                and not acquired.discovered_modules
+                and any(
+                    issue.category is SourceIssueCategory.NO_PYTHON_FILES
+                    for issue in acquired.issues
+                )
+            ):
+                return ExternalAnalysisStatus.PARTIAL
             return (
                 ExternalAnalysisStatus.STATIC_COMPLETED
                 if any(status is ExternalModuleStatus.STATIC_ONLY for status in considered)
@@ -519,6 +539,11 @@ class ExternalSourceAnalysisService:
             issues = tuple(dict.fromkeys((*issues, "CLEANUP_FAILED")))
         finalized = replace(
             result,
+            status=(
+                ExternalAnalysisStatus.FAILED
+                if cleanup_status is ExternalWorkspaceCleanupStatus.FAILED
+                else result.status
+            ),
             cleanup_status=cleanup_status,
             issues=issues,
         )

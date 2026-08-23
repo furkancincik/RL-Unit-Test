@@ -642,14 +642,17 @@ class SourceAcquisitionService:
             issues.append(self._issue(SourceIssueCategory.UNSUPPORTED_ENCODING, "Python source encoding çözümlenemedi.", relative))
         syntax_valid = False
         function_count = 0
+        function_names: tuple[str, ...] = ()
         if source is not None:
             try:
                 tree = ast.parse(source, filename=relative)
                 syntax_valid = True
-                function_count = sum(
-                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                function_names = tuple(
+                    node.name
                     for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 )
+                function_count = len(function_names)
             except SyntaxError:
                 issues.append(self._issue(SourceIssueCategory.SYNTAX_ERROR, "Python syntax validation başarısız.", relative))
         candidates, roots = self._module_candidates(root, path)
@@ -670,6 +673,7 @@ class SourceAcquisitionService:
             module_path_candidates=candidates,
             package_root=package_root,
             supported=supported,
+            top_level_function_names=function_names,
         ), tuple(issues)
 
     @staticmethod
