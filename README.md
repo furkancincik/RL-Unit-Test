@@ -177,6 +177,9 @@ This allows the agent to optimize not only coverage growth but also the number o
 - Uncovered Branch Detection
 - Coverage Reports
 - Coverage Workflow
+- Exact Combined Project Coverage over the Analyzed Scope
+- Module-Qualified Line and Branch Identities
+- Project-Level Greedy Suite Minimization with Exact Replay Verification
 
 ---
 
@@ -367,7 +370,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1945 passed, 1 skipped in 179.70s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1963 passed, 1 skipped in 271.13s`.
 
 ---
 
@@ -434,11 +437,11 @@ The three browser inputs are separate tabs and map directly to the inline, multi
 
 `STATIC_DISCOVERY_ONLY` is selected by default. `TRUSTED_DYNAMIC_ANALYSIS` reveals a visible execution warning and requires a separate acknowledgement before submission. Timeout limits work but is not a sandbox; dynamic mode must only be used for trusted code. Advanced settings expose the existing API module-selection modes, module/function limits, episode count, deterministic random seed `42`, pytest/coverage timeout, per-function pipeline timeout, greedy minimization, and RL–greedy comparison without duplicating analysis logic in the browser. Greedy minimization is enabled by default in the Web UI because it is the primary minimum-suite baseline; the more expensive RL–greedy comparison remains optional. The backward-compatible API and service defaults are unchanged.
 
-The page polls one opaque job ID at a time with bounded retry/backoff and stops at `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, or `CANCELLED`. Queued cancellation is distinguished from the `409` response for a running job. Dynamic function cards keep three measured results distinct: the concrete-valid full scenario pool is the attainable target, greedy is the independently verified minimized suite, and best RL is the actual coverage snapshot of the highest-ranked episode. A lower RL result never replaces the attainable target. Greedy and RL preservation are reported against exact line and branch identities, and a non-preserving greedy candidate is not presented as a successful minimum. `null` remains `Ölçülmedi`, project coverage is not synthesized from function averages, and the UI does not calculate its own strategy winner. Real combined project coverage is reserved for the day 40 sprint, where the complete selected test suite will run in a single coverage execution. Generated pytest and JSON reports are listed and downloaded only through server-issued artifact IDs.
+The page polls one opaque job ID at a time with bounded retry/backoff and stops at `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, or `CANCELLED`. Queued cancellation is distinguished from the `409` response for a running job. Dynamic function cards keep three measured results distinct: the concrete-valid full scenario pool is the attainable target, greedy is the independently verified minimized suite, and best RL is the actual coverage snapshot of the highest-ranked episode. A lower RL result never replaces the attainable target. Greedy and RL preservation are reported against exact line and branch identities, and a non-preserving greedy candidate is not presented as a successful minimum. `null` remains `Ölçülmedi`, and the UI does not calculate its own strategy winner. A separate Project Coverage section renders only the backend's combined project result; it never derives project coverage from function percentages. Generated pytest and JSON reports are listed and downloaded only through server-issued artifact IDs.
 
 The UI uses DOM text APIs for external values and does not place source code in the URL, browser storage, logs, or result surface. Static assets are contained under the fixed `/static` mount. Responses add a self-only Content Security Policy, `nosniff`, no-referrer, frame denial, and a restrictive permissions policy. CORS stays disabled by default. Authentication and rate limiting remain unimplemented and are part of production hardening rather than completed UI functionality.
 
-The automated Web UI contract and real localhost HTTP acceptance cover static and trusted-dynamic submission, upload, separate GitHub routing, polling, measured coverage, backend-authoritative `TIE` comparison, JSON/generated-pytest downloads, source non-reflection, temp cleanup, and orphan-server cleanup. Day 40 remains reserved for final real-browser E2E validation, hardening, error fixes, and final reporting.
+The automated Web UI contract and real localhost HTTP acceptance cover static and trusted-dynamic submission, upload, separate GitHub routing, polling, measured coverage, backend-authoritative `TIE` comparison, JSON/generated-pytest downloads, source non-reflection, temp cleanup, and orphan-server cleanup. The project-level result is exposed through the same asynchronous job result and artifact endpoints; static discovery keeps it `null`.
 
 A controlled trusted-dynamic acceptance of `sample_complex_code.py` used the Web production configuration (`max_visits_per_node=3`, three episodes, epsilon `0.0`, learning rate `0.5`, discount factor `0.9`, seed `42`, 30-second coverage timeout, 120-second function timeout, greedy and comparison enabled):
 
@@ -451,6 +454,50 @@ A controlled trusted-dynamic acceptance of `sample_complex_code.py` used the Web
 | `evaluate_student` | 5 | 91.67% / 90.00% | 5 | 91.67% / 90.00% | Yes | 5 | 91.67% / 90.00% | Yes | `TIE` |
 
 The pool itself does not reach 100% for `calculate_score` (missing line `22`, branch arc `19→22`) or `evaluate_student` (missing line `141`, branch arc `140→141`). These are reported as current generation/reachability limits; neither RL nor greedy is allowed to inflate the attainable target.
+
+## Exact Combined Project Coverage and Minimization
+
+Trusted dynamic analysis now performs a real combined pytest/coverage execution after the selected functions have produced concrete-valid scenarios. Function-level percentages are never averaged. The primary project metric is explicitly named `ANALYZED_PROJECT_SCOPE_COVERAGE`; whole-repository line and branch coverage remain `null` unless a separate whole-repository measurement exists.
+
+Exact identities are module-qualified and serialized with normalized `/` paths:
+
+- line: `(relative_module_path, line_number)`
+- branch: `(relative_module_path, from_line, to_line)`
+
+Coverage.py negative branch targets are retained because they represent real function-exit arcs. Absolute source and tool-temporary paths are not included in the public result. The full combined suite's actually covered exact identity set is the minimization target, so an attainable target below 100% is reported honestly rather than inflated.
+
+```text
+Concrete-valid scenarios from selected functions
+                    |
+                    v
+       Full combined project pytest
+                    |
+                    v
+   Exact module-qualified coverage target
+                    |
+                    v
+  Per-scenario project contribution measurement
+                    |
+                    v
+ Deterministic greedy set cover
+   1. new total identities
+   2. new branch identities
+   3. new line identities
+   4. original project order
+   5. stable project test ID
+                    |
+                    v
+ Backward redundancy elimination
+                    |
+                    v
+ Minimized combined pytest + exact replay verification
+```
+
+The result records discovered and selected modules; discovered, eligible, analyzed, completed, partial, failed, timed-out, unsupported, and `SKIPPED_LIMIT` functions; and an explicit `scope_complete` flag. Completed subsets remain measurable, but missing, unsupported, failed, timed-out, or limited targets make the result `PARTIAL`. Interaction-dependent coverage that isolated contributions cannot explain is reported as `NON_ADDITIVE_COVERAGE`; the full suite remains the safe verified fallback. The deterministic greedy result always declares `globally_minimal = false`.
+
+Artifacts are persisted under `project_combined/` as the full generated pytest, minimized generated pytest, and machine-readable project coverage/minimization JSON. They are included in external analysis output, asynchronous API result/artifact contracts, terminal reporting, and the Web UI's separate Project Coverage section. Public JSON contains exact identities, aggregate counts, controlled status/failure metadata, and relative artifact paths, but no raw source, kwargs, expected/actual values, tracebacks, credentials, environment values, or absolute tool paths.
+
+The real acceptance set includes a two-module, three-function temporary package with a relative import and redundant loop-path candidates, plus all five functions in `datasets/sample_complex_code.py`. The multi-module full suite contained 6 tests and was reduced to 5 (16.67%) while preserving 100% line and branch coverage with `scope_complete=true`. The five-function sample full suite contained 39 tests and was reduced to 29 (25.64%); both suites reported 97.30% line and 96.67% branch coverage and identical 72-line/58-branch exact targets. All full and minimized pytest runs exited `0`. A function-limit acceptance preserves the completed subset while reporting incomplete scope instead of whole-project success. Day 40.2 remains responsible for final real-browser E2E, broader production hardening, and release reporting.
 
 ---
 
@@ -625,6 +672,9 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Reachable Coverage Handling
 - ✅ Function-Level Coverage Evaluation
 - ✅ File-Level Coverage Evaluation
+- ✅ Exact Combined Analyzed-Project-Scope Coverage
+- ✅ Module-Qualified Exact Line and Branch Identities
+- ✅ Project-Level Greedy Suite Minimization and Replay Verification
 
 ## Test Generation
 
@@ -649,6 +699,7 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Static-Only Default and Explicit Trusted Dynamic Policy
 - ✅ Module/Function Selection Limits and Import-Root Isolation
 - ✅ External Coverage, Greedy, and RL Comparison Reporting
+- ✅ Combined Project Coverage in Terminal, JSON, API, Artifacts, and Web UI
 
 ---
 
@@ -800,10 +851,10 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,945 |
+| Passed | 1,963 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 179.70s |
+| Duration | 271.13s |
 
 ---
 
@@ -910,6 +961,11 @@ RL-Unit-Test
 - Separate Inline, Upload, and Public GitHub Browser Flows
 - Job Lifecycle, Coverage, Strategy Comparison, and Artifact Views
 - CSP and Baseline Browser Security Headers
+- Exact Combined Analyzed-Project-Scope Coverage
+- Module-Qualified Project Line and Branch Identities
+- Project-Level Greedy Set Cover and Backward Redundancy Elimination
+- Full/Minimized Combined Pytest Exact Replay Verification
+- Project Coverage JSON, API, Artifact, Terminal, and Web UI Integration
 
 ---
 
@@ -918,13 +974,13 @@ RL-Unit-Test
 - Raw vs Reachable Coverage Separation
 - Remaining Coverage-Gap Classification
 - Duplicate and Equivalent Scenario Detection
-- Test Suite Minimization
+- Large-Suite Minimization Performance
 - Robustness Path-Explosion Reduction
 - Comparison Coverage-Execution Caching and Performance
 - Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
 - External Analysis Performance and Project-Wide Deadline
-- Final Browser E2E, Production Hardening, and Release Reporting
+- Day 40.2 Final Browser E2E, Production Hardening, and Release Reporting
 
 ---
 
@@ -948,7 +1004,7 @@ RL-Unit-Test
 - The observed 96 temporary-suite tests are neither the final scenario-pool size nor the number of RL-executed tests.
 - Final line and branch coverage for `analyze_transactions` have not been measured.
 - Per-function global timeout is available through the service API and `main.py` option 1; a separate total project deadline is not implemented.
-- Aggregate project coverage is reported as unmeasured because function percentages are not arithmetically averaged and a combined-suite measurement is not yet performed.
+- Exact analyzed-project-scope coverage is measured with a real combined suite; whole-repository coverage remains unmeasured unless it is independently measured over every repository target.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
