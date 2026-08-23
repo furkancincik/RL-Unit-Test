@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
 from models.coverage_result import FunctionCoverageResult
 from models.pipeline_diagnostic_result import PipelineDiagnosticResult
+from models.project_coverage_result import ProjectTestCandidate
 from models.scenario_minimization_result import ScenarioMinimizationResult
 from models.strategy_comparison_result import StrategyComparisonResult
 
@@ -256,12 +257,22 @@ class ProjectAnalysisResult:
     status: ProjectRunStatus
     output_root: Path
     report_path: Path
+    coverage_candidates: tuple[ProjectTestCandidate, ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_file, Path):
             raise TypeError("source_file Path olmalıdır.")
         if not isinstance(self.selection_mode, FunctionSelectionMode):
             raise TypeError("selection_mode geçersiz.")
+        if not isinstance(self.coverage_candidates, tuple) or any(
+            not isinstance(item, ProjectTestCandidate)
+            for item in self.coverage_candidates
+        ):
+            raise TypeError("coverage_candidates ProjectTestCandidate tuple'ı olmalıdır.")
         if isinstance(self.total_duration_seconds, bool) or not isinstance(
             self.total_duration_seconds, (int, float)
         ):

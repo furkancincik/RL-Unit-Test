@@ -758,6 +758,33 @@ button:disabled {
   color: var(--muted);
 }
 
+.project-coverage-card {
+  margin: 1.5rem 0;
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
+}
+
+.project-coverage-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.project-coverage-heading h3,
+.project-coverage-heading p {
+  margin: 0;
+}
+
+.project-coverage-card > small {
+  display: block;
+  margin-top: 1rem;
+  color: var(--muted);
+}
+
 .module-list {
   display: grid;
   gap: 16px;

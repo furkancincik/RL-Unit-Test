@@ -144,12 +144,13 @@ class AnalysisJobResultSummary:
     discovered_function_count: int
     analyzed_function_count: int
     limit_skipped_function_count: int
-    project_line_coverage_percent: None
-    project_branch_coverage_percent: None
+    project_line_coverage_percent: float | None
+    project_branch_coverage_percent: float | None
     duration_seconds: float
     cleanup_status: str
     modules: tuple[AnalysisModuleSummary, ...]
     issues: tuple[str, ...]
+    project_coverage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -163,8 +164,9 @@ class AnalysisJobResultSummary:
             "discovered_function_count": self.discovered_function_count,
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
-            "project_line_coverage_percent": None,
-            "project_branch_coverage_percent": None,
+            "project_line_coverage_percent": self.project_line_coverage_percent,
+            "project_branch_coverage_percent": self.project_branch_coverage_percent,
+            "project_coverage": self.project_coverage,
             "duration_seconds": self.duration_seconds,
             "cleanup_status": self.cleanup_status,
             "modules": [item.to_dict() for item in self.modules],

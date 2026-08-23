@@ -153,7 +153,72 @@ def test_real_three_function_limit_is_visible_end_to_end(tmp_path: Path) -> None
         "SKIPPED_LIMIT",
     ]
     assert project.function_results[-1].diagnostic is None
+    assert result.project_coverage is not None
+    assert result.project_coverage.scope.scope_complete is False
+    assert result.project_coverage.scope.skipped_limit_function_count == 1
+    assert result.project_coverage.status.value == "PARTIAL"
     payload = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert payload["analyzed_function_count"] == 2
     assert payload["limit_skipped_function_count"] == 1
     assert payload["modules"][0]["functions"][-1]["skip_reason"] == "FUNCTION_LIMIT_EXCEEDED"
+
+
+def test_real_multi_module_project_produces_exact_combined_minimized_suite(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    package = project / "package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "first.py").write_text(
+        "def first(values: list[int]) -> int:\n"
+        "    total = 0\n"
+        "    for value in values:\n"
+        "        total += value\n"
+        "    return total\n\n"
+        "def second(value: int) -> str:\n"
+        "    if value == 0:\n"
+        "        return 'zero'\n"
+        "    return 'nonzero'\n",
+        encoding="utf-8",
+    )
+    (package / "second.py").write_text(
+        "from .first import first\n\n"
+        "def third(value: int) -> str:\n"
+        "    if value >= 5:\n"
+        "        return 'large'\n"
+        "    return 'small'\n",
+        encoding="utf-8",
+    )
+    selection = ExternalModuleSelection(
+        ExternalModuleSelectionMode.EXPLICIT_MODULE_NAMES,
+        ("package.first", "package.second"),
+    )
+
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            LocalProjectDirectory(project),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(
+                tmp_path / "combined_output",
+                module_selection=selection,
+                run_greedy_baseline=True,
+            ),
+        )
+    )
+
+    combined = result.project_coverage
+    assert combined is not None
+    assert combined.full_pytest_exit_code == 0
+    assert combined.minimized_pytest_exit_code == 0
+    assert combined.coverage_preserved is True
+    assert combined.final_selected_count < combined.full_scenario_count
+    assert combined.target_line_identities == combined.minimized_covered_line_identities
+    assert combined.target_branch_identities == combined.minimized_covered_branch_identities
+    assert combined.scope.discovered_function_count == 3
+    assert combined.scope.completed_function_count == 3
+    assert combined.scope.scope_complete is True
+    assert all(path.is_file() for path in combined.artifact_paths)
+    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert payload["project_coverage"]["coverage_scope"] == "ANALYZED_PROJECT_SCOPE_COVERAGE"
+    assert payload["project_coverage"]["whole_repository_line_coverage_percent"] is None

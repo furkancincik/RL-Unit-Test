@@ -61,6 +61,15 @@ from models.analysis_job_result import (
     AnalysisJobSummary,
     AnalysisModuleSummary,
 )
+from models.project_coverage_result import (
+    ProjectBranchIdentity,
+    ProjectCoverageResult,
+    ProjectCoverageScope,
+    ProjectCoverageScopeSummary,
+    ProjectCoverageStatus,
+    ProjectLineIdentity,
+    ProjectTestCandidate,
+)
 
 __all__ = [
     "CoverageResult",
@@ -112,4 +121,11 @@ __all__ = [
     "AnalysisJobStatus",
     "AnalysisJobSummary",
     "AnalysisModuleSummary",
+    "ProjectBranchIdentity",
+    "ProjectCoverageResult",
+    "ProjectCoverageScope",
+    "ProjectCoverageScopeSummary",
+    "ProjectCoverageStatus",
+    "ProjectLineIdentity",
+    "ProjectTestCandidate",
 ]

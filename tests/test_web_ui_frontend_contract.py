@@ -97,3 +97,29 @@ def test_static_inventory_is_rendered_without_fake_execution_results() -> None:
     assert "moduleResult.discovered_function_names" in script
     assert '"Statik fonksiyon envanteri"' in script
     assert '"Dinamik olarak çalıştırılmadı"' in script
+
+
+def test_project_coverage_has_a_distinct_exact_scope_section() -> None:
+    script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    assert 'id="project-coverage-section"' in markup
+    assert "function renderProjectCoverage" in script
+    assert "result.project_coverage" in script
+    assert "coverage_scope" in script
+    assert "scope_complete" in script
+    assert "full_scenario_count" in script
+    assert "final_selected_count" in script
+    assert "reduction_percentage" in script
+    assert "coverage_preserved" in script
+    assert '"Ölçülmedi"' in script
+    assert '"Dinamik analiz yapılmadı"' in script
+    assert '"Analize alınan modül"' in script
+    assert '"Eksik fonksiyon"' in script
+    assert '"Unsupported"' in script
+    assert '"SKIPPED_LIMIT"' in script
+    assert '"Globally minimal"' in script
+    assert "analiz kapsamı eksik" in script
+    assert '"Combined pytest indir"' in script
+    assert '"Minimized pytest indir"' in script
+    assert '"Project JSON indir"' in script

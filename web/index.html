@@ -229,11 +229,21 @@
           <span id="result-status-badge" class="status-badge">COMPLETED</span>
         </div>
         <dl class="metric-grid" id="result-summary"></dl>
-        <div class="coverage-note">
-          <strong>Project coverage</strong>
-          <span id="project-coverage">Ölçülmedi</span>
-          <small>Fonksiyon yüzdelerinin aritmetik ortalaması alınmaz.</small>
-        </div>
+        <section id="project-coverage-section" class="project-coverage-card" aria-labelledby="project-coverage-heading">
+          <div class="project-coverage-heading">
+            <div>
+              <p class="step-label">Project Coverage</p>
+              <h3 id="project-coverage-heading">Birleşik exact coverage</h3>
+            </div>
+            <span id="project-coverage-status" class="status-badge">Ölçülmedi</span>
+          </div>
+          <p id="project-coverage">Ölçülmedi</p>
+          <div id="project-coverage-bars"></div>
+          <dl id="project-coverage-metrics" class="mini-metrics"></dl>
+          <p id="project-coverage-scope" class="coverage-preservation"></p>
+          <div id="project-coverage-artifacts" class="artifact-list"></div>
+          <small>Yalnız analiz edilen project scope ölçülür; fonksiyon yüzdelerinin aritmetik ortalaması alınmaz.</small>
+        </section>
         <div id="module-results" class="module-list"></div>
 
         <div class="artifact-section" aria-labelledby="artifact-heading">

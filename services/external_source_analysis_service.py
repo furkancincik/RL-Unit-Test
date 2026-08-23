@@ -35,6 +35,14 @@ from models.source_acquisition_result import (
     SourceIssueCategory,
     SourceTargetKind,
 )
+from models.project_analysis_result import FunctionRunStatus
+from models.project_coverage_result import (
+    ProjectCoverageResult,
+    ProjectCoverageScopeSummary,
+    ProjectCoverageStatus,
+    ProjectTestCandidate,
+)
+from services.project_coverage_service import ProjectCoverageService
 from services.source_acquisition_service import SourceAcquisitionService
 from services.source_analysis_orchestrator import SourceAnalysisOrchestrator
 
@@ -55,10 +63,14 @@ class ExternalSourceAnalysisService:
         *,
         acquisition_service: SourceAcquisitionService | None = None,
         orchestrator_factory: Callable[[], SourceAnalysisOrchestrator] | None = None,
+        project_coverage_service: ProjectCoverageService | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._acquisition_service = acquisition_service or SourceAcquisitionService()
         self._orchestrator_factory = orchestrator_factory or SourceAnalysisOrchestrator
+        self._project_coverage_service = (
+            project_coverage_service or ProjectCoverageService()
+        )
         self._clock = clock
 
     def run(self, request: ExternalSourceAnalysisRequest) -> ExternalSourceAnalysisResult:
@@ -148,11 +160,24 @@ class ExternalSourceAnalysisService:
             self._validate_output_separation(output_root, acquired.resolved_project_root)
 
             module_results = self._analyze_modules(request, acquired, output_root)
+            project_coverage = self._measure_project_coverage(
+                request=request,
+                acquired=acquired,
+                module_results=module_results,
+                output_root=output_root,
+            )
             status = self._derive_status(
                 request.execution_policy,
                 module_results,
                 acquired,
             )
+            if (
+                status is ExternalAnalysisStatus.COMPLETED
+                and project_coverage is not None
+                and project_coverage.full_scenario_count > 0
+                and project_coverage.status is not ProjectCoverageStatus.COMPLETED
+            ):
+                status = ExternalAnalysisStatus.PARTIAL
             result = ExternalSourceAnalysisResult(
                 source_kind=request.source.source_kind,
                 execution_policy=request.execution_policy,
@@ -173,6 +198,7 @@ class ExternalSourceAnalysisService:
                 duration_seconds=max(0.0, self._clock() - started),
                 cleanup_status=ExternalWorkspaceCleanupStatus.NOT_REQUIRED,
                 issues=tuple(dict.fromkeys(issue.category.value for issue in acquired.issues)),
+                project_coverage=project_coverage,
             )
             return self._finalize(
                 result,
@@ -240,6 +266,7 @@ class ExternalSourceAnalysisService:
                     run_greedy_baseline=request.configuration.run_greedy_baseline,
                     run_strategy_comparison=request.configuration.run_strategy_comparison,
                     comparison_timeout_seconds=request.configuration.comparison_timeout_seconds,
+                    relative_module_path=module.relative_path,
                 )
             except ModuleNotFoundError:
                 results.append(
@@ -308,6 +335,158 @@ class ExternalSourceAnalysisService:
                 for item in results
             ]
         return tuple(results)
+
+    def _measure_project_coverage(
+        self,
+        *,
+        request: ExternalSourceAnalysisRequest,
+        acquired: ResolvedSourceTarget,
+        module_results: tuple[ExternalModuleAnalysisResult, ...],
+        output_root: Path,
+    ) -> ProjectCoverageResult | None:
+        if request.execution_policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
+            return None
+        candidates: list[ProjectTestCandidate] = []
+        for module in module_results:
+            project = module.project_result
+            project_candidates = getattr(project, "coverage_candidates", ())
+            if not isinstance(project_candidates, tuple):
+                project_candidates = ()
+            for candidate in project_candidates:
+                order = len(candidates) + 1
+                public_relative_path = module.relative_path.replace("\\", "/")
+                candidates.append(
+                    replace(
+                        candidate,
+                        project_test_id=(
+                            f"{public_relative_path}::{candidate.function_name}::"
+                            f"{candidate.scenario.scenario_id}"
+                        ),
+                        relative_module_path=public_relative_path,
+                        original_order=order,
+                    )
+                )
+        scope = self._project_scope_summary(
+            acquired=acquired,
+            module_results=module_results,
+        )
+        return self._project_coverage_service.measure_and_minimize(
+            candidates=tuple(candidates),
+            scope=scope,
+            output_root=output_root,
+            timeout_seconds=request.configuration.pytest_coverage_timeout_seconds,
+        )
+
+    @staticmethod
+    def _project_scope_summary(
+        *,
+        acquired: ResolvedSourceTarget,
+        module_results: tuple[ExternalModuleAnalysisResult, ...],
+    ) -> ProjectCoverageScopeSummary:
+        function_results = tuple(
+            function
+            for module in module_results
+            for function in (
+                getattr(module.project_result, "function_results", ())
+                if module.project_result is not None
+                else ()
+            )
+        )
+        discovered_functions = sum(
+            module.top_level_function_count
+            for module in acquired.discovered_modules
+        )
+        unsupported_from_projects = sum(
+            function.status is FunctionRunStatus.UNSUPPORTED
+            for function in function_results
+        )
+        unsupported_without_project = sum(
+            module.top_level_function_count
+            for module in acquired.discovered_modules
+            if not module.supported
+        )
+        unsupported = unsupported_from_projects + unsupported_without_project
+        analyzed = sum(
+            function.status
+            not in {
+                FunctionRunStatus.SKIPPED,
+                FunctionRunStatus.SKIPPED_LIMIT,
+                FunctionRunStatus.UNSUPPORTED,
+            }
+            for function in function_results
+        )
+        skipped_limit = sum(
+            function.status is FunctionRunStatus.SKIPPED_LIMIT
+            for function in function_results
+        ) + sum(
+            module.discovered_function_count
+            for module in module_results
+            if module.status is ExternalModuleStatus.SKIPPED_LIMIT
+            and module.project_result is None
+        )
+        selected_modules = sum(
+            module.status is not ExternalModuleStatus.SKIPPED_LIMIT
+            for module in module_results
+        )
+        completed_modules = sum(
+            module.status is ExternalModuleStatus.COMPLETED
+            for module in module_results
+        )
+        completed = sum(
+            function.status is FunctionRunStatus.COMPLETED
+            for function in function_results
+        )
+        partial = sum(
+            function.status is FunctionRunStatus.PARTIAL
+            for function in function_results
+        )
+        failed = sum(
+            function.status is FunctionRunStatus.FAILED
+            for function in function_results
+        ) + sum(
+            module.discovered_function_count
+            for module in module_results
+            if module.status is ExternalModuleStatus.FAILED
+            and module.project_result is None
+        )
+        timed_out = sum(
+            function.status is FunctionRunStatus.TIMED_OUT
+            for function in function_results
+        ) + sum(
+            module.discovered_function_count
+            for module in module_results
+            if module.status is ExternalModuleStatus.TIMED_OUT
+            and module.project_result is None
+        )
+        scope_complete = (
+            bool(module_results)
+            and all(
+                module.discovered_function_count == 0
+                or module.status is ExternalModuleStatus.COMPLETED
+                for module in module_results
+            )
+            and unsupported == 0
+            and skipped_limit == 0
+            and partial == 0
+            and failed == 0
+            and timed_out == 0
+            and completed == discovered_functions
+        )
+        return ProjectCoverageScopeSummary(
+            discovered_module_count=len(acquired.discovered_modules),
+            selected_module_count=selected_modules,
+            completed_module_count=completed_modules,
+            discovered_function_count=discovered_functions,
+            eligible_function_count=max(0, discovered_functions - unsupported),
+            analyzed_function_count=analyzed,
+            completed_function_count=completed,
+            partial_function_count=partial,
+            failed_function_count=failed,
+            timed_out_function_count=timed_out,
+            unsupported_function_count=unsupported,
+            skipped_limit_function_count=skipped_limit,
+            scope_complete=scope_complete,
+        )
 
     @staticmethod
     def _selected_paths(

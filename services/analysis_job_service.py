@@ -274,6 +274,8 @@ class AnalysisJobService:
     ) -> dict[str, tuple[AnalysisArtifactSummary, Path]]:
         root = (self.settings.output_root.resolve() / job_id).resolve()
         candidates = [result.report_path]
+        if result.project_coverage is not None:
+            candidates.extend(result.project_coverage.artifact_paths)
         for module in result.module_results:
             candidates.extend(module.artifact_paths)
         artifacts: dict[str, tuple[AnalysisArtifactSummary, Path]] = {}
@@ -441,12 +443,25 @@ class AnalysisJobService:
             discovered_function_count=result.discovered_function_count,
             analyzed_function_count=result.analyzed_function_count,
             limit_skipped_function_count=result.limit_skipped_function_count,
-            project_line_coverage_percent=None,
-            project_branch_coverage_percent=None,
+            project_line_coverage_percent=(
+                result.project_coverage.full_line_coverage_percent
+                if result.project_coverage is not None
+                else None
+            ),
+            project_branch_coverage_percent=(
+                result.project_coverage.full_branch_coverage_percent
+                if result.project_coverage is not None
+                else None
+            ),
             duration_seconds=result.duration_seconds,
             cleanup_status=result.cleanup_status.value,
             modules=tuple(modules),
             issues=result.issues,
+            project_coverage=(
+                result.project_coverage.to_dict()
+                if result.project_coverage is not None
+                else None
+            ),
         )
 
     @staticmethod

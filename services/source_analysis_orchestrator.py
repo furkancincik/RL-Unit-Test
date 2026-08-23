@@ -21,6 +21,7 @@ from models.project_analysis_result import (
     ProjectAnalysisResult,
     ProjectRunStatus,
 )
+from models.project_coverage_result import ProjectTestCandidate
 from services.project_analysis_report_service import ProjectAnalysisReportWriter
 from services.real_rl_training_service import (
     RealRLTrainingResult,
@@ -73,6 +74,7 @@ class SourceAnalysisOrchestrator:
         run_greedy_baseline: bool = False,
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
+        relative_module_path: str | None = None,
     ) -> ProjectAnalysisResult:
         started_at = time.perf_counter()
         normalized_source = self._normalize_source_file(source_file)
@@ -81,6 +83,11 @@ class SourceAnalysisOrchestrator:
         normalized_import_root = self._normalize_import_root(
             import_root,
             normalized_source,
+        )
+        normalized_relative_module_path = self._normalize_relative_module_path(
+            relative_module_path,
+            source_file=normalized_source,
+            import_root=normalized_import_root,
         )
         self._validate_selection(function_name, all_functions)
         self._validate_maximum_functions(maximum_functions)
@@ -110,6 +117,7 @@ class SourceAnalysisOrchestrator:
         )
         report_path = normalized_output / "project_analysis_report.json"
         function_results: list[FunctionAnalysisResult] = []
+        coverage_candidates: list[ProjectTestCandidate] = []
 
         for ordinal, target in enumerate(selected_targets, start=1):
             function_output = self._function_output_directory(
@@ -162,6 +170,19 @@ class SourceAnalysisOrchestrator:
                 comparison_timeout_seconds=comparison_timeout_seconds,
             )
             diagnostic = self._extract_diagnostic(pipeline_result)
+            if isinstance(pipeline_result, RealRLTrainingResult):
+                coverage_candidates.extend(
+                    self._project_test_candidates(
+                        pipeline_result=pipeline_result,
+                        target=target,
+                        source_file=normalized_source,
+                        import_root=(
+                            normalized_import_root or Path.cwd().resolve()
+                        ),
+                        relative_module_path=normalized_relative_module_path,
+                        initial_order=len(coverage_candidates),
+                    )
+                )
             function_results.append(
                 FunctionAnalysisResult(
                     target=target,
@@ -207,6 +228,7 @@ class SourceAnalysisOrchestrator:
             status=ProjectAnalysisResult.derive_status(statuses),
             output_root=normalized_output,
             report_path=report_path,
+            coverage_candidates=tuple(coverage_candidates),
         )
         self._report_writer.write(project_result)
         return project_result
@@ -431,3 +453,80 @@ class SourceAnalysisOrchestrator:
             raise SourceAnalysisValidationError(
                 "per_function_timeout_seconds pozitif ve sonlu olmalıdır."
             )
+
+    @staticmethod
+    def _normalize_relative_module_path(
+        value: str | None,
+        *,
+        source_file: Path,
+        import_root: Path | None,
+    ) -> str:
+        if value is not None:
+            if not isinstance(value, str) or not value.strip():
+                raise SourceAnalysisValidationError(
+                    "relative_module_path boş olamaz."
+                )
+            normalized = value.replace("\\", "/")
+            if normalized.startswith("/") or ".." in Path(normalized).parts:
+                raise SourceAnalysisValidationError(
+                    "relative_module_path güvenli relative path olmalıdır."
+                )
+            return normalized
+        if import_root is not None and source_file.is_relative_to(import_root):
+            return source_file.relative_to(import_root).as_posix()
+        return source_file.name
+
+    @staticmethod
+    def _project_test_candidates(
+        *,
+        pipeline_result: RealRLTrainingResult,
+        target: FunctionTarget,
+        source_file: Path,
+        import_root: Path,
+        relative_module_path: str,
+        initial_order: int,
+    ) -> tuple[ProjectTestCandidate, ...]:
+        contributions = {
+            item.scenario_id: item
+            for item in (
+                pipeline_result.minimization_result.contributions
+                if pipeline_result.minimization_result is not None
+                else ()
+            )
+        }
+        candidates: list[ProjectTestCandidate] = []
+        for offset, scenario in enumerate(pipeline_result.scenarios, start=1):
+            contribution = contributions.get(scenario.scenario_id)
+            candidates.append(
+                ProjectTestCandidate(
+                    project_test_id=(
+                        f"{relative_module_path}::{target.qualified_name}::"
+                        f"{scenario.scenario_id}"
+                    ),
+                    relative_module_path=relative_module_path,
+                    module_path=pipeline_result.module_path,
+                    function_name=target.name,
+                    function_start_line=target.start_line,
+                    function_end_line=target.end_line,
+                    source_file=source_file,
+                    import_root=import_root,
+                    scenario=scenario,
+                    original_order=initial_order + offset,
+                    precomputed_line_identities=(
+                        contribution.covered_line_identities
+                        if contribution is not None
+                        else None
+                    ),
+                    precomputed_branch_identities=(
+                        contribution.covered_branch_identities
+                        if contribution is not None
+                        else None
+                    ),
+                    precomputed_execution_success=(
+                        contribution.execution_success
+                        if contribution is not None
+                        else None
+                    ),
+                )
+            )
+        return tuple(candidates)

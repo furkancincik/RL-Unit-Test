@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from models.project_analysis_result import FunctionRunStatus, ProjectAnalysisResult
+from models.project_coverage_result import ProjectCoverageResult
 from models.source_acquisition_result import SourceAcquisitionLimits
 
 
@@ -480,6 +481,7 @@ class ExternalSourceAnalysisResult:
     duration_seconds: float
     cleanup_status: ExternalWorkspaceCleanupStatus
     issues: tuple[str, ...]
+    project_coverage: ProjectCoverageResult | None = None
 
     @property
     def analyzed_module_count(self) -> int:
@@ -522,5 +524,24 @@ class ExternalSourceAnalysisResult:
             "duration_seconds": self.duration_seconds,
             "cleanup_status": self.cleanup_status.value,
             "issues": list(self.issues),
-            "aggregate_project_coverage": {"line_percent": None, "branch_percent": None, "status": "UNMEASURED"},
+            "project_coverage": (
+                self.project_coverage.to_dict()
+                if self.project_coverage is not None
+                else None
+            ),
+            "aggregate_project_coverage": (
+                {
+                    "coverage_scope": self.project_coverage.coverage_scope.value,
+                    "line_percent": self.project_coverage.full_line_coverage_percent,
+                    "branch_percent": self.project_coverage.full_branch_coverage_percent,
+                    "status": self.project_coverage.status.value,
+                    "scope_complete": self.project_coverage.scope.scope_complete,
+                }
+                if self.project_coverage is not None
+                else {
+                    "line_percent": None,
+                    "branch_percent": None,
+                    "status": "UNMEASURED",
+                }
+            ),
         }

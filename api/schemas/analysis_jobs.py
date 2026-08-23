@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -144,6 +144,7 @@ class JobResultResponse(BaseModel):
     limit_skipped_function_count: int
     project_line_coverage_percent: float | None
     project_branch_coverage_percent: float | None
+    project_coverage: dict[str, Any] | None
     duration_seconds: float
     cleanup_status: str
     modules: list[ModuleResultResponse]

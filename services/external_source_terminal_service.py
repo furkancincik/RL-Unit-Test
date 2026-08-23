@@ -336,7 +336,26 @@ class ExternalSourceTerminalAdapter:
             )
         lines.extend(
             (
-                "Project coverage      : Ölçülmedi",
+                (
+                    "Project coverage      : Ölçülmedi"
+                    if result.project_coverage is None
+                    else (
+                        "Project coverage      : "
+                        f"{ExternalSourceTerminalAdapter._percentage(result.project_coverage.full_line_coverage_percent)} line / "
+                        f"{ExternalSourceTerminalAdapter._percentage(result.project_coverage.full_branch_coverage_percent)} branch "
+                        f"({result.project_coverage.coverage_scope.value}, "
+                        f"scope_complete={result.project_coverage.scope.scope_complete})"
+                    )
+                ),
+                (
+                    "Project minimized     : Ölçülmedi"
+                    if result.project_coverage is None
+                    else (
+                        f"{result.project_coverage.final_selected_count} / "
+                        f"{result.project_coverage.full_scenario_count} test, "
+                        f"exact_preserved={result.project_coverage.coverage_preserved}"
+                    )
+                ),
                 f"Artifact output root  : {result.output_root}",
                 f"JSON raporu           : {result.report_path}",
                 f"Cleanup durumu        : {result.cleanup_status.value}",

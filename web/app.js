@@ -676,6 +676,90 @@ function renderModules(modules) {
   }
 }
 
+function renderProjectCoverage(projectCoverage) {
+  const section = byId("project-coverage-section");
+  const hasMeasurement = projectCoverage !== null && typeof projectCoverage === "object";
+  section.hidden = false;
+  if (!hasMeasurement) {
+    byId("project-coverage-status").textContent = "Ölçülmedi";
+    byId("project-coverage").textContent = "Dinamik analiz yapılmadı";
+    byId("project-coverage-bars").replaceChildren();
+    byId("project-coverage-metrics").replaceChildren();
+    byId("project-coverage-scope").textContent =
+      "Whole repository coverage: Ölçülmedi";
+    return;
+  }
+  const badge = byId("project-coverage-status");
+  badge.textContent = measured(projectCoverage.run_status);
+  badge.dataset.status = projectCoverage.run_status;
+  byId("project-coverage").textContent =
+    `Line ${formatPercentage(projectCoverage.full_line_coverage_percent)} · Branch ${formatPercentage(projectCoverage.full_branch_coverage_percent)}`;
+  const bars = byId("project-coverage-bars");
+  bars.replaceChildren();
+  renderCoverage(bars, "Full combined line", projectCoverage.full_line_coverage_percent);
+  renderCoverage(bars, "Full combined branch", projectCoverage.full_branch_coverage_percent);
+  renderCoverage(bars, "Minimized line", projectCoverage.minimized_line_coverage_percent);
+  renderCoverage(bars, "Minimized branch", projectCoverage.minimized_branch_coverage_percent);
+  const metrics = byId("project-coverage-metrics");
+  metrics.replaceChildren();
+  appendMetric(metrics, "Full scenario", measured(projectCoverage.full_scenario_count));
+  appendMetric(metrics, "Minimized scenario", measured(projectCoverage.final_selected_count));
+  appendMetric(metrics, "Kaldırılan", measured(projectCoverage.removal_count));
+  appendMetric(metrics, "Azalma", formatPercentage(projectCoverage.reduction_percentage));
+  appendMetric(
+    metrics,
+    "Exact hedef",
+    projectCoverage.coverage_preserved === null
+      ? "Ölçülmedi"
+      : projectCoverage.coverage_preserved ? "Korundu" : "Korunmadı",
+  );
+  appendMetric(metrics, "Full pytest exit", measured(projectCoverage.full_pytest_exit_code));
+  appendMetric(metrics, "Minimized pytest exit", measured(projectCoverage.minimized_pytest_exit_code));
+  const scope = projectCoverage.scope || {};
+  const scopeLabel = projectCoverage.coverage_scope === "ANALYZED_PROJECT_SCOPE_COVERAGE"
+    ? "Analiz Edilen Proje Kapsamı"
+    : measured(projectCoverage.coverage_scope);
+  appendMetric(metrics, "Analize alınan modül", measured(scope.selected_module_count));
+  appendMetric(metrics, "Tamamlanan modül", measured(scope.completed_module_count));
+  appendMetric(metrics, "Analiz edilen fonksiyon", measured(scope.analyzed_function_count));
+  appendMetric(metrics, "Eksik fonksiyon", measured(scope.incomplete_function_count));
+  appendMetric(metrics, "Partial", measured(scope.partial_function_count));
+  appendMetric(metrics, "Failed", measured(scope.failed_function_count));
+  appendMetric(metrics, "Timed out", measured(scope.timed_out_function_count));
+  appendMetric(metrics, "Unsupported", measured(scope.unsupported_function_count));
+  appendMetric(metrics, "SKIPPED_LIMIT", measured(scope.skipped_limit_function_count));
+  appendMetric(metrics, "Algorithm", measured(projectCoverage.algorithm));
+  appendMetric(
+    metrics,
+    "Globally minimal",
+    projectCoverage.globally_minimal === false ? "Hayır" : measured(projectCoverage.globally_minimal),
+  );
+  appendMetric(metrics, "Failure category", measured(projectCoverage.failure_category));
+  appendMetric(metrics, "Unmeasured reason", measured(projectCoverage.unmeasured_reason));
+  byId("project-coverage-scope").textContent =
+    `${scopeLabel} · scope_complete=${measured(scope.scope_complete)} · Whole repository coverage: Ölçülmedi${scope.scope_complete === false ? " · Uyarı: analiz kapsamı eksik" : ""}`;
+}
+
+function renderProjectCoverageArtifacts(artifacts) {
+  const container = byId("project-coverage-artifacts");
+  container.replaceChildren();
+  const labels = new Map([
+    ["test_project_full_pool.py", "Combined pytest indir"],
+    ["test_project_greedy_minimized.py", "Minimized pytest indir"],
+    ["project_coverage_report.json", "Project JSON indir"],
+  ]);
+  for (const artifact of Array.isArray(artifacts) ? artifacts : []) {
+    const label = labels.get(artifact.filename);
+    if (!label) {
+      continue;
+    }
+    const link = createNode("a", "artifact-link", label);
+    link.href = `${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`;
+    link.setAttribute("download", "");
+    container.append(link);
+  }
+}
+
 function renderResult(result) {
   const section = byId("result-section");
   section.hidden = false;
@@ -710,10 +794,7 @@ function renderResult(result) {
   appendMetric(summary, "Toplam süre", formatDuration(result.duration_seconds));
   appendMetric(summary, "Cleanup", measured(result.cleanup_status));
   appendMetric(summary, "Kategori", measured(result.issues?.[0]));
-  byId("project-coverage").textContent =
-    result.project_line_coverage_percent === null && result.project_branch_coverage_percent === null
-      ? "Ölçülmedi"
-      : `Line ${formatPercentage(result.project_line_coverage_percent)} · Branch ${formatPercentage(result.project_branch_coverage_percent)}`;
+  renderProjectCoverage(result.project_coverage);
   renderModules(result.modules);
 }
 
@@ -732,6 +813,7 @@ function renderArtifacts(artifacts) {
   container.replaceChildren();
   if (!Array.isArray(artifacts) || artifacts.length === 0) {
     container.append(createNode("p", "empty-state", "İndirilebilir artifact üretilmedi."));
+    renderProjectCoverageArtifacts([]);
     return;
   }
   for (const artifact of artifacts) {
@@ -748,6 +830,7 @@ function renderArtifacts(artifacts) {
     item.append(copy, link);
     container.append(item);
   }
+  renderProjectCoverageArtifacts(artifacts);
 }
 
 function showError(category, stage, message) {

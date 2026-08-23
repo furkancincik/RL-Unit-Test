@@ -135,7 +135,14 @@ def test_real_upload_trusted_dynamic_runs_coverage_greedy_and_comparison(
     assert function["rl_reduction_percentage"] is not None
     assert function["coverage_equality_verified"] is True
     assert function["globally_minimal"] is False
-    assert payload["project_line_coverage_percent"] is None
+    assert payload["project_line_coverage_percent"] is not None
+    assert payload["project_branch_coverage_percent"] is not None
+    assert payload["project_coverage"]["coverage_scope"] == (
+        "ANALYZED_PROJECT_SCOPE_COVERAGE"
+    )
+    assert payload["project_coverage"]["coverage_preserved"] is True
+    assert payload["project_coverage"]["globally_minimal"] is False
+    assert payload["project_coverage"]["whole_repository_line_coverage_percent"] is None
     assert payload["cleanup_status"] == "COMPLETED"
     assert artifacts.json()["artifacts"]
     assert tuple(sys.path) == before_path
