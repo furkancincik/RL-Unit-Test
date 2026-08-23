@@ -367,7 +367,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1924 passed, 1 skipped in 155.43s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1945 passed, 1 skipped in 179.70s`.
 
 ---
 
@@ -405,7 +405,52 @@ The backend limits concurrent and queued jobs, inline/upload bytes, and terminal
 
 Queued jobs can be cancelled before execution. Running jobs are not falsely reported as cancelled because the production pipeline does not expose a safe job-level worker termination handle; a cancellation request is recorded and the API returns `409` while existing per-function timeout protection remains active. Terminal jobs cannot be cancelled again.
 
-CORS is disabled unless an explicit origin allowlist is supplied. Anonymous public GitHub acquisition uses the existing resolver; private credentials and dependency installation are unsupported. Authentication and rate limiting are not implemented yet. The Web UI remains planned for sprint 39.2.
+CORS is disabled unless an explicit origin allowlist is supplied. Anonymous public GitHub acquisition uses the existing resolver; private credentials and dependency installation are unsupported. Authentication and rate limiting are not implemented yet.
+
+## Production Web UI
+
+The FastAPI backend now serves a responsive Turkish developer interface from local HTML, CSS, and framework-independent JavaScript. No Node build chain, CDN, remote font, analytics, or browser runtime dependency is required. Start the localhost server with:
+
+```text
+python -m api.server
+```
+
+Then open `http://127.0.0.1:8000/`. The server remains bound to localhost by default. `/docs`, `/redoc`, `/openapi.json`, and all `/api/v1/...` endpoints remain available.
+
+```text
+Kod Yapıştır --------+
+Python .py upload ---+--> Aynı-origin FastAPI job API
+Public GitHub URL ---+          |
+                                +--> QUEUED / RUNNING polling
+                                +--> Terminal result metadata
+                                +--> Scenario-pool target coverage
+                                +--> Greedy verified coverage
+                                +--> Best-RL verified coverage
+                                +--> Backend strategy comparison
+                                +--> Opaque-ID artifact download
+```
+
+The three browser inputs are separate tabs and map directly to the inline, multipart upload, and public GitHub endpoints. The browser does not guess whether one value is code, a path, or a URL. Server filesystem and local project-directory input is intentionally absent from the Web UI; local project analysis remains available through the terminal workflow.
+
+`STATIC_DISCOVERY_ONLY` is selected by default. `TRUSTED_DYNAMIC_ANALYSIS` reveals a visible execution warning and requires a separate acknowledgement before submission. Timeout limits work but is not a sandbox; dynamic mode must only be used for trusted code. Advanced settings expose the existing API module-selection modes, module/function limits, episode count, deterministic random seed `42`, pytest/coverage timeout, per-function pipeline timeout, greedy minimization, and RL–greedy comparison without duplicating analysis logic in the browser. Greedy minimization is enabled by default in the Web UI because it is the primary minimum-suite baseline; the more expensive RL–greedy comparison remains optional. The backward-compatible API and service defaults are unchanged.
+
+The page polls one opaque job ID at a time with bounded retry/backoff and stops at `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, or `CANCELLED`. Queued cancellation is distinguished from the `409` response for a running job. Dynamic function cards keep three measured results distinct: the concrete-valid full scenario pool is the attainable target, greedy is the independently verified minimized suite, and best RL is the actual coverage snapshot of the highest-ranked episode. A lower RL result never replaces the attainable target. Greedy and RL preservation are reported against exact line and branch identities, and a non-preserving greedy candidate is not presented as a successful minimum. `null` remains `Ölçülmedi`, project coverage is not synthesized from function averages, and the UI does not calculate its own strategy winner. Real combined project coverage is reserved for the day 40 sprint, where the complete selected test suite will run in a single coverage execution. Generated pytest and JSON reports are listed and downloaded only through server-issued artifact IDs.
+
+The UI uses DOM text APIs for external values and does not place source code in the URL, browser storage, logs, or result surface. Static assets are contained under the fixed `/static` mount. Responses add a self-only Content Security Policy, `nosniff`, no-referrer, frame denial, and a restrictive permissions policy. CORS stays disabled by default. Authentication and rate limiting remain unimplemented and are part of production hardening rather than completed UI functionality.
+
+The automated Web UI contract and real localhost HTTP acceptance cover static and trusted-dynamic submission, upload, separate GitHub routing, polling, measured coverage, backend-authoritative `TIE` comparison, JSON/generated-pytest downloads, source non-reflection, temp cleanup, and orphan-server cleanup. Day 40 remains reserved for final real-browser E2E validation, hardening, error fixes, and final reporting.
+
+A controlled trusted-dynamic acceptance of `sample_complex_code.py` used the Web production configuration (`max_visits_per_node=3`, three episodes, epsilon `0.0`, learning rate `0.5`, discount factor `0.9`, seed `42`, 30-second coverage timeout, 120-second function timeout, greedy and comparison enabled):
+
+| Function | Pool | Pool line / branch | Greedy tests | Greedy line / branch | Preserved | Best RL tests | Best RL line / branch | Preserved | Winner |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | --- |
+| `calculate_score` | 9 | 95.00% / 94.44% | 9 | 95.00% / 94.44% | Yes | 9 | 95.00% / 94.44% | Yes | `TIE` |
+| `calculate_letter_grade` | 8 | 100% / 100% | 8 | 100% / 100% | Yes | 8 | 100% / 100% | Yes | `TIE` |
+| `calculate_bonus` | 10 | 100% / 100% | 4 | 100% / 100% | Yes | 6 | 100% / 100% | Yes | `GREEDY` |
+| `calculate_average` | 7 | 100% / 100% | 3 | 100% / 100% | Yes | 4 | 100% / 100% | Yes | `GREEDY` |
+| `evaluate_student` | 5 | 91.67% / 90.00% | 5 | 91.67% / 90.00% | Yes | 5 | 91.67% / 90.00% | Yes | `TIE` |
+
+The pool itself does not reach 100% for `calculate_score` (missing line `22`, branch arc `19→22`) or `evaluate_student` (missing line `141`, branch arc `140→141`). These are reported as current generation/reachability limits; neither RL nor greedy is allowed to inflate the attainable target.
 
 ---
 
@@ -492,6 +537,8 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - Pytest
 - coverage.py
 - JSON
+- FastAPI
+- Local HTML, CSS, and Framework-Independent JavaScript
 - Control Flow Graph (CFG)
 - Decision Quality Matrix (DQM)
 - Data-Flow Analysis
@@ -502,9 +549,6 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 ### Future Integrations
 
 - Tree-sitter
-- FastAPI
-- Web Dashboard
-- Git Repository Input
 - Isolated Project Execution
 
 ---
@@ -756,10 +800,10 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,807 |
+| Passed | 1,945 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 109.57s |
+| Duration | 179.70s |
 
 ---
 
@@ -774,6 +818,8 @@ RL-Unit-Test
 ├── generator
 ├── rl
 ├── services
+├── api
+├── web
 ├── tests
 ├── output
 ├── datasets
@@ -860,6 +906,10 @@ RL-Unit-Test
 - Interactive External Source Menu Integration
 - FastAPI Asynchronous Analysis Job Backend
 - Bounded Job Queue, Safe Polling, and Artifact Downloads
+- Responsive Local Production Web UI
+- Separate Inline, Upload, and Public GitHub Browser Flows
+- Job Lifecycle, Coverage, Strategy Comparison, and Artifact Views
+- CSP and Baseline Browser Security Headers
 
 ---
 
@@ -874,6 +924,7 @@ RL-Unit-Test
 - Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
 - External Analysis Performance and Project-Wide Deadline
+- Final Browser E2E, Production Hardening, and Release Reporting
 
 ---
 
@@ -886,7 +937,6 @@ RL-Unit-Test
 - Dependency Discovery
 - Isolated and Resource-Limited Execution
 - Tree-sitter Integration
-- Web Interface
 
 ---
 
@@ -904,7 +954,7 @@ RL-Unit-Test
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
 - A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
-- The FastAPI job backend is complete, but authentication and rate limiting still require hardening. The Web UI remains planned for sprint 39.2. The terminal menu keeps upload/paste and GitHub inputs separate but is not a browser upload interface.
+- The FastAPI job backend and local Web UI are complete, but authentication, rate limiting, and final browser hardening are not. The terminal workflow remains the only interface for user-owned local project directories.
 
 ---
 
