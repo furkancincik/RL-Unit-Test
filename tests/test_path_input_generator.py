@@ -30,6 +30,40 @@ def create_execution_path(
     )
 
 
+def create_caught_exception_path(
+    *,
+    source_label: str,
+    handler_label: str,
+    return_label: str = "return None",
+) -> ExecutionPath:
+    """Exception-handler input synthesis testleri için metadata yolu oluşturur."""
+    return create_execution_path(
+        node_labels=[
+            "START",
+            "try",
+            source_label,
+            handler_label,
+            return_label,
+            "END",
+        ],
+        node_types=[
+            "start",
+            "try",
+            "Assign",
+            "except",
+            "return",
+            "end",
+        ],
+        edge_labels=[
+            None,
+            "Success",
+            "Exception",
+            None,
+            None,
+        ],
+    )
+
+
 def test_generate_creates_input_for_true_greater_equal_path() -> None:
     generator = PathInputGenerator()
 
@@ -427,6 +461,29 @@ def test_generate_rejects_unsupported_expression() -> None:
         generator.generate(
             path=path,
             parameter_names=("score",),
+        )
+
+
+def test_generate_isolates_unsupported_attribute_truthiness() -> None:
+    generator = PathInputGenerator()
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "not custom_object.attribute",
+            "return False",
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(
+        UnsupportedInputSynthesisError,
+        match="Desteklenmeyen koşul ifadesi",
+    ):
+        generator.generate(
+            path=path,
+            parameter_names=("custom_object",),
         )
 
 
@@ -1122,6 +1179,96 @@ def test_generate_creates_key_error_exception_path_input() -> None:
 
     assert result.keyword_argument_dict["data"] == {}
     assert result.expected_result is None
+
+
+def test_generate_uses_first_synthesizable_tuple_exception_in_source_order() -> None:
+    result = PathInputGenerator().generate(
+        path=create_caught_exception_path(
+            source_label="result = values[0]",
+            handler_label="except (KeyError, IndexError)",
+        ),
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == {}
+
+
+def test_generate_uses_supported_member_after_unsupported_tuple_member() -> None:
+    result = PathInputGenerator().generate(
+        path=create_caught_exception_path(
+            source_label="result = values[0]",
+            handler_label="except (ValueError, IndexError)",
+        ),
+        parameter_names=("values",),
+    )
+
+    assert result.keyword_argument_dict["values"] == []
+
+
+def test_generate_supports_safe_attribute_tuple_exception_member() -> None:
+    result = PathInputGenerator().generate(
+        path=create_caught_exception_path(
+            source_label="result = data['name']",
+            handler_label="except (errors.KeyError, errors.IndexError)",
+        ),
+        parameter_names=("data",),
+    )
+
+    assert result.keyword_argument_dict["data"] == {}
+
+
+def test_generate_rejects_tuple_without_synthesizable_exception_member() -> None:
+    with pytest.raises(
+        UnsupportedInputSynthesisError,
+        match="ValueError.*TypeError|TypeError.*ValueError",
+    ):
+        PathInputGenerator().generate(
+            path=create_caught_exception_path(
+                source_label="result = transform(value)",
+                handler_label="except (ValueError, TypeError)",
+            ),
+            parameter_names=("value",),
+        )
+
+
+@pytest.mark.parametrize(
+    "handler_label",
+    (
+        "except factory()",
+        "except errors[0]",
+        "except (*errors,)",
+        "except factory().IndexError",
+    ),
+)
+def test_generate_rejects_unsafe_dynamic_exception_handler_expression(
+    handler_label: str,
+) -> None:
+    with pytest.raises(UnsupportedInputSynthesisError):
+        PathInputGenerator().generate(
+            path=create_caught_exception_path(
+                source_label="result = values[0]",
+                handler_label=handler_label,
+            ),
+            parameter_names=("values",),
+        )
+
+
+@pytest.mark.parametrize(
+    "handler_label",
+    ("except ValueError", "except module.CustomError"),
+)
+def test_generate_preserves_safe_single_exception_handler_extraction(
+    handler_label: str,
+) -> None:
+    result = PathInputGenerator().generate(
+        path=create_caught_exception_path(
+            source_label="result = transform(value)",
+            handler_label=handler_label,
+        ),
+        parameter_names=("value",),
+    )
+
+    assert result.keyword_argument_dict["value"] == 0
 
 
 def test_generate_preserves_uncaught_raise_exception() -> None:

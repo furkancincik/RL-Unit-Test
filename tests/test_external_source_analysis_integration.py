@@ -40,6 +40,13 @@ def third(value: int) -> int:
     return value + 3
 """
 
+UNSUPPORTED_ATTRIBUTE_SOURCE = """\
+def inspect(custom_object):
+    if not custom_object.attribute:
+        return "missing"
+    return "present"
+"""
+
 
 def _dynamic_configuration(output_root: Path, **values: object) -> ExternalAnalysisConfiguration:
     return ExternalAnalysisConfiguration(
@@ -203,6 +210,28 @@ def test_real_three_function_limit_is_visible_end_to_end(tmp_path: Path) -> None
     assert payload["analyzed_function_count"] == 2
     assert payload["limit_skipped_function_count"] == 1
     assert payload["modules"][0]["functions"][-1]["skip_reason"] == "FUNCTION_LIMIT_EXCEEDED"
+
+
+def test_all_attribute_truthiness_paths_produce_controlled_partial_result(
+    tmp_path: Path,
+) -> None:
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource(UNSUPPORTED_ATTRIBUTE_SOURCE),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(tmp_path / "unsupported_attribute_output"),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.PARTIAL
+    module = result.module_results[0]
+    assert module.status.value == "PARTIAL"
+    function = module.project_result.function_results[0]
+    assert function.status.value == "PARTIAL"
+    assert function.diagnostic.scenario_rejection_counts == (
+        ("UNSUPPORTED_INPUT_SYNTHESIS", 2),
+    )
+    assert function.scenario_count is None
 
 
 def test_real_multi_module_project_produces_exact_combined_minimized_suite(

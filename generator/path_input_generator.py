@@ -503,22 +503,54 @@ class PathInputGenerator:
             if except_step.node_type != "except":
                 continue
 
-            exception_name = self._extract_handler_exception_name(
+            exception_names = self._extract_handler_exception_names(
                 except_step
             )
 
-            self._apply_exception_source_input(
-                source_step=step,
-                exception_name=exception_name,
-                parameter_names=parameter_names,
-                direct_values=direct_values,
-            )
+            if exception_names is None:
+                continue
+
+            if len(exception_names) == 1:
+                self._apply_exception_source_input(
+                    source_step=step,
+                    exception_name=exception_names[0],
+                    parameter_names=parameter_names,
+                    direct_values=direct_values,
+                )
+                continue
+
+            for exception_name in exception_names:
+                if exception_name not in {
+                    "ZeroDivisionError",
+                    "IndexError",
+                    "KeyError",
+                }:
+                    continue
+                candidate_values = dict(direct_values)
+                try:
+                    self._apply_exception_source_input(
+                        source_step=step,
+                        exception_name=exception_name,
+                        parameter_names=parameter_names,
+                        direct_values=candidate_values,
+                    )
+                except (ValueError, UnreachablePathError):
+                    continue
+                direct_values.clear()
+                direct_values.update(candidate_values)
+                break
+            else:
+                names = ", ".join(exception_names)
+                raise UnsupportedInputSynthesisError(
+                    "Tuple except handler için güvenli input "
+                    f"sentezlenemedi: {names}"
+                )
 
     @staticmethod
-    def _extract_handler_exception_name(
+    def _extract_handler_exception_names(
         except_step: PathStep,
-    ) -> str | None:
-        """Except düğüm etiketinden exception sınıfının adını çıkarır."""
+    ) -> tuple[str, ...] | None:
+        """Güvenli exception adlarını kaynak sırasıyla çıkarır."""
         normalized_label = except_step.node_label.strip()
 
         if normalized_label == "except":
@@ -527,7 +559,7 @@ class PathInputGenerator:
         prefix = "except "
 
         if not normalized_label.startswith(prefix):
-            raise ValueError(
+            raise UnsupportedInputSynthesisError(
                 "Except düğümü geçerli bir exception etiketi "
                 "içermiyor: "
                 f"{except_step.node_label}"
@@ -541,21 +573,38 @@ class PathInputGenerator:
                 mode="eval",
             ).body
         except SyntaxError as error:
-            raise ValueError(
+            raise UnsupportedInputSynthesisError(
                 "Except exception türü çözümlenemedi: "
                 f"{except_step.node_label}"
             ) from error
 
-        if isinstance(expression, ast.Name):
-            return expression.id
+        def extract_names(node: ast.expr) -> tuple[str, ...]:
+            if isinstance(node, ast.Name):
+                return (node.id,)
+            if isinstance(node, ast.Attribute) and (
+                PathInputGenerator._is_safe_exception_attribute(node)
+            ):
+                return (node.attr,)
+            if isinstance(node, ast.Tuple):
+                names: list[str] = []
+                for element in node.elts:
+                    names.extend(extract_names(element))
+                if names:
+                    return tuple(names)
+            raise UnsupportedInputSynthesisError(
+                "Desteklenmeyen except exception türü: "
+                f"{except_step.node_label}"
+            )
 
-        if isinstance(expression, ast.Attribute):
-            return expression.attr
+        return extract_names(expression)
 
-        raise ValueError(
-            "Desteklenmeyen except exception türü: "
-            f"{except_step.node_label}"
-        )
+    @staticmethod
+    def _is_safe_exception_attribute(expression: ast.Attribute) -> bool:
+        """Yalnız isim köklü attribute zincirlerini güvenli kabul eder."""
+        value: ast.expr = expression.value
+        while isinstance(value, ast.Attribute):
+            value = value.value
+        return isinstance(value, ast.Name)
 
     def _apply_exception_source_input(
         self,
@@ -598,6 +647,7 @@ class PathInputGenerator:
                 parameter_names=parameter_names,
                 direct_values=direct_values,
             )
+            return
 
     @staticmethod
     def _parse_exception_source_statement(
@@ -1398,7 +1448,7 @@ class PathInputGenerator:
             )
             return
 
-        raise ValueError(
+        raise UnsupportedInputSynthesisError(
             "Desteklenmeyen koşul ifadesi: "
             f"{original_expression}"
         )

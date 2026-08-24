@@ -149,6 +149,92 @@ def test_real_upload_trusted_dynamic_runs_coverage_greedy_and_comparison(
     service.shutdown()
 
 
+def test_tuple_handler_rejection_does_not_become_internal_worker_error(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    source = b"""\
+def convert(value):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return -1
+"""
+    analysis = {
+        "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+        "trusted_execution_acknowledged": True,
+        "maximum_module_count": 1,
+        "maximum_function_count": 1,
+        "episode_count": 1,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30,
+        "function_pipeline_timeout_seconds": 90,
+        "greedy_minimization": False,
+        "strategy_comparison": False,
+    }
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("tuple_handler.py", source, "text/x-python")},
+            data={"analysis": json.dumps(analysis)},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=120)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}").json()
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot["safe_error_category"] != "INTERNAL_WORKER_ERROR"
+    assert result.status_code == 200
+    service.shutdown()
+
+
+def test_attribute_truthiness_rejection_returns_safe_partial_result(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    source = b"""\
+def inspect(custom_object):
+    if not custom_object.attribute:
+        return "missing"
+    return "present"
+"""
+    analysis = {
+        "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+        "trusted_execution_acknowledged": True,
+        "maximum_module_count": 1,
+        "maximum_function_count": 1,
+        "episode_count": 1,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30,
+        "function_pipeline_timeout_seconds": 90,
+        "greedy_minimization": False,
+        "strategy_comparison": False,
+    }
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("attribute_truthiness.py", source, "text/x-python")},
+            data={"analysis": json.dumps(analysis)},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=120)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}").json()
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot["status"] == "PARTIAL"
+    assert snapshot["safe_error_category"] is None
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["status"] == "PARTIAL"
+    assert payload["modules"][0]["functions"][0]["status"] == "PARTIAL"
+    assert payload["modules"][0]["functions"][0]["error_category"] == (
+        "CONTROLLED_FAILURE"
+    )
+    service.shutdown()
+
+
 def test_same_dynamic_configuration_is_coverage_deterministic(
     tmp_path: Path,
 ) -> None:

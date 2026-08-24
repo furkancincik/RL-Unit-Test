@@ -581,6 +581,145 @@ def test_generate_isolates_unsupported_input_synthesis_rejection() -> None:
     assert "iki parametre" in rejection.message
 
 
+def test_real_cfg_tuple_handler_alias_generates_concrete_exception_scenario(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "tuple_handler.py"
+    source_file.write_text(
+        """
+def lookup(values):
+    try:
+        return values[0]
+    except (KeyError, IndexError) as error:
+        return -1
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name=function.name,
+        paths=paths,
+        scores=scores,
+        parameter_names=tuple(function.parameters),
+    )
+    target = runpy.run_path(str(source_file))["lookup"]
+    exception_path_indices = {
+        index
+        for index, path in enumerate(paths, start=1)
+        if any(step.node_type == "except" for step in path.steps)
+    }
+    exception_scenarios = [
+        scenario
+        for scenario in scenarios
+        if scenario.path_index in exception_path_indices
+    ]
+
+    assert exception_scenarios
+    assert exception_scenarios[0].keyword_argument_dict["values"] == {}
+    assert all(
+        target(**scenario.keyword_argument_dict) == scenario.expected_result
+        for scenario in exception_scenarios
+    )
+    assert not any(
+        rejection.path_index in exception_path_indices
+        for rejection in generator.rejections
+    )
+
+
+def test_real_cfg_tuple_without_synthesizable_member_is_structured_rejection(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "unsupported_tuple_handler.py"
+    source_file.write_text(
+        """
+def convert(value):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return -1
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    generator.generate(
+        function_name=function.name,
+        paths=paths,
+        scores=scores,
+        parameter_names=tuple(function.parameters),
+    )
+
+    exception_path_indices = {
+        index
+        for index, path in enumerate(paths, start=1)
+        if any(step.node_type == "except" for step in path.steps)
+    }
+    exception_rejections = tuple(
+        rejection
+        for rejection in generator.rejections
+        if rejection.path_index in exception_path_indices
+    )
+
+    assert exception_rejections
+    assert all(
+        rejection.category
+        is ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+        for rejection in exception_rejections
+    )
+    assert all(
+        rejection.exception_type == "UnsupportedInputSynthesisError"
+        for rejection in exception_rejections
+    )
+
+
+def test_real_cfg_attribute_truthiness_paths_are_structured_rejections(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "attribute_truthiness.py"
+    source_file.write_text(
+        """
+def inspect(custom_object):
+    if not custom_object.attribute:
+        return "missing"
+    return "present"
+""".strip(),
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+    graph = ControlFlowGraphBuilder().build_from_file(source_file)[0]
+    paths = CFGPathAnalyzer().find_paths(graph)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name=function.name,
+        paths=paths,
+        scores=scores,
+        parameter_names=tuple(function.parameters),
+    )
+
+    assert scenarios == []
+    assert len(generator.rejections) == len(paths)
+    assert all(
+        rejection.category
+        is ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+        for rejection in generator.rejections
+    )
+    assert all(
+        rejection.exception_type == "UnsupportedInputSynthesisError"
+        for rejection in generator.rejections
+    )
+
+
 def test_unsupported_input_rejection_state_resets_between_calls() -> None:
     path_input_generator = Mock(spec=PathInputGenerator)
     path_input_generator.generate.side_effect = [
