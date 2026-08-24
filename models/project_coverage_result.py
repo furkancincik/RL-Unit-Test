@@ -215,6 +215,13 @@ class ProjectTestCandidate:
         if any(supplied) and not all(supplied):
             raise ValueError("Precomputed coverage alanları birlikte verilmelidir.")
 
+    @property
+    def qualified_function_name(self) -> str:
+        class_name = self.scenario.target_class_name
+        if class_name is None:
+            return self.function_name
+        return f"{class_name}.{self.function_name}"
+
 
 @dataclass(frozen=True, slots=True)
 class ProjectCoverageResult:

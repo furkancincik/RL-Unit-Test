@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from analyzer.simple_instance_method import find_analysis_target
+
 
 class DataFlowOperationType(str, Enum):
     ASSIGNMENT = "ASSIGNMENT"
@@ -211,20 +213,7 @@ class DataFlowAnalyzer:
         tree: ast.Module,
         function_name: str,
     ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-        for node in tree.body:
-            if isinstance(
-                node,
-                (
-                    ast.FunctionDef,
-                    ast.AsyncFunctionDef,
-                ),
-            ):
-                if node.name == function_name:
-                    return node
-
-        raise ValueError(
-            f"Fonksiyon bulunamadı: {function_name}"
-        )
+        return find_analysis_target(tree, function_name)
 
     def _walk_statements(
         self,

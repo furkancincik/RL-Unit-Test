@@ -60,10 +60,12 @@ class PytestGenerator:
             scenario.expects_exception
             for scenario in scenarios
         )
+        target_class_name = self._target_class_name(scenarios)
 
         code_lines = self._create_header(
             module_path=normalized_module_path,
             function_name=normalized_function_name,
+            target_class_name=target_class_name,
             requires_pytest_import=requires_pytest_import,
         )
 
@@ -88,6 +90,7 @@ class PytestGenerator:
                     function_name=normalized_function_name,
                     scenario=scenario,
                     test_name=test_name,
+                    target_class_name=target_class_name,
                 )
             )
 
@@ -100,6 +103,7 @@ class PytestGenerator:
     def _create_header(
         module_path: str,
         function_name: str,
+        target_class_name: str | None,
         requires_pytest_import: bool,
     ) -> list[str]:
         """
@@ -118,15 +122,9 @@ class PytestGenerator:
                 ]
             )
 
+        imported_target = target_class_name or function_name
         code_lines.extend(
-            [
-                (
-                    f"from {module_path} "
-                    f"import {function_name}"
-                ),
-                "",
-                "",
-            ]
+            [f"from {module_path} import {imported_target}", "", ""]
         )
 
         return code_lines
@@ -219,6 +217,24 @@ class PytestGenerator:
                 "içeremez."
             )
 
+        constructor_names = [
+            argument_name
+            for argument_name, _ in scenario.constructor_arguments
+        ]
+        if any(
+            not cls._is_valid_identifier(argument_name)
+            for argument_name in constructor_names
+        ):
+            raise ValueError("Senaryo geçersiz constructor parametresi içeriyor.")
+        if len(set(constructor_names)) != len(constructor_names):
+            raise ValueError("Constructor parametreleri tekrar edemez.")
+        if scenario.target_class_name is not None and not cls._is_valid_identifier(
+            scenario.target_class_name
+        ):
+            raise ValueError("Senaryo target class adı geçersizdir.")
+        if scenario.target_class_name is None and scenario.constructor_arguments:
+            raise ValueError("Constructor arguments yalnız method hedefinde kullanılabilir.")
+
         if (
             scenario.expected_exception is not None
             and not cls._is_valid_identifier(
@@ -262,6 +278,7 @@ class PytestGenerator:
         function_name: str,
         scenario: Scenario,
         test_name: str,
+        target_class_name: str | None,
     ) -> list[str]:
         """
         Tek bir Scenario için gerçek pytest fonksiyonu oluşturur.
@@ -295,10 +312,21 @@ class PytestGenerator:
             ),
         ]
 
-        function_call = self._create_function_call(
-            function_name=function_name,
-            keyword_arguments=scenario.keyword_arguments,
-        )
+        if target_class_name is None:
+            function_call = self._create_function_call(
+                function_name=function_name,
+                keyword_arguments=scenario.keyword_arguments,
+            )
+        else:
+            constructor_call = self._create_function_call(
+                function_name=target_class_name,
+                keyword_arguments=scenario.constructor_arguments,
+            )
+            code_lines.append(f"    target = {constructor_call}")
+            function_call = self._create_function_call(
+                function_name=f"target.{function_name}",
+                keyword_arguments=scenario.keyword_arguments,
+            )
 
         if scenario.expects_exception:
             code_lines.extend(
@@ -318,6 +346,19 @@ class PytestGenerator:
             )
 
         return code_lines
+
+    @classmethod
+    def _target_class_name(
+        cls,
+        scenarios: Sequence[Scenario],
+    ) -> str | None:
+        values = {scenario.target_class_name for scenario in scenarios}
+        if len(values) != 1:
+            raise ValueError("Senaryolar aynı callable target'ı kullanmalıdır.")
+        value = next(iter(values))
+        if value is not None and not cls._is_valid_identifier(value):
+            raise ValueError("Target class adı geçersizdir.")
+        return value
 
     @staticmethod
     def _create_function_call(

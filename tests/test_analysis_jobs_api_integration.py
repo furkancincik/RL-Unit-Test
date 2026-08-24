@@ -259,6 +259,58 @@ def inspect(custom_object):
     service.shutdown()
 
 
+def test_instance_method_result_uses_qualified_name_without_runtime_state(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    source = b"""\
+class Flag:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def label(self) -> str:
+        if self.enabled:
+            return "enabled"
+        return "disabled"
+"""
+    analysis = {
+        "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+        "trusted_execution_acknowledged": True,
+        "maximum_module_count": 1,
+        "maximum_function_count": 1,
+        "episode_count": 1,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30,
+        "function_pipeline_timeout_seconds": 90,
+        "greedy_minimization": True,
+        "strategy_comparison": False,
+    }
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("method.py", source, "text/x-python")},
+            data={"analysis": json.dumps(analysis)},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=120)
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    method = next(
+        item
+        for item in payload["modules"][0]["functions"]
+        if item["qualified_name"] == "Flag.label"
+    )
+    assert method["status"] == "COMPLETED"
+    serialized = json.dumps(payload)
+    assert '"self"' not in serialized
+    assert "constructor_arguments" not in serialized
+    assert "keyword_arguments" not in serialized
+    service.shutdown()
+
+
 def test_same_dynamic_configuration_is_coverage_deterministic(
     tmp_path: Path,
 ) -> None:

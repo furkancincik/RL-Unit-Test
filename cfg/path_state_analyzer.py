@@ -4,6 +4,8 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
+from analyzer.simple_instance_method import find_analysis_target
+
 from cfg.path_analyzer import ExecutionPath
 
 
@@ -450,20 +452,7 @@ class PathStateAnalyzer:
         tree: ast.Module,
         function_name: str,
     ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-        for node in tree.body:
-            if isinstance(
-                node,
-                (
-                    ast.FunctionDef,
-                    ast.AsyncFunctionDef,
-                ),
-            ):
-                if node.name == function_name:
-                    return node
-
-        raise ValueError(
-            f"Fonksiyon bulunamadı: {function_name}"
-        )
+        return find_analysis_target(tree, function_name)
 
     def _walk_statements(
         self,

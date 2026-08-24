@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import importlib
 import importlib.util
@@ -14,6 +15,10 @@ from types import ModuleType
 from typing import Any, Callable
 
 from analyzer.python_analyzer import PythonAnalyzer
+from analyzer.simple_instance_method import (
+    SimpleInstanceMethodSpec,
+    method_spec_for_target,
+)
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from cfg.data_flow_analyzer import DataFlowAnalyzer
 from cfg.path_analyzer import CFGPathAnalyzer
@@ -825,7 +830,8 @@ class RealRLTrainingService:
             (
                 candidate
                 for candidate in analysis_result.functions
-                if candidate.name == normalized_function_name
+                if self._discovered_target_name(candidate)
+                == normalized_function_name
             ),
             None,
         )
@@ -856,6 +862,17 @@ class RealRLTrainingService:
             PipelineStage.FUNCTION_DISCOVERY, stage_started
         )
 
+        method_spec = (
+            method_spec_for_target(
+                ast.parse(
+                    normalized_source_file.read_text(encoding="utf-8")
+                ),
+                normalized_function_name,
+            )
+            if getattr(function, "is_method", False) is True
+            else None
+        )
+
         stage_started = diagnostic.start_stage(
             PipelineStage.PATH_DISCOVERY
         )
@@ -875,8 +892,15 @@ class RealRLTrainingService:
             PipelineStage.PATH_DISCOVERY, stage_started
         )
 
-        parameter_names = self._extract_parameter_names(
-            function.parameters
+        parameter_names = (
+            method_spec.analysis_parameter_names
+            if method_spec is not None
+            else self._extract_parameter_names(function.parameters)
+        )
+        parameter_types = (
+            method_spec.analysis_parameter_types
+            if method_spec is not None
+            else function.parameter_types
         )
 
         stage_started = diagnostic.start_stage(
@@ -903,7 +927,7 @@ class RealRLTrainingService:
                 tuple(paths),
                 data_flow_result=data_flow_result,
                 path_states=path_states,
-                parameter_types=function.parameter_types,
+                parameter_types=parameter_types,
             )
         )
 
@@ -983,15 +1007,20 @@ class RealRLTrainingService:
             PipelineStage.SCENARIO_GENERATION
         )
         scenarios = self._scenario_generator.generate(
-            function_name=normalized_function_name,
+            function_name=function.name,
             paths=paths,
             scores=scores,
             parameter_names=parameter_names,
-            parameter_types=function.parameter_types,
+            parameter_types=parameter_types,
             candidate_values_by_path=(
                 candidate_values_by_path
             ),
         )
+        if method_spec is not None:
+            scenarios = [
+                self._bind_method_scenario(scenario, method_spec)
+                for scenario in scenarios
+            ]
 
         scenario_rejections = getattr(
             self._scenario_generator, "rejections", ()
@@ -1030,7 +1059,7 @@ class RealRLTrainingService:
         scenario_tuple = self._filter_executable_scenarios(
             source_file=normalized_source_file,
             module_path=normalized_module_path,
-            function_name=normalized_function_name,
+            function_name=function.name,
             scenarios=tuple(scenarios),
             import_root=normalized_import_root,
         )
@@ -1065,7 +1094,7 @@ class RealRLTrainingService:
         suite_transition = ScenarioSuiteCoverageTransition(
             source_file=normalized_source_file,
             module_path=normalized_module_path,
-            function_name=normalized_function_name,
+            function_name=function.name,
             output_directory=normalized_output_directory,
             function_start_line=function.line_number,
             function_end_line=function.end_line_number,
@@ -1120,7 +1149,7 @@ class RealRLTrainingService:
             minimization_result = self._scenario_minimization_service.minimize(
                 source_file=normalized_source_file,
                 module_path=normalized_module_path,
-                function_name=normalized_function_name,
+                function_name=function.name,
                 function_start_line=function.line_number,
                 function_end_line=function.end_line_number,
                 scenarios=scenario_tuple,
@@ -1224,7 +1253,7 @@ class RealRLTrainingService:
                 raise RuntimeError("Strategy comparison greedy baseline gerektirir.")
             self._strategy_comparison_service.write_pending(
                 source_file=normalized_source_file,
-                function_name=normalized_function_name,
+                function_name=function.name,
                 scenarios=scenario_tuple,
                 full_pool_coverage=baseline_coverage_result,
                 greedy_result=minimization_result,
@@ -1251,7 +1280,7 @@ class RealRLTrainingService:
                 )
                 self._strategy_comparison_service.write_pending(
                     source_file=normalized_source_file,
-                    function_name=normalized_function_name,
+                    function_name=function.name,
                     scenarios=scenario_tuple,
                     full_pool_coverage=baseline_coverage_result,
                     greedy_result=minimization_result,
@@ -1296,7 +1325,7 @@ class RealRLTrainingService:
             strategy_comparison_result = self._strategy_comparison_service.compare(
                 source_file=normalized_source_file,
                 module_path=normalized_module_path,
-                function_name=normalized_function_name,
+                function_name=function.name,
                 function_start_line=function.line_number,
                 function_end_line=function.end_line_number,
                 scenarios=scenario_tuple,
@@ -1321,7 +1350,7 @@ class RealRLTrainingService:
         report = self._report_formatter.format_session(
             result=session_result,
             statistics=statistics,
-            function_name=normalized_function_name,
+            function_name=function.name,
             coverage_result=final_coverage_result,
             reachability_result=reachability_result,
         )
@@ -1478,6 +1507,14 @@ class RealRLTrainingService:
         if import_root is not None:
             sys.path.insert(0, str(import_root))
         try:
+            target_classes = {
+                scenario.target_class_name for scenario in scenarios
+            }
+            if len(target_classes) != 1:
+                raise ValueError(
+                    "Concrete validation senaryoları aynı target'ı kullanmalıdır."
+                )
+            target_class_name = next(iter(target_classes))
             target_function = self._load_target_function(
                 source_file=source_file,
                 module_path=(
@@ -1485,7 +1522,7 @@ class RealRLTrainingService:
                     if import_root is not None and module_path is not None
                     else None
                 ),
-                function_name=function_name,
+                function_name=target_class_name or function_name,
             )
 
             executable_scenarios: list[Scenario] = []
@@ -1493,6 +1530,7 @@ class RealRLTrainingService:
                 if self._scenario_matches_execution(
                     target_function=target_function,
                     scenario=scenario,
+                    method_name=(function_name if target_class_name else None),
                 ):
                     executable_scenarios.append(scenario)
             return tuple(executable_scenarios)
@@ -1501,6 +1539,21 @@ class RealRLTrainingService:
                 sys.path[:] = previous_path
                 for imported_name in tuple(set(sys.modules) - previous_modules):
                     sys.modules.pop(imported_name, None)
+
+    @staticmethod
+    def _bind_method_scenario(
+        scenario: Scenario,
+        method_spec: SimpleInstanceMethodSpec,
+    ) -> Scenario:
+        constructor_arguments, method_arguments = method_spec.split_arguments(
+            scenario.keyword_arguments
+        )
+        return replace(
+            scenario,
+            keyword_arguments=method_arguments,
+            constructor_arguments=constructor_arguments,
+            target_class_name=method_spec.class_name,
+        )
 
     @staticmethod
     def _load_target_function(
@@ -1563,19 +1616,23 @@ class RealRLTrainingService:
         *,
         target_function: Callable[..., Any],
         scenario: Scenario,
+        method_name: str | None = None,
     ) -> bool:
         """
         Tek bir senaryonun gerçek çalışma sonucu ile beklenen
         davranışının uyuşup uyuşmadığını döndürür.
         """
-        keyword_arguments = copy.deepcopy(
-            scenario.keyword_argument_dict
-        )
+        keyword_arguments = copy.deepcopy(scenario.keyword_argument_dict)
 
         try:
-            actual_result = target_function(
-                **keyword_arguments
-            )
+            if method_name is None:
+                actual_result = target_function(**keyword_arguments)
+            else:
+                instance = target_function(
+                    **copy.deepcopy(dict(scenario.constructor_arguments))
+                )
+                method = getattr(instance, method_name)
+                actual_result = method(**keyword_arguments)
         except Exception as error:
             if scenario.expected_exception is None:
                 return False
@@ -1805,13 +1862,24 @@ class RealRLTrainingService:
                 "function_name boş olamaz."
             )
 
-        if not normalized_function_name.isidentifier():
+        target_parts = normalized_function_name.split(".")
+        if len(target_parts) not in {1, 2} or any(
+            not part.isidentifier() for part in target_parts
+        ):
             raise ValueError(
-                "Geçersiz Python fonksiyon adı: "
+                "Geçersiz Python fonksiyon adı veya method hedefi: "
                 f"{normalized_function_name}"
             )
 
         return normalized_function_name
+
+    @staticmethod
+    def _discovered_target_name(function: Any) -> str:
+        qualified_name = getattr(function, "qualified_name", None)
+        if isinstance(qualified_name, str) and qualified_name:
+            return qualified_name
+        name = getattr(function, "name", None)
+        return name if isinstance(name, str) else ""
 
     @staticmethod
     def _normalize_output_directory(

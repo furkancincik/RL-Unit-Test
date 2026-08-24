@@ -121,7 +121,7 @@ class SourceAnalysisOrchestrator:
 
         for ordinal, target in enumerate(selected_targets, start=1):
             function_output = self._function_output_directory(
-                normalized_output, target.name, ordinal
+                normalized_output, target.qualified_name, ordinal
             )
             if not target.is_supported:
                 function_results.append(
@@ -151,7 +151,7 @@ class SourceAnalysisOrchestrator:
             pipeline_result = service.run_with_diagnostics(
                 source_file=normalized_source,
                 module_path=normalized_module,
-                function_name=target.name,
+                function_name=target.qualified_name,
                 output_directory=function_output,
                 max_visits_per_node=max_visits_per_node,
                 episode_count=episode_count,
@@ -247,6 +247,11 @@ class SourceAnalysisOrchestrator:
             is_method=function.is_method,
             is_supported=function.is_supported,
             unsupported_reason=function.unsupported_reason,
+            class_name=function.class_name,
+            constructor_parameters=tuple(function.constructor_parameters),
+            constructor_parameter_types=tuple(
+                sorted(function.constructor_parameter_types.items())
+            ),
         )
 
     @staticmethod
@@ -254,8 +259,9 @@ class SourceAnalysisOrchestrator:
         targets: tuple[FunctionTarget, ...],
     ) -> tuple[FunctionTarget, ...]:
         supported_name_counts = {
-            target.name: sum(
-                candidate.is_supported and candidate.name == target.name
+            target.qualified_name: sum(
+                candidate.is_supported
+                and candidate.qualified_name == target.qualified_name
                 for candidate in targets
             )
             for target in targets
@@ -269,7 +275,10 @@ class SourceAnalysisOrchestrator:
                     "Duplicate top-level function names are ambiguous."
                 ),
             )
-            if target.is_supported and supported_name_counts[target.name] > 1
+            if (
+                target.is_supported
+                and supported_name_counts[target.qualified_name] > 1
+            )
             else target
             for target in targets
         )
@@ -289,7 +298,12 @@ class SourceAnalysisOrchestrator:
             return targets, FunctionSelectionMode.ALL
 
         assert function_name is not None
-        matching = tuple(target for target in targets if target.name == function_name)
+        matching = tuple(
+            target
+            for target in targets
+            if target.qualified_name == function_name
+            or target.name == function_name
+        )
         supported = tuple(target for target in matching if target.is_supported)
         if len(supported) == 1:
             return supported, FunctionSelectionMode.SINGLE
@@ -430,7 +444,10 @@ class SourceAnalysisOrchestrator:
         if function_name is not None:
             if not isinstance(function_name, str) or not function_name.strip():
                 raise SourceAnalysisValidationError("function_name boş olamaz.")
-            if not function_name.isidentifier():
+            if any(
+                not part.isidentifier()
+                for part in function_name.split(".")
+            ) or len(function_name.split(".")) not in {1, 2}:
                 raise SourceAnalysisValidationError("function_name geçersiz.")
         if all_functions and function_name is not None:
             raise SourceAnalysisValidationError(

@@ -56,6 +56,9 @@ class FunctionTarget:
     is_method: bool
     is_supported: bool
     unsupported_reason: str | None = None
+    class_name: str | None = None
+    constructor_parameters: tuple[str, ...] = ()
+    constructor_parameter_types: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.isidentifier():
@@ -84,6 +87,11 @@ class FunctionTarget:
             "is_method": self.is_method,
             "is_supported": self.is_supported,
             "unsupported_reason": self.unsupported_reason,
+            "class_name": self.class_name,
+            "constructor_parameters": list(self.constructor_parameters),
+            "constructor_parameter_types": dict(
+                self.constructor_parameter_types
+            ),
         }
 
 

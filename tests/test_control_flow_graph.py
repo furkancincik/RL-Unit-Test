@@ -786,6 +786,6 @@ def test_graph_discovery_preserves_lexical_source_order(
         "first",
         "outer",
         "nested",
-        "method",
+        "Handler.method",
         "last",
     ]

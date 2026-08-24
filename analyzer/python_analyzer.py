@@ -4,6 +4,8 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from analyzer.simple_instance_method import analyze_simple_instance_method
+
 
 @dataclass
 class FunctionInfo:
@@ -30,6 +32,9 @@ class FunctionInfo:
     is_method: bool = False
     is_supported: bool = True
     unsupported_reason: str | None = None
+    class_name: str | None = None
+    constructor_parameters: list[str] = field(default_factory=list)
+    constructor_parameter_types: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -153,12 +158,36 @@ class PythonAnalyzer:
             is_method = any(
                 isinstance(parent, ast.ClassDef) for parent in ancestry
             )
+            method_spec = None
+            method_reason = None
+            direct_parent = parents.get(node)
+            if is_method and isinstance(direct_parent, ast.ClassDef):
+                if not isinstance(parents.get(direct_parent), ast.Module):
+                    method_reason = "Only top-level classes are supported."
+                else:
+                    method_spec, method_reason = analyze_simple_instance_method(
+                        direct_parent,
+                        node,
+                    )
             unsupported_reason = self._unsupported_reason(
                 node=node,
-                direct_parent=parents.get(node),
+                direct_parent=direct_parent,
                 is_nested=is_nested,
                 is_method=is_method,
+                method_reason=method_reason,
             )
+            if method_spec is not None:
+                parameters = [
+                    parameter.name
+                    for parameter in method_spec.method_parameters
+                ]
+                parameter_types = {
+                    parameter.name: parameter.type_name
+                    for parameter in method_spec.method_parameters
+                }
+            elif self._is_normal_instance_method(node, is_method=is_method):
+                parameters = parameters[1:]
+                parameter_types.pop("self", None)
 
             functions.append(
                 FunctionInfo(
@@ -202,6 +231,29 @@ class PythonAnalyzer:
                     is_method=is_method,
                     is_supported=unsupported_reason is None,
                     unsupported_reason=unsupported_reason,
+                    class_name=(
+                        method_spec.class_name
+                        if method_spec is not None
+                        else direct_parent.name
+                        if isinstance(direct_parent, ast.ClassDef)
+                        else None
+                    ),
+                    constructor_parameters=(
+                        [
+                            parameter.name
+                            for parameter in method_spec.constructor_parameters
+                        ]
+                        if method_spec is not None
+                        else []
+                    ),
+                    constructor_parameter_types=(
+                        {
+                            parameter.name: parameter.type_name
+                            for parameter in method_spec.constructor_parameters
+                        }
+                        if method_spec is not None
+                        else {}
+                    ),
                 )
             )
 
@@ -241,13 +293,14 @@ class PythonAnalyzer:
         direct_parent: ast.AST | None,
         is_nested: bool,
         is_method: bool,
+        method_reason: str | None,
     ) -> str | None:
         if isinstance(node, ast.AsyncFunctionDef):
             return "Async functions are not supported by the production pipeline."
         if is_nested:
             return "Nested functions are not supported by the production pipeline."
         if is_method:
-            return "Class methods are not supported by the production pipeline."
+            return method_reason
         if not isinstance(direct_parent, ast.Module):
             return "Conditionally defined functions are not supported."
         if node.name.startswith("__") and node.name.endswith("__"):
@@ -289,6 +342,26 @@ class PythonAnalyzer:
             )
 
         return parameter_types
+
+    @staticmethod
+    def _is_normal_instance_method(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        is_method: bool,
+    ) -> bool:
+        if not is_method or not node.args.args:
+            return False
+        if node.args.args[0].arg != "self":
+            return False
+        decorator_names = {
+            decorator.id
+            if isinstance(decorator, ast.Name)
+            else decorator.attr
+            if isinstance(decorator, ast.Attribute)
+            else None
+            for decorator in node.decorator_list
+        }
+        return not decorator_names.intersection({"staticmethod", "classmethod"})
 
     @staticmethod
     def _count_typed_parameters(

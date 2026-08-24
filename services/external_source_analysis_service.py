@@ -364,7 +364,8 @@ class ExternalSourceAnalysisService:
                     replace(
                         candidate,
                         project_test_id=(
-                            f"{public_relative_path}::{candidate.function_name}::"
+                            f"{public_relative_path}::"
+                            f"{candidate.qualified_function_name}::"
                             f"{candidate.scenario.scenario_id}"
                         ),
                         relative_module_path=public_relative_path,

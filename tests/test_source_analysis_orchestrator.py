@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from analyzer.python_analyzer import PythonAnalyzer
 from models.pipeline_diagnostic_result import (
     PipelineDiagnosticResult,
     PipelineFunnelSnapshot,
@@ -34,6 +35,7 @@ def outer(value: int) -> int:
     return nested()
 
 class Handler:
+    @property
     def method(self, value: int) -> int:
         return value
 
@@ -517,7 +519,7 @@ def test_all_unsupported_functions_produce_explicit_results(
     source_file = tmp_path / "unsupported.py"
     source_file.write_text(
         "async def async_target():\n    return 1\n\n"
-        "class Handler:\n    def method(self):\n        return 1\n",
+        "class Handler:\n    @property\n    def method(self):\n        return 1\n",
         encoding="utf-8",
     )
 
@@ -554,4 +556,64 @@ def test_duplicate_top_level_names_are_not_run_ambiguously(
     assert all(
         item.skip_reason == "Duplicate top-level function names are ambiguous."
         for item in result.function_results
+    )
+
+
+def test_same_method_name_in_different_classes_uses_qualified_targets(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "qualified_methods.py"
+    source_file.write_text(
+        "class First:\n"
+        "    def classify(self, value: int) -> int:\n"
+        "        return value\n\n"
+        "class Second:\n"
+        "    def classify(self, value: int) -> int:\n"
+        "        return value + 1\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        qualified_name: _diagnostic(
+            source_file, qualified_name, PipelineRunStatus.COMPLETED
+        )
+        for qualified_name in ("First.classify", "Second.classify")
+    }
+
+    result = _orchestrator(outcomes, calls).run(
+        **_run_arguments(source_file, tmp_path / "output"),
+        function_name=None,
+        all_functions=True,
+    )
+
+    assert [call["function_name"] for call in calls] == [
+        "First.classify",
+        "Second.classify",
+    ]
+    assert [item.target.qualified_name for item in result.function_results] == [
+        "First.classify",
+        "Second.classify",
+    ]
+
+
+def test_unsupported_method_target_dict_excludes_implicit_self(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "unsupported_target.py"
+    source_file.write_text(
+        "class Target:\n"
+        "    @property\n"
+        "    def value(self) -> int:\n"
+        "        return 1\n",
+        encoding="utf-8",
+    )
+    function = PythonAnalyzer().analyze_file(source_file).functions[0]
+
+    payload = SourceAnalysisOrchestrator._to_target(function).to_dict()
+
+    assert payload["qualified_name"] == "Target.value"
+    assert payload["parameters"] == []
+    assert payload["is_supported"] is False
+    assert payload["unsupported_reason"] == (
+        "Decorated instance methods are unsupported."
     )

@@ -4,6 +4,11 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from analyzer.simple_instance_method import (
+    analyze_simple_instance_method,
+    normalized_method_node,
+)
+
 
 @dataclass
 class CFGNode:
@@ -78,6 +83,11 @@ class ControlFlowGraphBuilder:
         tree = ast.parse(source_code)
 
         graphs: list[ControlFlowGraph] = []
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
 
         function_nodes = sorted(
             (
@@ -91,19 +101,38 @@ class ControlFlowGraphBuilder:
             key=lambda node: (node.lineno, node.col_offset),
         )
         for node in function_nodes:
-            graphs.append(self._build_function_graph(node))
+            direct_parent = parents.get(node)
+            graph_name = node.name
+            analysis_node = node
+            if isinstance(direct_parent, ast.ClassDef):
+                graph_name = f"{direct_parent.name}.{node.name}"
+                spec = None
+                if isinstance(parents.get(direct_parent), ast.Module):
+                    spec, _ = analyze_simple_instance_method(
+                        direct_parent,
+                        node,
+                    )
+                if spec is not None:
+                    analysis_node = normalized_method_node(spec)
+            graphs.append(
+                self._build_function_graph(
+                    analysis_node,
+                    function_name=graph_name,
+                )
+            )
 
         return graphs
 
     def _build_function_graph(
         self,
         function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+        function_name: str | None = None,
     ) -> ControlFlowGraph:
         """Tek bir fonksiyon iÃ§in CFG oluÅŸturur."""
         self._node_counter = 0
         self._loop_context_stack = []
         self._graph = ControlFlowGraph(
-            function_name=function_node.name,
+            function_name=function_name or function_node.name,
         )
 
         start_node = self._create_node(

@@ -106,6 +106,8 @@ class Scenario:
     keyword_arguments: tuple[tuple[str, Any], ...] = ()
     expected_result: Any = None
     expected_exception: str | None = None
+    constructor_arguments: tuple[tuple[str, Any], ...] = ()
+    target_class_name: str | None = None
 
     @property
     def keyword_argument_dict(self) -> dict[str, Any]:

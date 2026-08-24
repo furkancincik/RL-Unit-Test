@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 
 import pytest
 
@@ -95,6 +96,32 @@ def test_generate_creates_real_function_call() -> None:
         "result = calculate_score(score=85)"
         in source_code
     )
+
+
+def test_generate_constructs_instance_and_calls_method() -> None:
+    generator = PytestGenerator()
+    scenario = create_scenario(
+        keyword_arguments=(("delta", 2),),
+        expected_result="high",
+    )
+    scenario = replace(
+        scenario,
+        constructor_arguments=(("value", 8),),
+        target_class_name="Counter",
+    )
+
+    source_code = generator.generate(
+        module_path="example.counter",
+        function_name="classify",
+        scenarios=[scenario],
+    )
+
+    assert "from example.counter import Counter" in source_code
+    assert "target = Counter(value=8)" in source_code
+    assert "result = target.classify(delta=2)" in source_code
+    assert "assert result == 'high'" in source_code
+    assert "self=" not in source_code
+    ast.parse(source_code)
 
 
 def test_generate_creates_expected_result_assertion() -> None:

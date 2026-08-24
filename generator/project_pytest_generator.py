@@ -22,9 +22,13 @@ class ProjectPytestGenerator:
         if any(value.scenario.expects_exception for value in values):
             lines.extend(("import pytest", ""))
         for index, candidate in enumerate(values, start=1):
+            imported_target = (
+                candidate.scenario.target_class_name
+                or candidate.function_name
+            )
             lines.append(
                 f"from {candidate.module_path} import "
-                f"{candidate.function_name} as _project_target_{index:04d}"
+                f"{imported_target} as _project_target_{index:04d}"
             )
         lines.extend(("", ""))
 
@@ -40,7 +44,18 @@ class ProjectPytestGenerator:
             arguments = ", ".join(
                 f"{name}={value!r}" for name, value in scenario.keyword_arguments
             )
-            call = f"_project_target_{index:04d}({arguments})"
+            if scenario.target_class_name is None:
+                call = f"_project_target_{index:04d}({arguments})"
+            else:
+                constructor_arguments = ", ".join(
+                    f"{name}={value!r}"
+                    for name, value in scenario.constructor_arguments
+                )
+                lines.append(
+                    f"    target = _project_target_{index:04d}"
+                    f"({constructor_arguments})"
+                )
+                call = f"target.{candidate.function_name}({arguments})"
             if scenario.expects_exception:
                 if scenario.expected_exception is None:
                     raise ValueError("Beklenen exception adı belirtilmelidir.")

@@ -47,6 +47,17 @@ def inspect(custom_object):
     return "present"
 """
 
+INSTANCE_METHOD_SOURCE = """\
+class Flag:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def label(self) -> str:
+        if self.enabled:
+            return "enabled"
+        return "disabled"
+"""
+
 
 def _dynamic_configuration(output_root: Path, **values: object) -> ExternalAnalysisConfiguration:
     return ExternalAnalysisConfiguration(
@@ -103,6 +114,57 @@ def test_real_uploaded_dynamic_analysis_uses_distinct_tool_workspace(tmp_path: P
     assert result.module_results[0].relative_path == "branch.py"
     for json_artifact in result.output_root.rglob("*.json"):
         assert "rl-unit-test-upload-" not in json_artifact.read_text(encoding="utf-8")
+
+
+def test_real_inline_dynamic_analysis_exposes_qualified_instance_method(
+    tmp_path: Path,
+) -> None:
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource(INSTANCE_METHOD_SOURCE),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(
+                tmp_path / "method_output",
+                run_greedy_baseline=True,
+            ),
+        )
+    )
+
+    module = result.module_results[0]
+    assert module.project_result is not None
+    method = next(
+        item
+        for item in module.project_result.function_results
+        if item.target.qualified_name == "Flag.label"
+    )
+    assert method.status.value == "COMPLETED"
+    assert method.scenario_pool_coverage is not None
+    assert method.scenario_pool_coverage.branch_coverage_percent == 100.0
+    assert all(
+        "self" not in target.parameters
+        for target in module.project_result.discovered_targets
+        if target.is_method
+    )
+    project_payload = json.loads(
+        module.project_result.report_path.read_text(encoding="utf-8")
+    )
+    assert all(
+        "self" not in target["parameters"]
+        for target in project_payload["discovered_functions"]
+        if target["is_method"]
+    )
+    assert result.project_coverage is not None
+    project_test_ids = (
+        *result.project_coverage.selected_project_test_ids,
+        *result.project_coverage.removed_project_test_ids,
+    )
+    assert project_test_ids
+    assert all("::Flag.label::" in value for value in project_test_ids)
+    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(payload)
+    assert '"qualified_name": "Flag.label"' in serialized
+    assert "keyword_arguments" not in serialized
+    assert "constructor_arguments" not in serialized
 
 
 def test_uploaded_generated_pytest_is_portable_with_public_import_name(

@@ -1691,6 +1691,14 @@ class PathInputGenerator:
                 ) from error
             normalized_operator = self._reverse_operator(operator)
 
+        elif isinstance(left, ast.BinOp) or isinstance(right, ast.BinOp):
+            # Güvenli affine ifadeler aynı path üzerinde daha sonra tek
+            # symbolic sahibi olan DerivedValueInputSynthesizer tarafından
+            # dış parametrelere geri yayılır. Burada literal constraint gibi
+            # ele alınmaları geçerli çok-parametreli affine yolları erkenden
+            # reddeder.
+            return
+
         else:
             raise ValueError(
                 "Koşul içinde doğrudan bir parametre "
