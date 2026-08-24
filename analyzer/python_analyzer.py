@@ -4,6 +4,7 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from analyzer.primitive_parameter_inference import infer_primitive_parameter_types
 from analyzer.simple_instance_method import analyze_simple_instance_method
 
 
@@ -333,13 +334,24 @@ class PythonAnalyzer:
         """
         parameter_types: dict[str, str] = {}
 
-        for argument in (*node.args.args, *node.args.kwonlyargs):
+        arguments = (*node.args.args, *node.args.kwonlyargs)
+        for argument in arguments:
             if argument.annotation is None:
                 continue
 
             parameter_types[argument.arg] = ast.unparse(
                 argument.annotation
             )
+
+        inference = infer_primitive_parameter_types(
+            node,
+            {
+                argument.arg
+                for argument in arguments
+                if argument.annotation is None
+            },
+        )
+        parameter_types.update(inference.inferred_types)
 
         return parameter_types
 

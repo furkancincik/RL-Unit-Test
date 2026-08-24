@@ -4,6 +4,11 @@ import ast
 import copy
 from dataclasses import dataclass
 
+from analyzer.primitive_parameter_inference import (
+    infer_primitive_parameter_types,
+    primitive_annotation_type,
+)
+
 
 _PRIMITIVE_TYPES = frozenset({"int", "float", "str", "bool"})
 _CONSTRUCTOR_PREFIX = "__constructor_"
@@ -289,20 +294,19 @@ def _parameters(
         if not arguments or arguments[0].arg != "self":
             return (), "Instance methods must declare self as the first parameter."
         arguments = arguments[1:]
-    defaults_by_name: dict[str, ast.expr] = {}
-    if node.args.defaults:
-        for argument, default in zip(
-            arguments[-len(node.args.defaults) :],
-            node.args.defaults,
-            strict=True,
-        ):
-            defaults_by_name[argument.arg] = default
+    inference = infer_primitive_parameter_types(
+        node,
+        {argument.arg for argument in arguments if argument.annotation is None},
+    )
     parameters: list[SimpleParameter] = []
     for argument in arguments:
-        type_name = _primitive_annotation(argument.annotation)
+        type_name = primitive_annotation_type(argument.annotation)
         if type_name is None:
-            type_name = _literal_type(defaults_by_name.get(argument.arg))
+            type_name = inference.type_for(argument.arg)
         if type_name not in _PRIMITIVE_TYPES:
+            rejection = inference.rejection_for(argument.arg)
+            if rejection is not None:
+                return (), f"Parameter {argument.arg!r} {rejection}"
             return (), f"Parameter {argument.arg!r} is not a supported primitive."
         parameters.append(SimpleParameter(argument.arg, type_name))
     return tuple(parameters), None
@@ -381,18 +385,6 @@ def _validate_method_state(
                 return "Only += and -= self state mutations are supported."
             if not _safe_mutation_value(node.value, parameter_names):
                 return "Self state mutation must use a literal or method parameter."
-    return None
-
-
-def _primitive_annotation(annotation: ast.expr | None) -> str | None:
-    if isinstance(annotation, ast.Name) and annotation.id in _PRIMITIVE_TYPES:
-        return annotation.id
-    return None
-
-
-def _literal_type(value: ast.expr | None) -> str | None:
-    if isinstance(value, ast.Constant) and type(value.value) in (int, float, str, bool):
-        return type(value.value).__name__
     return None
 
 

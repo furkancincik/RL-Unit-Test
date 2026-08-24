@@ -56,6 +56,54 @@ def test_real_multi_function_pipeline_isolates_controlled_failure(
     assert len({item.output_directory for item in result.function_results}) == 3
 
 
+def test_inferred_top_level_parameter_reaches_the_real_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = tmp_path / "renamed_numeric_module.py"
+    source_file.write_text(
+        "def categorize(signal):\n"
+        "    if signal < -7:\n"
+        "        return 'below-private-marker'\n"
+        "    return 'other-private-marker'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path="renamed_numeric_module",
+        function_name="categorize",
+        all_functions=False,
+        output_root=tmp_path / "numeric_output",
+        max_visits_per_node=2,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=42,
+        timeout_seconds=30.0,
+        run_greedy_baseline=True,
+    )
+
+    function_result = result.function_results[0]
+    assert function_result.status is FunctionRunStatus.COMPLETED
+    assert function_result.scenario_pool_coverage is not None
+    assert function_result.scenario_pool_coverage.line_coverage_percent == 100.0
+    assert function_result.scenario_pool_coverage.branch_coverage_percent == 100.0
+    assert function_result.minimization_result is not None
+    assert function_result.minimization_result.coverage_preserved is True
+    assert result.coverage_candidates
+    assert all(
+        type(candidate.scenario.keyword_argument_dict["signal"]) is int
+        for candidate in result.coverage_candidates
+    )
+    public_report = result.report_path.read_text(encoding="utf-8")
+    assert "def categorize" not in public_report
+    assert "private-marker" not in public_report
+    assert "keyword_arguments" not in public_report
+
+
 def test_safe_instance_method_runs_full_coverage_greedy_and_rl_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -119,3 +167,74 @@ def test_safe_instance_method_runs_full_coverage_greedy_and_rl_pipeline(
     assert "target = Counter(" in generated_tests
     assert "target.classify(" in generated_tests
     assert "self=" not in generated_tests
+
+
+def test_inferred_instance_parameters_run_pytest_coverage_greedy_and_rl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = tmp_path / "wallet_fixture.py"
+    source_file.write_text(
+        "class Wallet:\n"
+        "    def __init__(self, balance=0):\n"
+        "        self.balance = balance\n\n"
+        "    def withdraw(self, amount):\n"
+        "        if amount <= 0:\n"
+        "            return 'invalid'\n"
+        "        if amount > self.balance:\n"
+        "            return 'insufficient'\n"
+        "        self.balance -= amount\n"
+        "        return 'ok'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path="wallet_fixture",
+        function_name="Wallet.withdraw",
+        all_functions=False,
+        output_root=tmp_path / "wallet_output",
+        max_visits_per_node=3,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=42,
+        timeout_seconds=30.0,
+        run_greedy_baseline=True,
+    )
+
+    function_result = result.function_results[0]
+    assert function_result.status is FunctionRunStatus.COMPLETED
+    assert function_result.scenario_pool_coverage is not None
+    assert function_result.scenario_pool_coverage.line_coverage_percent > 0.0
+    assert function_result.scenario_pool_coverage.branch_coverage_percent > 0.0
+    assert function_result.scenario_pool_coverage.covered_lines
+    assert function_result.scenario_pool_coverage.covered_branches
+    assert function_result.minimization_result is not None
+    assert function_result.minimization_result.coverage_preserved is True
+    assert function_result.diagnostic is not None
+    assert function_result.diagnostic.funnel.rl_executed_test_count is not None
+    assert result.coverage_candidates
+    assert all(
+        "self" not in candidate.scenario.keyword_argument_dict
+        for candidate in result.coverage_candidates
+    )
+    assert all(
+        set(dict(candidate.scenario.constructor_arguments)) == {"balance"}
+        for candidate in result.coverage_candidates
+    )
+    generated_tests = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in function_result.output_directory.rglob("test_*.py")
+    )
+    assert "from wallet_fixture import Wallet" in generated_tests
+    assert "target = Wallet(" in generated_tests
+    assert "target.withdraw(" in generated_tests
+    assert "assert result ==" in generated_tests
+    assert "self=" not in generated_tests
+    report = result.report_path.read_text(encoding="utf-8")
+    assert "def withdraw" not in report
+    assert "keyword_arguments" not in report
+    assert "constructor_arguments" not in report
