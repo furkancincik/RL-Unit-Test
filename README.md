@@ -19,6 +19,32 @@ The project is being developed as a modular and extensible architecture suitable
 
 ---
 
+# Installation and Quick Start
+
+RL-Unit-Test analyzes Python source only. The final release candidate was validated with Python 3.14 on Windows in a clean virtual environment created outside the repository.
+
+```text
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-cache-dir -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
+```
+
+Start the interactive terminal workflow with:
+
+```text
+.\.venv\Scripts\python.exe main.py
+```
+
+Start the localhost Web UI and API with:
+
+```text
+.\.venv\Scripts\python.exe -m api.server
+```
+
+Open `http://127.0.0.1:8000/`. The browser supports separate inline-code, `.py` upload, and anonymous public-GitHub URL flows. Static discovery is the default. Trusted dynamic analysis executes the supplied Python code and therefore requires an explicit acknowledgement and a positive timeout; timeout is not a sandbox.
+
+---
+
 # Current Features
 
 ## Static Code Analysis
@@ -370,7 +396,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. The sprint did not repeat a public network clone because the prior verified public fixture contained no eligible Python module for a safe dynamic acceptance. Current regression: `1963 passed, 1 skipped in 271.13s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `1967 passed, 1 skipped in 299.12s`.
 
 ---
 
@@ -497,7 +523,21 @@ The result records discovered and selected modules; discovered, eligible, analyz
 
 Artifacts are persisted under `project_combined/` as the full generated pytest, minimized generated pytest, and machine-readable project coverage/minimization JSON. They are included in external analysis output, asynchronous API result/artifact contracts, terminal reporting, and the Web UI's separate Project Coverage section. Public JSON contains exact identities, aggregate counts, controlled status/failure metadata, and relative artifact paths, but no raw source, kwargs, expected/actual values, tracebacks, credentials, environment values, or absolute tool paths.
 
-The real acceptance set includes a two-module, three-function temporary package with a relative import and redundant loop-path candidates, plus all five functions in `datasets/sample_complex_code.py`. The multi-module full suite contained 6 tests and was reduced to 5 (16.67%) while preserving 100% line and branch coverage with `scope_complete=true`. The five-function sample full suite contained 39 tests and was reduced to 29 (25.64%); both suites reported 97.30% line and 96.67% branch coverage and identical 72-line/58-branch exact targets. All full and minimized pytest runs exited `0`. A function-limit acceptance preserves the completed subset while reporting incomplete scope instead of whole-project success. Day 40.2 remains responsible for final real-browser E2E, broader production hardening, and release reporting.
+Generated pytest artifacts contain tests, not the target source module. Place a downloaded test in the analyzed project's import root and run `python -m pytest <test_file.py> -q`. Keep a GitHub project's package layout unchanged. For inline analysis, save the source beside the test as `inline_source.py`. For uploads, use the safe module name shown in the result (for example, `upload_sample_code.py`) when placing the original source beside the downloaded test. The final portability acceptance copied generated tests outside the job output, reconstructed only this documented import root, and replayed the project full/minimized suites successfully.
+
+The real acceptance set includes a two-module, three-function temporary package with a relative import and redundant loop-path candidates, plus all five functions in `datasets/sample_complex_code.py`. The multi-module full suite contained 6 tests and was reduced to 5 (16.67%) while preserving 100% line and branch coverage with `scope_complete=true`. The five-function sample full suite contained 39 tests and was reduced to 29 (25.64%); both suites reported 97.30% line and 96.67% branch coverage and identical 72-line/58-branch exact targets. All full and minimized pytest runs exited `0`. A function-limit acceptance preserves the completed subset while reporting incomplete scope instead of whole-project success.
+
+## Final 40.2 Release Acceptance
+
+The final release-hardening pass used a clean `HEAD` archive outside the active repository, a new virtual environment, and a no-cache dependency install. It exposed and fixed three release blockers: the standard `httpx` package was missing, production `pytest`/`coverage` subprocess dependencies were absent, and the runtime `reports` package was excluded by `.gitignore`. Clean `pip check`, production imports, `api.app.create_app()`, guarded `main.py` import, pytest, and coverage smoke checks then passed.
+
+The in-app browser exercised the real localhost UI. Inline static discovery completed in 0.01 seconds with two discovered functions and no dynamic coverage. A small trusted dynamic job completed in 7.00 seconds and rendered full-pool, greedy, RL comparison, project coverage, exact preservation, and downloads. A real multipart upload of `sample_code.py` completed in 9.10 seconds with three scenarios and 100% function/project line and branch coverage; the original file hash remained unchanged. Mobile acceptance at 375×812 had no horizontal overflow, keyboard tab navigation followed the expected Inline → Upload → GitHub order, and the browser console remained free of warnings and errors.
+
+One anonymous static clone of `https://github.com/pallets/markupsafe` completed in 1.36 seconds at commit `b2e4d9c7687be25695fffbe93a37622302b24fb1`, discovered five Python modules and six top-level functions, requested no credentials, and cleaned its tool-owned workspace. Deterministic tests retain `NO_PYTHON_FILES` as a non-fatal partial result for non-Python repositories. Real multi-module, relative-import, function-limit, and partial-scope acceptances preserve analyzed-scope measurements while reporting `scope_complete=false` when appropriate.
+
+The final `sample_complex_code.py` run completed all five functions in 139.60 seconds. Combined project minimization itself took 2.05 seconds: 39 full tests became 29 tests (25.64% reduction), with 97.30% line coverage, 96.67% branch coverage, identical 72-line/58-branch exact targets, and successful full/minimized pytest exit codes. Replayed download-root full/minimized artifacts executed 68 tests successfully. The heavier ultracomplex and `analyze_transactions` experiments were intentionally not repeated; their earlier bounded checkpoints remain the documented evidence.
+
+Server lifecycle acceptance confirmed import safety, localhost-only binding, all nine OpenAPI operations, static assets, `/docs`, `/redoc`, and graceful application shutdown after a Windows console break with no remaining port-8000 listener. A real two-second pipeline timeout produced a `TIMED_OUT` partial snapshot, running cancellation returned `409`, and the next job completed normally. Authentication, rate limiting, and sandboxing are not part of this local developer-tool release.
 
 ---
 
@@ -851,10 +891,10 @@ Latest full regression run:
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,963 |
+| Passed | 1,967 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 271.13s |
+| Duration | 299.12s |
 
 ---
 
@@ -871,9 +911,11 @@ RL-Unit-Test
 ├── services
 ├── api
 ├── web
+├── reports
 ├── tests
 ├── output
 ├── datasets
+├── requirements.txt
 └── main.py
 ```
 
@@ -966,6 +1008,11 @@ RL-Unit-Test
 - Project-Level Greedy Set Cover and Backward Redundancy Elimination
 - Full/Minimized Combined Pytest Exact Replay Verification
 - Project Coverage JSON, API, Artifact, Terminal, and Web UI Integration
+- Clean No-Cache Release Installation and Import Smoke
+- Portable Inline/Upload Generated-Pytest Module Names
+- Download-Root Artifact Replay Verification
+- Real Localhost Browser, Mobile, Keyboard, and Console Acceptance
+- Final Server Lifecycle, Timeout Recovery, and Cleanup Acceptance
 
 ---
 
@@ -980,7 +1027,6 @@ RL-Unit-Test
 - Project-Wide Orchestration Deadline
 - Final `analyze_transactions` Coverage Measurement
 - External Analysis Performance and Project-Wide Deadline
-- Day 40.2 Final Browser E2E, Production Hardening, and Release Reporting
 
 ---
 
@@ -1010,7 +1056,8 @@ RL-Unit-Test
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
 - A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
-- The FastAPI job backend and local Web UI are complete, but authentication, rate limiting, and final browser hardening are not. The terminal workflow remains the only interface for user-owned local project directories.
+- The FastAPI job backend and local Web UI completed final localhost browser hardening, but authentication and rate limiting are not implemented. The terminal workflow remains the only interface for user-owned local project directories.
+- Job records are held in the application process memory. Restarting the API server does not restore previous job states; even when artifact files remain on disk, access through the old job endpoint is not guaranteed because the new process does not know the previous opaque job identifiers.
 
 ---
 
