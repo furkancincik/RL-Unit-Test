@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from analyzer.primitive_parameter_inference import infer_primitive_parameter_types
+from analyzer.python_source_reader import read_python_source
 from analyzer.safe_custom_object import analyze_safe_custom_object_target
 from analyzer.simple_instance_method import analyze_simple_instance_method
 
@@ -64,9 +65,7 @@ class PythonAnalyzer:
         path = Path(file_path)
         self._validate_file(path)
 
-        source_code = path.read_text(
-            encoding="utf-8",
-        )
+        source_code = read_python_source(path).text
         tree = ast.parse(source_code)
         functions = self._extract_functions(tree)
 

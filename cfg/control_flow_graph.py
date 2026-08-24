@@ -4,6 +4,7 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from analyzer.python_source_reader import read_python_source
 from analyzer.simple_instance_method import (
     analyze_simple_instance_method,
     normalized_method_node,
@@ -83,7 +84,7 @@ class ControlFlowGraphBuilder:
 
         self._validate_file(path)
 
-        source_code = path.read_text(encoding="utf-8")
+        source_code = read_python_source(path).text
         tree = ast.parse(source_code)
 
         graphs: list[ControlFlowGraph] = []

@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Any, Callable
 
 from analyzer.python_analyzer import PythonAnalyzer
+from analyzer.python_source_reader import read_python_source
 from analyzer.safe_custom_object import (
     SafeObjectConstructionBlueprint,
     analyze_safe_custom_object_target,
@@ -867,9 +868,7 @@ class RealRLTrainingService:
             PipelineStage.FUNCTION_DISCOVERY, stage_started
         )
 
-        source_tree = ast.parse(
-            normalized_source_file.read_text(encoding="utf-8")
-        )
+        source_tree = ast.parse(read_python_source(normalized_source_file).text)
         method_spec = (
             method_spec_for_target(
                 source_tree,

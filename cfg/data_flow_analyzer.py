@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from analyzer.python_source_reader import read_python_source
 from analyzer.simple_instance_method import find_analysis_target
 
 
@@ -129,9 +130,7 @@ class DataFlowAnalyzer:
                 "function_name boş olamaz."
             )
 
-        source = source_file.read_text(
-            encoding="utf-8"
-        )
+        source = read_python_source(source_file).text
 
         return self.analyze_source(
             source=source,

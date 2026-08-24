@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import codecs
 import subprocess
 import sys
 from pathlib import Path
@@ -71,6 +72,38 @@ def test_real_inline_static_job_is_safe_and_pollable(tmp_path: Path) -> None:
     assert tuple(sys.path) == before_path
     assert artifacts.status_code == 200
     assert all(item["content_type"] != "text/x-python" for item in artifacts.json()["artifacts"])
+    service.shutdown()
+
+
+def test_real_upload_static_accepts_utf8_bom_without_public_source_leak(
+    tmp_path: Path,
+) -> None:
+    source = (
+        codecs.BOM_UTF8
+        + b"def api_bom_target(value: int) -> int:\n    return value + 4\n"
+    )
+    service = _service(tmp_path)
+
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("api_bom.py", source, "text/x-python")},
+            data={"analysis": "{}"},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=30)
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["status"] == "COMPLETED"
+    assert payload["modules"][0]["discovered_function_names"] == [
+        "api_bom_target"
+    ]
+    serialized = json.dumps(payload)
+    assert "def api_bom_target" not in serialized
+    assert source.hex() not in serialized
     service.shutdown()
 
 

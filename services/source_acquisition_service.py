@@ -10,13 +10,16 @@ import subprocess
 import tempfile
 import threading
 import time
-import tokenize
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from analyzer.python_source_reader import (
+    PythonSourceEncodingError,
+    read_python_source,
+)
 from models.source_acquisition_result import (
     DiscoveredPythonModule,
     ResolvedSourceTarget,
@@ -634,11 +637,10 @@ class SourceAcquisitionService:
         source: str | None = None
         encoding: str | None = None
         try:
-            with path.open("rb") as stream:
-                encoding, _ = tokenize.detect_encoding(stream.readline)
-            with tokenize.open(path) as stream:
-                source = stream.read()
-        except (LookupError, UnicodeError, SyntaxError):
+            decoded = read_python_source(path)
+            encoding = decoded.encoding
+            source = decoded.text
+        except PythonSourceEncodingError:
             issues.append(self._issue(SourceIssueCategory.UNSUPPORTED_ENCODING, "Python source encoding çözümlenemedi.", relative))
         syntax_valid = False
         function_count = 0

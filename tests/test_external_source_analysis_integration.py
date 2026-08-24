@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import codecs
 import re
 import shutil
 import subprocess
@@ -114,6 +115,27 @@ def test_real_uploaded_dynamic_analysis_uses_distinct_tool_workspace(tmp_path: P
     assert result.module_results[0].relative_path == "branch.py"
     for json_artifact in result.output_root.rglob("*.json"):
         assert "rl-unit-test-upload-" not in json_artifact.read_text(encoding="utf-8")
+
+
+def test_real_uploaded_bom_dynamic_analysis_completes_without_internal_error(
+    tmp_path: Path,
+) -> None:
+    source = codecs.BOM_UTF8 + BRANCH_SOURCE.encode("utf-8")
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            UploadedPythonFile("bom_branch.py", source),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(tmp_path / "bom_output"),
+        )
+    )
+
+    assert result.status in {
+        ExternalAnalysisStatus.COMPLETED,
+        ExternalAnalysisStatus.PARTIAL,
+    }
+    assert "INTERNAL_WORKER_ERROR" not in result.issues
+    assert result.module_results[0].project_result is not None
+    assert result.module_results[0].project_result.function_results
 
 
 def test_real_inline_dynamic_analysis_exposes_qualified_instance_method(

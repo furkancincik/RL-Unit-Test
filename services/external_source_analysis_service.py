@@ -9,12 +9,15 @@ import shutil
 import stat
 import tempfile
 import time
-import tokenize
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from analyzer.python_source_reader import (
+    PythonSourceEncodingError,
+    decode_python_source_bytes,
+)
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalExecutionPolicy,
@@ -650,10 +653,8 @@ class ExternalSourceAnalysisService:
             if len(source.file_bytes) > limit:
                 return "SOURCE_LIMIT_EXCEEDED"
             try:
-                readline = iter(source.file_bytes.splitlines(keepends=True)).__next__
-                encoding, _ = tokenize.detect_encoding(readline)
-                decoded = source.file_bytes.decode(encoding)
-            except (LookupError, UnicodeError, SyntaxError, StopIteration):
+                decoded = decode_python_source_bytes(source.file_bytes).text
+            except PythonSourceEncodingError:
                 return "UNSUPPORTED_ENCODING"
             if ExternalSourceAnalysisService._has_invalid_control(decoded):
                 return "INVALID_CONTROL_CHARACTER"
