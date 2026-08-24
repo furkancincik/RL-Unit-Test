@@ -405,6 +405,8 @@ Public GitHub HTTPS URL ---+       +--> Resource and path limits
 
 Local discovery supports top-level modules, regular packages, normalized package `__init__.py` paths, and conventional `src/` layouts. Ambiguous or non-importable layouts are reported instead of guessed. PEP 263 encoding detection and per-file AST parsing classify unsupported encodings and syntax errors without allowing one broken file to hide valid modules. Test discovery is controlled by the explicit `include_tests` request option.
 
+All file-backed production AST entry points use one PEP 263 source-reading policy. Plain UTF-8, UTF-8 BOM, and valid encoding cookies therefore have the same decoded semantics in acquisition, direct analysis, CFG construction, external upload analysis, and the dynamic pipeline. Upload bytes use Python's detected encoding; invalid or conflicting encodings are rejected through controlled diagnostics. Source files are never rewritten, and static analysis does not execute the decoded code.
+
 Ignored directories come from one general policy covering Git metadata, virtual environments, caches, build outputs, installed dependencies, `node_modules`, and generated output. Discovery does not follow symlinks, junctions, or reparse points, and every candidate is checked against the resolved project root. Configurable limits cover clone time, repository bytes, Python file count, single-file bytes, total Python bytes, and path depth.
 
 Public GitHub acquisition uses a unique tool-owned system-temp workspace and a shallow, single-branch, no-tags clone. Git runs with `shell=False`, credential prompting and helpers disabled, process-local Git configuration, disabled LFS smudge, no submodule recursion, and a disabled hook path. Clone output is discarded; only the validated 40-character commit SHA is captured. Failed or timed-out clones clean their partial workspace, while local user-owned sources are never cleanup targets. No dependency manifest, setup script, package manager, or repository code is executed.
@@ -435,7 +437,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `2057 passed, 1 skipped in 378.05s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `2112 passed, 1 skipped in 412.97s`.
 
 ---
 
@@ -928,7 +930,7 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2098 passed, 1 skipped in 412.24s`
+`2112 passed, 1 skipped in 412.97s`
 
 | Test result | Status |
 | --- | ---: |
