@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import keyword
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -105,7 +107,7 @@ class ExternalSourceAnalysisService:
                 temporary_workspace = Path(
                     tempfile.mkdtemp(prefix=_INLINE_WORKSPACE_PREFIX)
                 ).resolve()
-                source_file = temporary_workspace / f"source_{uuid.uuid4().hex}.py"
+                source_file = temporary_workspace / "inline_source.py"
                 source_file.write_text(source.source_text, encoding="utf-8")
                 source_request = SourceAcquisitionRequest(
                     source_kind=SourceTargetKind.LOCAL_FILE,
@@ -116,7 +118,9 @@ class ExternalSourceAnalysisService:
                 temporary_workspace = Path(
                     tempfile.mkdtemp(prefix=_UPLOAD_WORKSPACE_PREFIX)
                 ).resolve()
-                source_file = temporary_workspace / f"source_{uuid.uuid4().hex}.py"
+                source_file = temporary_workspace / (
+                    f"{self._portable_module_name(source)}.py"
+                )
                 source_file.write_bytes(source.file_bytes)
                 source_request = SourceAcquisitionRequest(
                     source_kind=SourceTargetKind.LOCAL_FILE,
@@ -326,11 +330,12 @@ class ExternalSourceAnalysisService:
             ]
         elif isinstance(request.source, UploadedPythonFile):
             public_name = Path(request.source.original_filename).name
+            portable_module_name = self._portable_module_name(request.source)
             results = [
                 replace(
                     item,
                     relative_path=public_name,
-                    module_name=Path(public_name).stem,
+                    module_name=portable_module_name,
                 )
                 for item in results
             ]
@@ -748,8 +753,24 @@ class ExternalSourceAnalysisService:
         if isinstance(request.source, InlinePythonSource):
             return "inline_source"
         if isinstance(request.source, UploadedPythonFile):
-            return Path(request.source.original_filename).stem
+            return ExternalSourceAnalysisService._portable_module_name(
+                request.source
+            )
         return module.module_path or "unsupported_module"
+
+    @staticmethod
+    def _portable_module_name(source: UploadedPythonFile) -> str:
+        stem = Path(source.original_filename).stem
+        normalized = re.sub(r"\W", "_", stem, flags=re.UNICODE)
+        if not normalized:
+            normalized = "source"
+        if not normalized.startswith("upload_"):
+            normalized = f"upload_{normalized}"
+        if not normalized.isidentifier() or keyword.iskeyword(normalized):
+            raise ExternalSourceAnalysisValidationError(
+                "Upload filename güvenli Python module adına dönüştürülemedi."
+            )
+        return normalized
 
     @staticmethod
     def _sanitize_json_artifacts(

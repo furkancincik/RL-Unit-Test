@@ -1,4 +1,6 @@
 fastapi==0.141.1
-httpx2==2.12.0
+httpx==0.28.1
 python-multipart==0.0.32
 uvicorn==0.52.4
+pytest==9.1.1
+coverage==7.15.2

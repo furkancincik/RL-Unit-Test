@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -94,6 +96,46 @@ def test_real_uploaded_dynamic_analysis_uses_distinct_tool_workspace(tmp_path: P
     assert result.module_results[0].relative_path == "branch.py"
     for json_artifact in result.output_root.rglob("*.json"):
         assert "rl-unit-test-upload-" not in json_artifact.read_text(encoding="utf-8")
+
+
+def test_uploaded_generated_pytest_is_portable_with_public_import_name(
+    tmp_path: Path,
+) -> None:
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            UploadedPythonFile("branch-file.py", BRANCH_SOURCE.encode("utf-8")),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(
+                tmp_path / "upload_output",
+                run_greedy_baseline=True,
+            ),
+        )
+    )
+    project_coverage = result.project_coverage
+    assert project_coverage is not None
+    assert result.module_results[0].module_name == "upload_branch_file"
+
+    downloaded = tmp_path / "downloaded"
+    downloaded.mkdir()
+    source_file = downloaded / "upload_branch_file.py"
+    source_file.write_text(BRANCH_SOURCE, encoding="utf-8")
+    test_file = downloaded / project_coverage.full_test_file.name
+    shutil.copy2(project_coverage.full_test_file, test_file)
+    generated = test_file.read_text(encoding="utf-8")
+
+    assert "from upload_branch_file import classify" in generated
+    assert re.search(r"source_[0-9a-f]{32}", generated) is None
+    completed = subprocess.run(
+        (sys.executable, "-m", "pytest", test_file.name, "-q"),
+        cwd=downloaded,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=30.0,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_real_local_package_import_uses_subprocess_root_only(tmp_path: Path) -> None:

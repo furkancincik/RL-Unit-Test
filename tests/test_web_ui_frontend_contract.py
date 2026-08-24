@@ -123,3 +123,11 @@ def test_project_coverage_has_a_distinct_exact_scope_section() -> None:
     assert '"Combined pytest indir"' in script
     assert '"Minimized pytest indir"' in script
     assert '"Project JSON indir"' in script
+
+
+def test_artifact_section_explains_generated_pytest_import_root_contract() -> None:
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    assert "Generated pytest hedef kaynak modülünü içermez" in markup
+    assert "python -m pytest" in markup
+    assert "import root" in markup
