@@ -74,6 +74,30 @@ def test_real_inline_static_job_is_safe_and_pollable(tmp_path: Path) -> None:
     service.shutdown()
 
 
+def test_real_inline_static_accepts_nonblank_sources_without_functions(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    sources = ("# comment-only Python source\n", "answer = 42\n")
+
+    with TestClient(create_app(job_service=service)) as client:
+        for source in sources:
+            submitted = client.post(
+                "/api/v1/jobs/inline",
+                json={"source_code": source},
+            )
+            assert submitted.status_code == 202
+            job_id = submitted.json()["job_id"]
+            service.wait(job_id, timeout=30)
+            result = client.get(f"/api/v1/jobs/{job_id}/result")
+            assert result.status_code == 200
+            assert result.json()["status"] == "COMPLETED"
+            assert result.json()["discovered_function_count"] == 0
+            assert source not in json.dumps(result.json())
+
+    service.shutdown()
+
+
 def test_real_upload_trusted_dynamic_runs_coverage_greedy_and_comparison(
     tmp_path: Path,
 ) -> None:

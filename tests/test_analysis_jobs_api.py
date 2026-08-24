@@ -79,6 +79,58 @@ def test_inline_submission_defaults_to_static_and_result_is_polled(tmp_path: Pat
     service.shutdown()
 
 
+@pytest.mark.parametrize(
+    "source_code, analysis",
+    [
+        ("", {}),
+        (" \t\r\n", {}),
+        (
+            " \n\t ",
+            {
+                "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+                "trusted_execution_acknowledged": True,
+                "function_pipeline_timeout_seconds": 30,
+            },
+        ),
+    ],
+)
+def test_blank_inline_source_is_rejected_before_job_creation(
+    tmp_path: Path,
+    source_code: str,
+    analysis: dict[str, object],
+) -> None:
+    client, service, runner = _client(tmp_path)
+    capacity_before = service.capacity()
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": source_code, "analysis": analysis},
+        )
+
+    assert response.status_code == 422
+    assert service.capacity() == capacity_before
+    runner.run.assert_not_called()
+    for detail in response.json()["detail"]:
+        if "source_code" in detail.get("loc", []):
+            assert "input" not in detail
+    service.shutdown()
+
+
+def test_inline_validation_preserves_nonblank_source_content(tmp_path: Path) -> None:
+    client, service, runner = _client(tmp_path)
+    source = "\n# leading content\ndef target():\n    return 1\n\n"
+
+    with client:
+        response = client.post("/api/v1/jobs/inline", json={"source_code": source})
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    request = runner.run.call_args.args[0]
+    assert request.source.source_text == source
+    service.shutdown()
+
+
 def test_trusted_dynamic_requires_acknowledgement_and_timeout(tmp_path: Path) -> None:
     client, service, _ = _client(tmp_path)
     with client:

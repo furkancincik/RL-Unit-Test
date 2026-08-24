@@ -629,6 +629,40 @@ function renderFunction(functionResult) {
   return card;
 }
 
+function renderStaticFunction(qualifiedName) {
+  const card = createNode("article", "function-card");
+  const title = createNode("div", "function-title");
+  title.append(
+    createNode("h4", "", qualifiedName),
+    createNode("span", "status-badge", "STATIC_ONLY"),
+  );
+  title.lastChild.dataset.status = "STATIC_ONLY";
+  card.append(title);
+
+  const metrics = createNode("dl", "mini-metrics");
+  appendMetric(metrics, "Scenario pool", measured(null));
+  appendMetric(metrics, "Concrete kabul", measured(null));
+  appendMetric(metrics, "Concrete red", measured(null));
+  appendMetric(metrics, "RL test", measured(null));
+  appendMetric(metrics, "Q-table state", measured(null));
+  appendMetric(metrics, "Greedy seçilen test", measured(null));
+  appendMetric(metrics, "RL seçilen test", measured(null));
+  appendMetric(metrics, "Reduction", measured(null));
+  appendMetric(metrics, "Strategy winner", measured(null));
+  appendMetric(metrics, "Exact coverage preservation", measured(null));
+  card.append(metrics);
+
+  const coverage = createNode("section", "coverage-strategy");
+  coverage.append(createNode("h5", "", "Function Coverage"));
+  renderCoverage(coverage, "Function line coverage", null);
+  renderCoverage(coverage, "Function branch coverage", null);
+  card.append(
+    coverage,
+    createNode("p", "empty-state", "Dinamik olarak çalıştırılmadı"),
+  );
+  return card;
+}
+
 function renderModules(modules) {
   const container = byId("module-results");
   container.replaceChildren();
@@ -660,12 +694,7 @@ function renderModules(modules) {
       if (inventory.length > 0) {
         functions.append(createNode("h4", "inventory-heading", "Statik fonksiyon envanteri"));
         for (const qualifiedName of inventory) {
-          const item = createNode("article", "function-card");
-          item.append(
-            createNode("h4", "", qualifiedName),
-            createNode("p", "empty-state", "Dinamik olarak çalıştırılmadı"),
-          );
-          functions.append(item);
+          functions.append(renderStaticFunction(qualifiedName));
         }
       } else {
         functions.append(createNode("p", "empty-state", "Bu modül için dinamik fonksiyon metriği yok."));
@@ -683,7 +712,10 @@ function renderProjectCoverage(projectCoverage) {
   if (!hasMeasurement) {
     byId("project-coverage-status").textContent = "Ölçülmedi";
     byId("project-coverage").textContent = "Dinamik analiz yapılmadı";
-    byId("project-coverage-bars").replaceChildren();
+    const bars = byId("project-coverage-bars");
+    bars.replaceChildren();
+    renderCoverage(bars, "Project line coverage", null);
+    renderCoverage(bars, "Project branch coverage", null);
     byId("project-coverage-metrics").replaceChildren();
     byId("project-coverage-scope").textContent =
       "Whole repository coverage: Ölçülmedi";

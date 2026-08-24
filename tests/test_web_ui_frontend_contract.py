@@ -21,12 +21,15 @@ def test_source_kinds_use_distinct_api_endpoints() -> None:
 
 def test_submission_guards_and_polling_lifecycle_are_explicit() -> None:
     script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
 
     assert "submitInFlight" in script
     assert "if (state.submitInFlight)" in script
     assert "trustedAcknowledgement" in script
     assert "if (!trustedAcknowledgement.checked)" in script
     assert "if (!sourceCode.trim())" in script
+    assert 'id="inline-source"' in markup
+    assert "required" in markup.split('id="inline-source"', 1)[1].split(">", 1)[0]
     assert '.endsWith(".py")' in script
     assert "if (!repositoryUrl)" in script
     assert "stopPolling" in script
@@ -97,6 +100,38 @@ def test_static_inventory_is_rendered_without_fake_execution_results() -> None:
     assert "moduleResult.discovered_function_names" in script
     assert '"Statik fonksiyon envanteri"' in script
     assert '"Dinamik olarak çalıştırılmadı"' in script
+    assert "function renderStaticFunction" in script
+    for label in (
+        "Scenario pool",
+        "Concrete kabul",
+        "Concrete red",
+        "RL test",
+        "Q-table state",
+        "Function line coverage",
+        "Function branch coverage",
+        "Greedy seçilen test",
+        "RL seçilen test",
+        "Reduction",
+        "Strategy winner",
+        "Exact coverage preservation",
+        "Project line coverage",
+        "Project branch coverage",
+    ):
+        assert f'"{label}"' in script
+    assert "renderStaticFunction(qualifiedName)" in script
+
+
+def test_dynamic_result_rendering_keeps_backend_numeric_metrics() -> None:
+    script = _script()
+
+    assert 'measured(functionResult.scenario_count)' in script
+    assert 'measured(functionResult.concrete_accepted_count)' in script
+    assert 'measured(functionResult.concrete_rejected_count)' in script
+    assert 'measured(functionResult.rl_test_count)' in script
+    assert 'measured(functionResult.q_table_state_count)' in script
+    assert 'measured(functionResult.greedy_selected_count)' in script
+    assert 'measured(functionResult.rl_selected_count)' in script
+    assert 'measured(functionResult.strategy_winner)' in script
 
 
 def test_project_coverage_has_a_distinct_exact_scope_section() -> None:

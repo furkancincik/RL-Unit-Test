@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.requests import Request
@@ -60,6 +62,20 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.analysis_job_service = service
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_request_validation_error(
+        _: Request, error: RequestValidationError
+    ) -> JSONResponse:
+        details: list[dict[str, object]] = []
+        for item in error.errors():
+            detail = {
+                key: item[key]
+                for key in ("type", "loc", "msg")
+                if key in item
+            }
+            details.append(detail)
+        return JSONResponse(status_code=422, content={"detail": details})
 
     @app.middleware("http")
     async def add_security_headers(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from models.analysis_job_result import AnalysisJobStatus
 from models.external_source_analysis_result import (
@@ -63,6 +63,13 @@ class InlineJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_code: str = Field(min_length=1, description="Public response'a geri yazılmaz.")
     analysis: AnalysisOptionsRequest = Field(default_factory=AnalysisOptionsRequest)
+
+    @field_validator("source_code")
+    @classmethod
+    def validate_nonblank_source(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Inline Python source boş bırakılamaz.")
+        return value
 
 
 class GitHubJobRequest(BaseModel):
