@@ -90,7 +90,11 @@ Each immutable internal construction blueprint has a deterministic SHA-256 finge
 
 Object synthesis requires an explicit local class annotation. Annotation-free, imported, union/generic, recursive, complex-constructor, nested-object, and arbitrary object-graph inputs remain controlled unsupported targets. Blueprint data, module identity, constructor values, object state, keyword arguments, and expected/actual runtime values are not serialized into public project, API, or Web results.
 
-Qualified method targets are supported by the production orchestrator and all-functions workflows. The current single-target command-line and interactive selectors still accept only a plain function identifier, so direct `ClassName.method_name` selection through those CLI entry points remains outside the supported selection contract.
+## Qualified Analysis Target Selection
+
+CLI, interactive terminal, API, and Web selectors accept an exact top-level `FunctionName` or simple instance-method `ClassName.method_name`. Multi-module requests bind every selected target to a validated canonical dotted module identity, so equal qualified names in different modules remain distinct. Upload selectors derive that identity through the same portable filename policy used by external analysis; for example, `my-file.py` maps to `upload_my_file` without exposing an absolute or temporary path.
+
+`ALL_ELIGIBLE_WITH_LIMIT` preserves the default deterministic discovery order and applies the configured function limit. `EXPLICIT_QUALIFIED_TARGETS` runs only exact selected targets. Eligible targets excluded by explicit selection are reported as `SKIPPED_SELECTION`, targets beyond the active limit as `SKIPPED_LIMIT`, and unsupported targets as `UNSUPPORTED`. An explicit selection intentionally makes project coverage scope incomplete (`scope_complete=false`), so its measured coverage is not presented as whole-project coverage. Malformed selectors are rejected during request validation, while a well-formed but unknown selector produces the controlled `UNKNOWN_TARGET_SELECTION` result.
 
 ---
 
@@ -437,7 +441,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `2112 passed, 1 skipped in 412.97s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `2177 passed, 1 skipped in 432.34s`.
 
 ---
 
@@ -930,14 +934,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2112 passed, 1 skipped in 412.97s`
+`2177 passed, 1 skipped in 432.34s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,098 |
+| Passed | 2,177 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 412.24s |
+| Duration | 432.34s |
 
 ---
 
