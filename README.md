@@ -59,6 +59,19 @@ Open `http://127.0.0.1:8000/`. The browser supports separate inline-code, `.py` 
 
 ---
 
+## Simple Instance Method Analysis
+
+- Top-Level Simple Instance Methods with Qualified `ClassName.method_name` Targets
+- Primitive Constructor and Method Parameters (`int`, `float`, `str`, and `bool`)
+- Simple `self.attr` State Initialization, Conditions, and Mutation
+- Generated pytest Class Construction and Method Invocation
+- Function Coverage, Greedy Minimization, and RL Pipeline Integration
+- Implicit `self` Excluded from Public Parameters, Keyword Arguments, and Metadata
+
+Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, custom-object parameters or state, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
+
+---
+
 ## Control Flow Analysis
 
 - Control Flow Graph (CFG)
@@ -396,7 +409,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `1990 passed, 1 skipped in 349.23s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `2009 passed, 1 skipped in 362.99s`.
 
 ---
 
@@ -1052,6 +1065,7 @@ RL-Unit-Test
 - Per-function global timeout is available through the service API and `main.py` option 1; a separate total project deadline is not implemented.
 - Exact analyzed-project-scope coverage is measured with a real combined suite; whole-repository coverage remains unmeasured unless it is independently measured over every repository target.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
+- Instance-method analysis is limited to top-level classes with primitive constructor/method inputs and simple `self.attr` state. Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, custom-object inputs/state, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
 - A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
