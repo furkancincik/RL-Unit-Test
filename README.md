@@ -73,7 +73,24 @@ Open `http://127.0.0.1:8000/`. The browser supports separate inline-code, `.py` 
 
 Literal-empty collection support is deliberately limited to direct constructor assignments such as `self.attr = []` and `self.attr = {}`. Non-empty or nested collections, mutation, reassignment, aliasing, custom-object state, subscript element synthesis, and arbitrary method-call replay remain controlled unsupported targets. Generated coverage is always measured against the real class and reachable scenario pool; this support does not imply or manufacture 100% line or branch coverage.
 
-Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, custom-object parameters or state, and dynamic or nested attributes also remain controlled unsupported targets.
+Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, custom-object state graphs, and dynamic or nested attributes remain controlled unsupported targets.
+
+---
+
+## Safe Annotated Custom-Object Parameter Synthesis
+
+- Explicit Annotations Resolving to a Top-Level Class in the Same Module
+- Primitive Constructor Parameters and Direct Primitive `self.attr` Provenance
+- Fresh, Independent Object Construction for Every Scenario and Generated Test
+- Construction Depth Limited to `1` and Object Count Limited to `4` per Scenario
+- Generated pytest Imports the Verified Module/Class and Invokes Its Constructor
+- Top-Level Function and Supported Simple Instance-Method Integration
+
+Each immutable internal construction blueprint has a deterministic SHA-256 fingerprint over the validated dotted module identity, class name, constructor/state schema, depth, and typed canonical primitive constructor values. This module-qualified identity keeps same-named, structurally identical classes in different modules separate without using absolute paths, temporary workspace names, working directories, object representations, or memory addresses.
+
+Object synthesis requires an explicit local class annotation. Annotation-free, imported, union/generic, recursive, complex-constructor, nested-object, and arbitrary object-graph inputs remain controlled unsupported targets. Blueprint data, module identity, constructor values, object state, keyword arguments, and expected/actual runtime values are not serialized into public project, API, or Web results.
+
+Qualified method targets are supported by the production orchestrator and all-functions workflows. The current single-target command-line and interactive selectors still accept only a plain function identifier, so direct `ClassName.method_name` selection through those CLI entry points remains outside the supported selection contract.
 
 ---
 
@@ -911,12 +928,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
+`2098 passed, 1 skipped in 412.24s`
+
 | Test result | Status |
 | --- | ---: |
-| Passed | 1,967 |
+| Passed | 2,098 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 299.12s |
+| Duration | 412.24s |
 
 ---
 
@@ -961,6 +980,7 @@ RL-Unit-Test
 - Aggregate-Aware Derived-Value Input Synthesis
 - Affine `while` Control-Variable Initialization
 - Safe Optional Dictionary Lookup Synthesis
+- Safe Annotated Local Custom-Object Parameter Synthesis
 - Iteration-Scoped Loop Activation Analysis
 - Relational Witness Integration
 - Dynamic Return and f-String Evaluation
@@ -1074,8 +1094,8 @@ RL-Unit-Test
 - Per-function global timeout is available through the service API and `main.py` option 1; a separate total project deadline is not implemented.
 - Exact analyzed-project-scope coverage is measured with a real combined suite; whole-repository coverage remains unmeasured unless it is independently measured over every repository target.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
-- Instance-method analysis is limited to top-level classes with primitive constructor/method inputs and simple `self.attr` state. Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, custom-object inputs/state, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
-- Untyped inference is limited to primitive parameter evidence. Custom-object synthesis, non-empty collection-state or element-schema inference, and ambiguous runtime-dependent typing remain unsupported.
+- Instance-method analysis is limited to top-level classes with primitive constructor/method inputs, simple `self.attr` state, and explicitly annotated safe local custom-object parameters. Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, unannotated/imported/recursive object inputs, custom-object state graphs, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
+- Untyped inference is limited to primitive parameter evidence. Annotation-free custom-object synthesis, non-empty collection-state or element-schema inference, and ambiguous runtime-dependent typing remain unsupported.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
 - A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
