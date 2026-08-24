@@ -18,6 +18,7 @@ from analyzer.python_source_reader import (
     PythonSourceEncodingError,
     decode_python_source_bytes,
 )
+from analyzer.python_analyzer import PythonAnalyzer
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalExecutionPolicy,
@@ -40,7 +41,12 @@ from models.source_acquisition_result import (
     SourceIssueCategory,
     SourceTargetKind,
 )
-from models.project_analysis_result import FunctionRunStatus
+from models.project_analysis_result import (
+    FunctionRunStatus,
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
+)
 from models.project_coverage_result import (
     ProjectCoverageResult,
     ProjectCoverageScopeSummary,
@@ -54,6 +60,21 @@ from services.source_analysis_orchestrator import SourceAnalysisOrchestrator
 
 _INLINE_WORKSPACE_PREFIX = "rl-unit-test-inline-"
 _UPLOAD_WORKSPACE_PREFIX = "rl-unit-test-upload-"
+
+
+def portable_upload_module_identity(source: UploadedPythonFile) -> str:
+    """Upload için filesystem taşımayan canonical public module identity üretir."""
+    stem = Path(source.original_filename).stem
+    normalized = re.sub(r"\W", "_", stem, flags=re.UNICODE)
+    if not normalized:
+        normalized = "source"
+    if not normalized.startswith("upload_"):
+        normalized = f"upload_{normalized}"
+    if not normalized.isidentifier() or keyword.iskeyword(normalized):
+        raise ExternalSourceAnalysisValidationError(
+            "Upload filename güvenli Python module adına dönüştürülemedi."
+        )
+    return normalized
 
 
 class ExternalSourceAnalysisValidationError(ValueError):
@@ -166,12 +187,38 @@ class ExternalSourceAnalysisService:
 
             self._validate_output_separation(output_root, acquired.resolved_project_root)
 
-            module_results = self._analyze_modules(request, acquired, output_root)
+            target_inventories = self._target_inventories(request, acquired)
+            selection_issue = self._target_selection_issue(
+                request,
+                acquired,
+                target_inventories,
+            )
+            if selection_issue is not None:
+                return self._finalize(
+                    self._failed_result(
+                        request,
+                        output_root,
+                        report_path,
+                        started,
+                        selection_issue,
+                        acquired=acquired,
+                    ),
+                    acquired=acquired,
+                    temporary_workspace=temporary_workspace,
+                )
+
+            module_results = self._analyze_modules(
+                request,
+                acquired,
+                output_root,
+                target_inventories,
+            )
             project_coverage = self._measure_project_coverage(
                 request=request,
                 acquired=acquired,
                 module_results=module_results,
                 output_root=output_root,
+                target_inventories=target_inventories,
             )
             status = self._derive_status(
                 request.execution_policy,
@@ -220,6 +267,7 @@ class ExternalSourceAnalysisService:
         request: ExternalSourceAnalysisRequest,
         acquired: ResolvedSourceTarget,
         output_root: Path,
+        target_inventories: dict[str, tuple[str, ...]],
     ) -> tuple[ExternalModuleAnalysisResult, ...]:
         ordered = tuple(
             sorted(acquired.discovered_modules, key=lambda item: item.relative_path.casefold())
@@ -228,9 +276,20 @@ class ExternalSourceAnalysisService:
         results: list[ExternalModuleAnalysisResult] = []
         for ordinal, module in enumerate(ordered, start=1):
             module_issue = self._module_issue(acquired, module)
+            discovered_names = target_inventories.get(
+                module.relative_path,
+                module.top_level_function_names,
+            )
             if module.relative_path not in selected:
                 if request.configuration.module_selection.mode is ExternalModuleSelectionMode.ALL_ELIGIBLE_WITH_LIMIT:
-                    results.append(self._module_result(module, ExternalModuleStatus.SKIPPED_LIMIT))
+                    results.append(
+                        self._module_result(
+                            module,
+                            ExternalModuleStatus.SKIPPED_LIMIT,
+                            discovered_function_count=len(discovered_names),
+                            discovered_function_names=discovered_names,
+                        )
+                    )
                 continue
             if not module.supported or module.module_path is None:
                 results.append(
@@ -239,11 +298,20 @@ class ExternalSourceAnalysisService:
                         ExternalModuleStatus.UNSUPPORTED,
                         issue_category=module_issue,
                         issue_message="Module static discovery sonrasında güvenle analiz edilemiyor.",
+                        discovered_function_count=len(discovered_names),
+                        discovered_function_names=discovered_names,
                     )
                 )
                 continue
             if request.execution_policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
-                results.append(self._module_result(module, ExternalModuleStatus.STATIC_ONLY))
+                results.append(
+                    self._module_result(
+                        module,
+                        ExternalModuleStatus.STATIC_ONLY,
+                        discovered_function_count=len(discovered_names),
+                        discovered_function_names=discovered_names,
+                    )
+                )
                 continue
 
             import_root = self._import_root(acquired.resolved_project_root, module)
@@ -252,12 +320,25 @@ class ExternalSourceAnalysisService:
             if not module_output.is_relative_to(output_root):
                 raise RuntimeError("Module output yolu root dışına çıktı.")
             try:
+                target_selection = self._internal_target_selection(
+                    request,
+                    module,
+                )
                 project_result = self._orchestrator_factory().run(
                     source_file=source_file,
                     module_path=module.module_path,
                     output_root=module_output,
                     function_name=None,
-                    all_functions=True,
+                    all_functions=(
+                        target_selection.mode
+                        is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT
+                    ),
+                    target_selection=(
+                        None
+                        if target_selection.mode
+                        is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT
+                        else target_selection
+                    ),
                     maximum_functions=request.configuration.maximum_functions_per_module,
                     import_root=import_root,
                     max_visits_per_node=request.configuration.max_visits_per_node,
@@ -320,6 +401,10 @@ class ExternalSourceAnalysisService:
                     project_result=project_result,
                     artifact_paths=artifacts,
                     discovered_function_count=len(project_result.discovered_targets),
+                    discovered_function_names=tuple(
+                        target.qualified_name
+                        for target in project_result.discovered_targets
+                    ),
                 )
             )
         if isinstance(request.source, InlinePythonSource):
@@ -351,6 +436,7 @@ class ExternalSourceAnalysisService:
         acquired: ResolvedSourceTarget,
         module_results: tuple[ExternalModuleAnalysisResult, ...],
         output_root: Path,
+        target_inventories: dict[str, tuple[str, ...]],
     ) -> ProjectCoverageResult | None:
         if request.execution_policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
             return None
@@ -378,6 +464,7 @@ class ExternalSourceAnalysisService:
         scope = self._project_scope_summary(
             acquired=acquired,
             module_results=module_results,
+            target_inventories=target_inventories,
         )
         return self._project_coverage_service.measure_and_minimize(
             candidates=tuple(candidates),
@@ -391,6 +478,7 @@ class ExternalSourceAnalysisService:
         *,
         acquired: ResolvedSourceTarget,
         module_results: tuple[ExternalModuleAnalysisResult, ...],
+        target_inventories: dict[str, tuple[str, ...]],
     ) -> ProjectCoverageScopeSummary:
         function_results = tuple(
             function
@@ -402,7 +490,7 @@ class ExternalSourceAnalysisService:
             )
         )
         discovered_functions = sum(
-            module.top_level_function_count
+            len(target_inventories.get(module.relative_path, ()))
             for module in acquired.discovered_modules
         )
         unsupported_from_projects = sum(
@@ -410,7 +498,7 @@ class ExternalSourceAnalysisService:
             for function in function_results
         )
         unsupported_without_project = sum(
-            module.top_level_function_count
+            len(target_inventories.get(module.relative_path, ()))
             for module in acquired.discovered_modules
             if not module.supported
         )
@@ -419,6 +507,7 @@ class ExternalSourceAnalysisService:
             function.status
             not in {
                 FunctionRunStatus.SKIPPED,
+                FunctionRunStatus.SKIPPED_SELECTION,
                 FunctionRunStatus.SKIPPED_LIMIT,
                 FunctionRunStatus.UNSUPPORTED,
             }
@@ -432,6 +521,10 @@ class ExternalSourceAnalysisService:
             for module in module_results
             if module.status is ExternalModuleStatus.SKIPPED_LIMIT
             and module.project_result is None
+        )
+        skipped_selection = sum(
+            function.status is FunctionRunStatus.SKIPPED_SELECTION
+            for function in function_results
         )
         selected_modules = sum(
             module.status is not ExternalModuleStatus.SKIPPED_LIMIT
@@ -476,6 +569,7 @@ class ExternalSourceAnalysisService:
             )
             and unsupported == 0
             and skipped_limit == 0
+            and skipped_selection == 0
             and partial == 0
             and failed == 0
             and timed_out == 0
@@ -495,6 +589,81 @@ class ExternalSourceAnalysisService:
             unsupported_function_count=unsupported,
             skipped_limit_function_count=skipped_limit,
             scope_complete=scope_complete,
+            skipped_selection_function_count=skipped_selection,
+        )
+
+    @staticmethod
+    def _target_inventories(
+        request: ExternalSourceAnalysisRequest,
+        acquired: ResolvedSourceTarget,
+    ) -> dict[str, tuple[str, ...]]:
+        inventories: dict[str, tuple[str, ...]] = {}
+        analyzer = PythonAnalyzer()
+        for module in acquired.discovered_modules:
+            if not module.supported or module.module_path is None:
+                inventories[module.relative_path] = module.top_level_function_names
+                continue
+            source_file = (
+                acquired.resolved_project_root / module.relative_path
+            ).resolve()
+            analysis = analyzer.analyze_file(source_file)
+            inventories[module.relative_path] = tuple(
+                target.qualified_name for target in analysis.functions
+            )
+        return inventories
+
+    @staticmethod
+    def _target_selection_issue(
+        request: ExternalSourceAnalysisRequest,
+        acquired: ResolvedSourceTarget,
+        inventories: dict[str, tuple[str, ...]],
+    ) -> str | None:
+        selection = request.configuration.target_selection
+        if selection.mode is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT:
+            return None
+        available = {
+            (
+                ExternalSourceAnalysisService._public_module_name(request, module),
+                qualified_name,
+            )
+            for module in acquired.discovered_modules
+            for qualified_name in inventories.get(module.relative_path, ())
+        }
+        if any(
+            (selector.module_identity, selector.qualified_name) not in available
+            for selector in selection.selectors
+        ):
+            return "UNKNOWN_TARGET_SELECTION"
+        return None
+
+    @staticmethod
+    def _internal_target_selection(
+        request: ExternalSourceAnalysisRequest,
+        module: DiscoveredPythonModule,
+    ) -> TargetSelection:
+        selection = request.configuration.target_selection
+        if selection.mode is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT:
+            return selection
+        public_module = ExternalSourceAnalysisService._public_module_name(
+            request,
+            module,
+        )
+        internal_module = module.module_path
+        if internal_module is None:
+            raise RuntimeError("Dynamic target selection module path gerektirir.")
+        return TargetSelection(
+            TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+            tuple(
+                QualifiedTargetSelector(
+                    (
+                        internal_module
+                        if selector.module_identity == public_module
+                        else selector.module_identity
+                    ),
+                    selector.qualified_name,
+                )
+                for selector in selection.selectors
+            ),
         )
 
     @staticmethod
@@ -553,6 +722,7 @@ class ExternalSourceAnalysisService:
         issue_message: str | None = None,
         artifact_paths: tuple[Path, ...] = (),
         discovered_function_count: int | None = None,
+        discovered_function_names: tuple[str, ...] | None = None,
     ) -> ExternalModuleAnalysisResult:
         return ExternalModuleAnalysisResult(
             relative_path=module.relative_path,
@@ -567,7 +737,11 @@ class ExternalSourceAnalysisService:
             issue_category=issue_category,
             issue_message=issue_message,
             artifact_paths=artifact_paths,
-            discovered_function_names=module.top_level_function_names,
+            discovered_function_names=(
+                module.top_level_function_names
+                if discovered_function_names is None
+                else discovered_function_names
+            ),
         )
 
     @staticmethod
@@ -762,17 +936,7 @@ class ExternalSourceAnalysisService:
 
     @staticmethod
     def _portable_module_name(source: UploadedPythonFile) -> str:
-        stem = Path(source.original_filename).stem
-        normalized = re.sub(r"\W", "_", stem, flags=re.UNICODE)
-        if not normalized:
-            normalized = "source"
-        if not normalized.startswith("upload_"):
-            normalized = f"upload_{normalized}"
-        if not normalized.isidentifier() or keyword.iskeyword(normalized):
-            raise ExternalSourceAnalysisValidationError(
-                "Upload filename güvenli Python module adına dönüştürülemedi."
-            )
-        return normalized
+        return portable_upload_module_identity(source)
 
     @staticmethod
     def _sanitize_json_artifacts(

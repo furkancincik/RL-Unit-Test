@@ -7,7 +7,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from models.project_analysis_result import FunctionRunStatus, ProjectAnalysisResult
+from models.project_analysis_result import (
+    FunctionRunStatus,
+    ProjectAnalysisResult,
+    TargetSelection,
+)
 from models.project_coverage_result import ProjectCoverageResult
 from models.source_acquisition_result import SourceAcquisitionLimits
 
@@ -167,6 +171,7 @@ class ExternalModuleSelection:
 class ExternalAnalysisConfiguration:
     output_root: Path
     module_selection: ExternalModuleSelection = ExternalModuleSelection()
+    target_selection: TargetSelection = TargetSelection()
     maximum_selected_modules: int = 10
     maximum_functions_per_module: int = 10
     maximum_payload_bytes: int = 2_000_000
@@ -187,6 +192,8 @@ class ExternalAnalysisConfiguration:
             raise TypeError("output_root Path olmalıdır.")
         if not isinstance(self.module_selection, ExternalModuleSelection):
             raise TypeError("module_selection geçersiz.")
+        if not isinstance(self.target_selection, TargetSelection):
+            raise TypeError("target_selection geçersiz.")
         for name in (
             "maximum_selected_modules",
             "maximum_functions_per_module",
@@ -229,6 +236,7 @@ class ExternalAnalysisConfiguration:
     def to_dict(self) -> dict[str, Any]:
         return {
             "module_selection": self.module_selection.to_dict(),
+            "target_selection": self.target_selection.to_dict(),
             "maximum_selected_modules": self.maximum_selected_modules,
             "maximum_functions_per_module": self.maximum_functions_per_module,
             "maximum_payload_bytes": self.maximum_payload_bytes,
@@ -303,6 +311,7 @@ class ExternalModuleAnalysisResult:
             item.status
             not in {
                 FunctionRunStatus.SKIPPED,
+                FunctionRunStatus.SKIPPED_SELECTION,
                 FunctionRunStatus.SKIPPED_LIMIT,
                 FunctionRunStatus.UNSUPPORTED,
             }
@@ -316,6 +325,15 @@ class ExternalModuleAnalysisResult:
         return sum(
             item.status is FunctionRunStatus.SKIPPED_LIMIT
             for item in getattr(self.project_result, "function_results", ())
+        )
+
+    @property
+    def selection_skipped_function_count(self) -> int:
+        if self.project_result is None:
+            return 0
+        return sum(
+            item.status is FunctionRunStatus.SKIPPED_SELECTION
+            for item in self.project_result.function_results
         )
 
     @property
@@ -452,6 +470,7 @@ class ExternalModuleAnalysisResult:
             "discovered_function_names": list(self.discovered_function_names),
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
+            "selection_skipped_function_count": self.selection_skipped_function_count,
             "line_coverage_percent": self.line_coverage_percent,
             "branch_coverage_percent": self.branch_coverage_percent,
             "greedy": greedy_summaries or None,
@@ -499,6 +518,12 @@ class ExternalSourceAnalysisResult:
     def limit_skipped_function_count(self) -> int:
         return sum(item.limit_skipped_function_count for item in self.module_results)
 
+    @property
+    def selection_skipped_function_count(self) -> int:
+        return sum(
+            item.selection_skipped_function_count for item in self.module_results
+        )
+
     def to_dict(self) -> dict[str, Any]:
         counts = {status.value: sum(item.status is status for item in self.module_results) for status in ExternalModuleStatus}
         return {
@@ -517,6 +542,7 @@ class ExternalSourceAnalysisResult:
             "discovered_function_count": self.discovered_function_count,
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
+            "selection_skipped_function_count": self.selection_skipped_function_count,
             "module_status_counts": counts,
             "modules": [item.to_dict(self.output_root) for item in self.module_results],
             "output_root": ".",

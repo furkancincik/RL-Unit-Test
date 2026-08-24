@@ -25,7 +25,12 @@ from models.external_source_analysis_result import (
     PublicGitHubRepository,
     UploadedPythonFile,
 )
-from models.project_analysis_result import ProjectRunStatus
+from models.project_analysis_result import (
+    ProjectRunStatus,
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
+)
 from services.external_source_analysis_service import ExternalSourceAnalysisService
 from services.source_acquisition_service import SourceAcquisitionService
 
@@ -50,6 +55,144 @@ def test_inline_static_discovery_writes_no_source_to_json_and_cleans(tmp_path: P
     report = result.report_path.read_text(encoding="utf-8")
     assert marker not in report
     assert "rl-unit-test-inline-" not in report
+
+
+def test_static_discovery_preserves_qualified_method_inventory_with_selection(
+    tmp_path: Path,
+) -> None:
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("inline_source", "Engine.start"),),
+    )
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource(
+                "class Engine:\n"
+                "    def start(self, enabled: bool) -> bool:\n"
+                "        return enabled\n\n"
+                "def helper() -> int:\n"
+                "    return 1\n"
+            ),
+            ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
+            _configuration(tmp_path, target_selection=selection),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.STATIC_COMPLETED
+    assert result.module_results[0].discovered_function_names == (
+        "Engine.start",
+        "helper",
+    )
+
+
+def test_dynamic_forwards_explicit_target_selection_separately_from_module_selection(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "alpha.py").write_text(
+        "class Shared:\n"
+        "    def run(self, value: int) -> int:\n"
+        "        return value\n",
+        encoding="utf-8",
+    )
+    orchestrator = Mock()
+    project_result = Mock(
+        status=ProjectRunStatus.COMPLETED,
+        function_results=(),
+        discovered_targets=(),
+        report_path=tmp_path / "report.json",
+    )
+    orchestrator.run.return_value = project_result
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("alpha", "Shared.run"),),
+    )
+
+    ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator
+    ).run(
+        ExternalSourceAnalysisRequest(
+            LocalProjectDirectory(project),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path, target_selection=selection),
+        )
+    )
+
+    call = orchestrator.run.call_args.kwargs
+    assert call["all_functions"] is False
+    assert call["function_name"] is None
+    assert call["target_selection"].for_module("alpha") == ("Shared.run",)
+
+
+def test_same_qualified_target_in_different_modules_keeps_selector_identity(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    for module_name, literal in (("first_module", 5), ("second_module", 11)):
+        (project / f"{module_name}.py").write_text(
+            "class Shared:\n"
+            "    def run(self, value: int) -> int:\n"
+            f"        return value + {literal}\n",
+            encoding="utf-8",
+        )
+    orchestrator = Mock()
+    orchestrator.run.return_value = Mock(
+        status=ProjectRunStatus.COMPLETED,
+        function_results=(),
+        discovered_targets=(),
+        report_path=tmp_path / "report.json",
+    )
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (
+            QualifiedTargetSelector("first_module", "Shared.run"),
+            QualifiedTargetSelector("second_module", "Shared.run"),
+        ),
+    )
+
+    ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator
+    ).run(
+        ExternalSourceAnalysisRequest(
+            LocalProjectDirectory(project),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path, target_selection=selection),
+        )
+    )
+
+    calls = {
+        call.kwargs["module_path"]: call.kwargs["target_selection"]
+        for call in orchestrator.run.call_args_list
+    }
+    assert calls["first_module"].for_module("first_module") == ("Shared.run",)
+    assert calls["second_module"].for_module("second_module") == ("Shared.run",)
+
+
+def test_unknown_external_target_is_controlled_before_dynamic_orchestrator(
+    tmp_path: Path,
+) -> None:
+    orchestrator = Mock()
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("inline_source", "Missing.run"),),
+    )
+
+    result = ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def available() -> int:\n    return 1\n"),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path, target_selection=selection),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.FAILED
+    assert result.issues == ("UNKNOWN_TARGET_SELECTION",)
+    orchestrator.run.assert_not_called()
+    assert "available" not in result.report_path.read_text(encoding="utf-8")
 
 
 def test_keyboard_interrupt_cleans_inline_workspace() -> None:

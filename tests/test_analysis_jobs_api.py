@@ -12,7 +12,11 @@ from models.external_source_analysis_result import (
     ExternalSourceAnalysisResult,
     ExternalWorkspaceCleanupStatus,
 )
+from models.project_analysis_result import TargetSelectionMode
 from services.analysis_job_service import AnalysisJobService, AnalysisJobSettings
+from services.external_source_analysis_service import (
+    portable_upload_module_identity,
+)
 
 
 def _runner_result(request) -> ExternalSourceAnalysisResult:
@@ -76,6 +80,210 @@ def test_inline_submission_defaults_to_static_and_result_is_polled(tmp_path: Pat
     assert result.json()["project_line_coverage_percent"] is None
     request = runner.run.call_args.args[0]
     assert request.execution_policy.value == "STATIC_DISCOVERY_ONLY"
+    service.shutdown()
+
+
+def test_inline_explicit_qualified_targets_are_bound_to_public_module_identity(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    with client:
+        response = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "class Vessel:\n    def inspect(self):\n        return 1\n",
+                "analysis": {
+                    "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                    "explicit_target_names": ["Vessel.inspect", "Vessel.inspect"],
+                },
+            },
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    selection = runner.run.call_args.args[0].configuration.target_selection
+    assert selection.mode is TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS
+    assert [item.to_dict() for item in selection.selectors] == [
+        {
+            "module_identity": "inline_source",
+            "qualified_name": "Vessel.inspect",
+        }
+    ]
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    "qualified_name",
+    ("", ".run", "Owner.", "Owner..run", "Owner.run.more", "Owner/run", "Owner.run()"),
+)
+def test_malformed_explicit_target_is_422_without_consuming_queue(
+    tmp_path: Path,
+    qualified_name: str,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+    with client:
+        response = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "def run():\n    return 1\n",
+                "analysis": {
+                    "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                    "explicit_target_names": [qualified_name],
+                },
+            },
+        )
+    assert response.status_code == 422
+    assert service.capacity() == before
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_upload_and_github_explicit_target_schemas_are_unambiguous(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    upload_options = json.dumps(
+        {
+            "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+            "explicit_target_names": ["Handler.run"],
+        }
+    )
+    with client:
+        upload = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("worker.py", b"class Handler:\n    def run(self):\n        return 1\n", "text/x-python")},
+            data={"analysis": upload_options},
+        )
+        github = client.post(
+            "/api/v1/jobs/github",
+            json={
+                "repository_url": "https://github.com/owner/repository",
+                "analysis": {
+                    "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                    "explicit_module_targets": [
+                        {
+                            "module_identity": "package.worker",
+                            "qualified_name": "Handler.run",
+                        }
+                    ],
+                },
+            },
+        )
+        assert upload.status_code == 202
+        assert github.status_code == 202
+        service.wait(upload.json()["job_id"], timeout=5)
+        service.wait(github.json()["job_id"], timeout=5)
+
+    requests = [call.args[0] for call in runner.run.call_args_list]
+    assert requests[0].configuration.target_selection.selectors[0].module_identity == (
+        "upload_worker"
+    )
+    assert requests[1].configuration.target_selection.selectors[0].to_dict() == {
+        "module_identity": "package.worker",
+        "qualified_name": "Handler.run",
+    }
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_identity"),
+    (
+        ("my-file.py", "upload_my_file"),
+        ("my file.py", "upload_my_file"),
+        ("my.module.py", "upload_my_module"),
+        ("module.py", "upload_module"),
+    ),
+)
+def test_upload_explicit_target_uses_external_service_canonical_module_identity(
+    tmp_path: Path,
+    filename: str,
+    expected_identity: str,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    analysis = json.dumps(
+        {
+            "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+            "explicit_target_names": ["target"],
+        }
+    )
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/upload",
+            files={
+                "file": (
+                    filename,
+                    b"def target():\n    return 1\n",
+                    "text/x-python",
+                )
+            },
+            data={"analysis": analysis},
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    request = runner.run.call_args.args[0]
+    selector = request.configuration.target_selection.selectors[0]
+    assert selector.module_identity == expected_identity
+    assert selector.module_identity == portable_upload_module_identity(request.source)
+    assert selector.qualified_name == "target"
+    service.shutdown()
+
+
+def test_hyphenated_upload_default_selection_remains_backward_compatible(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    with client:
+        response = client.post(
+            "/api/v1/jobs/upload",
+            files={
+                "file": (
+                    "my-file.py",
+                    b"def target():\n    return 1\n",
+                    "text/x-python",
+                )
+            },
+            data={"analysis": "{}"},
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    selection = runner.run.call_args.args[0].configuration.target_selection
+    assert selection.mode is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT
+    assert selection.selectors == ()
+    service.shutdown()
+
+
+def test_malformed_upload_target_is_422_without_consuming_queue(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+    analysis = json.dumps(
+        {
+            "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+            "explicit_target_names": ["Owner.run()"],
+        }
+    )
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/upload",
+            files={
+                "file": (
+                    "my-file.py",
+                    b"def target():\n    return 1\n",
+                    "text/x-python",
+                )
+            },
+            data={"analysis": analysis},
+        )
+
+    assert response.status_code == 422
+    assert service.capacity() == before
+    runner.run.assert_not_called()
     service.shutdown()
 
 

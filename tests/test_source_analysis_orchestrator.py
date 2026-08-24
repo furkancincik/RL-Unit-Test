@@ -15,6 +15,9 @@ from models.pipeline_diagnostic_result import (
 from models.project_analysis_result import (
     FunctionRunStatus,
     ProjectRunStatus,
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
 )
 from services.source_analysis_orchestrator import (
     SourceAnalysisOrchestrator,
@@ -154,9 +157,177 @@ def test_single_function_selection_and_timeout_forwarding(
         maximum_functions=1,
     )
 
-    assert [item.target.name for item in result.function_results] == ["first"]
+    assert result.function_results[0].target.name == "first"
+    assert result.function_results[0].status is FunctionRunStatus.COMPLETED
+    assert all(
+        item.status is FunctionRunStatus.SKIPPED_SELECTION
+        for item in result.function_results[1:]
+    )
     assert calls[0]["pipeline_timeout_seconds"] == 2.0
     assert result.status is ProjectRunStatus.COMPLETED
+
+
+def test_explicit_qualified_selection_runs_only_exact_targets_and_reports_rest(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "qualified_fixture.py"
+    source_file.write_text(
+        "class First:\n"
+        "    def execute(self, value: int) -> int:\n"
+        "        return value\n\n"
+        "class Second:\n"
+        "    def execute(self, value: int) -> int:\n"
+        "        return value + 1\n\n"
+        "def helper(value: int) -> int:\n"
+        "    return value - 1\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        name: _diagnostic(source_file, name, PipelineRunStatus.COMPLETED)
+        for name in ("Second.execute", "helper")
+    }
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (
+            QualifiedTargetSelector("fixture_target", "Second.execute"),
+            QualifiedTargetSelector("fixture_target", "helper"),
+        ),
+    )
+
+    result = _orchestrator(outcomes, calls).run(
+        **_run_arguments(source_file, tmp_path / "output"),
+        function_name=None,
+        all_functions=False,
+        target_selection=selection,
+    )
+
+    assert [call["function_name"] for call in calls] == [
+        "Second.execute",
+        "helper",
+    ]
+    statuses = {
+        item.target.qualified_name: item.status
+        for item in result.function_results
+    }
+    assert statuses["First.execute"] is FunctionRunStatus.SKIPPED_SELECTION
+    assert statuses["Second.execute"] is FunctionRunStatus.COMPLETED
+    assert statuses["helper"] is FunctionRunStatus.COMPLETED
+    skipped = next(
+        item
+        for item in result.function_results
+        if item.target.qualified_name == "First.execute"
+    )
+    assert skipped.skip_reason == "TARGET_NOT_SELECTED"
+    assert result.selection_skipped_function_count == 1
+    assert result.status is ProjectRunStatus.COMPLETED
+
+
+def test_explicit_selection_distinguishes_methods_in_the_same_class(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "same_class.py"
+    source_file.write_text(
+        "class Processor:\n"
+        "    def first(self, value: int) -> int:\n"
+        "        return value + 1\n\n"
+        "    def second(self, value: int) -> int:\n"
+        "        return value - 1\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("same_class", "Processor.second"),),
+    )
+
+    result = _orchestrator(
+        {
+            "Processor.second": _diagnostic(
+                source_file,
+                "Processor.second",
+                PipelineRunStatus.COMPLETED,
+            )
+        },
+        calls,
+    ).run(
+        source_file=source_file,
+        module_path="same_class",
+        function_name=None,
+        all_functions=False,
+        target_selection=selection,
+        output_root=tmp_path / "same_class_output",
+        max_visits_per_node=3,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=42,
+        overwrite=True,
+        timeout_seconds=5.0,
+        per_function_timeout_seconds=2.0,
+    )
+
+    statuses = {
+        item.target.qualified_name: item.status
+        for item in result.function_results
+    }
+    assert statuses["Processor.second"] is FunctionRunStatus.COMPLETED
+    assert statuses["Processor.first"] is FunctionRunStatus.SKIPPED_SELECTION
+    assert [call["function_name"] for call in calls] == ["Processor.second"]
+
+
+def test_explicit_selection_limit_counts_only_supported_selected_targets(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        "last": _diagnostic(source_file, "last", PipelineRunStatus.COMPLETED)
+    }
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (
+            QualifiedTargetSelector("fixture_target", "async_target"),
+            QualifiedTargetSelector("fixture_target", "last"),
+            QualifiedTargetSelector("fixture_target", "first"),
+        ),
+    )
+
+    result = _orchestrator(outcomes, calls).run(
+        **_run_arguments(source_file, tmp_path / "output"),
+        function_name=None,
+        all_functions=False,
+        target_selection=selection,
+        maximum_functions=1,
+    )
+
+    statuses = {
+        item.target.qualified_name: item.status
+        for item in result.function_results
+    }
+    assert statuses["async_target"] is FunctionRunStatus.UNSUPPORTED
+    assert statuses["last"] is FunctionRunStatus.COMPLETED
+    assert statuses["first"] is FunctionRunStatus.SKIPPED_LIMIT
+    assert [call["function_name"] for call in calls] == ["last"]
+
+
+def test_explicit_selection_rejects_unknown_exact_target(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("fixture_target", "Missing.execute"),),
+    )
+
+    with pytest.raises(SourceAnalysisValidationError, match="bulunamadı"):
+        _orchestrator({}, []).run(
+            **_run_arguments(source_file, tmp_path / "output"),
+            function_name=None,
+            all_functions=False,
+            target_selection=selection,
+        )
 
 
 def test_strategy_comparison_flag_and_timeout_are_forwarded(
@@ -284,8 +455,77 @@ def test_missing_function_lists_available_targets(
             all_functions=False,
         )
 
-    assert "first" in str(error.value)
-    assert "last" in str(error.value)
+    assert "missing" in str(error.value)
+    assert "first" not in str(error.value)
+    assert "last" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "module_name,class_name,method_name,function_name,literal",
+    (
+        ("orbit_module", "Orbiter", "measure", "fallback", 3),
+        ("harbor_module", "Navigator", "route", "reserve", 17),
+        ("garden_module", "Cultivator", "harvest", "store", 29),
+    ),
+)
+def test_explicit_selection_is_invariant_under_safe_target_renaming(
+    tmp_path: Path,
+    module_name: str,
+    class_name: str,
+    method_name: str,
+    function_name: str,
+    literal: int,
+) -> None:
+    source_file = tmp_path / f"{module_name}.py"
+    qualified_name = f"{class_name}.{method_name}"
+    source_file.write_text(
+        f"class {class_name}:\n"
+        f"    def {method_name}(self, value: int) -> int:\n"
+        f"        return value + {literal}\n\n"
+        f"def {function_name}(value: int) -> int:\n"
+        f"    return value - {literal}\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector(module_name, qualified_name),),
+    )
+
+    result = _orchestrator(
+        {
+            qualified_name: _diagnostic(
+                source_file,
+                qualified_name,
+                PipelineRunStatus.COMPLETED,
+            )
+        },
+        calls,
+    ).run(
+        source_file=source_file,
+        module_path=module_name,
+        function_name=None,
+        all_functions=False,
+        target_selection=selection,
+        output_root=tmp_path / f"{module_name}_output",
+        max_visits_per_node=3,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=42,
+        overwrite=True,
+        timeout_seconds=5.0,
+        per_function_timeout_seconds=2.0,
+    )
+
+    assert [call["function_name"] for call in calls] == [qualified_name]
+    statuses = {
+        item.target.qualified_name: item.status
+        for item in result.function_results
+    }
+    assert statuses[qualified_name] is FunctionRunStatus.COMPLETED
+    assert statuses[function_name] is FunctionRunStatus.SKIPPED_SELECTION
 
 
 def test_conflicting_target_selection_is_rejected(

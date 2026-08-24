@@ -88,6 +88,14 @@ def _function_result(
         ((FunctionRunStatus.FAILED,), ProjectRunStatus.FAILED),
         ((FunctionRunStatus.UNSUPPORTED,), ProjectRunStatus.FAILED),
         ((FunctionRunStatus.TIMED_OUT,), ProjectRunStatus.TIMED_OUT),
+        ((FunctionRunStatus.SKIPPED_SELECTION,), ProjectRunStatus.COMPLETED),
+        (
+            (
+                FunctionRunStatus.COMPLETED,
+                FunctionRunStatus.SKIPPED_SELECTION,
+            ),
+            ProjectRunStatus.COMPLETED,
+        ),
     ),
 )
 def test_project_status_policy(
@@ -254,3 +262,32 @@ def test_existing_skipped_status_remains_distinct_from_limit_skip() -> None:
     assert result.limit_skipped_count == 1
     assert result.limit_skipped_function_count == 1
     assert result.skipped_function_count == 2
+
+
+def test_selection_skip_is_visible_but_not_selected_or_executed() -> None:
+    skipped = FunctionAnalysisResult(
+        target=_target("unselected"),
+        status=FunctionRunStatus.SKIPPED_SELECTION,
+        diagnostic=None,
+        output_directory=Path("output/unselected"),
+        skip_reason="TARGET_NOT_SELECTED",
+    )
+    result = ProjectAnalysisResult(
+        source_file=Path("target.py"),
+        module_path="target",
+        selection_mode=FunctionSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        discovered_targets=(skipped.target,),
+        function_results=(skipped,),
+        total_duration_seconds=0.1,
+        status=ProjectRunStatus.COMPLETED,
+        output_root=Path("output"),
+        report_path=Path("output/project_analysis_report.json"),
+    )
+
+    payload = result.to_dict()
+
+    assert result.selected_function_count == 0
+    assert result.executed_function_count == 0
+    assert result.selection_skipped_function_count == 1
+    assert payload["functions"][0]["status"] == "SKIPPED_SELECTION"
+    assert payload["summary"]["selection_skipped_function_count"] == 1

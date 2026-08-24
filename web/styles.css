@@ -570,6 +570,20 @@ select:focus {
   display: block;
 }
 
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.84rem;
+}
+
+.module-target-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
 .field label {
   margin-bottom: 6px;
   font-size: 0.84rem;
@@ -1123,6 +1137,10 @@ footer p {
 
   .span-two {
     grid-column: span 1;
+  }
+
+  .module-target-row {
+    grid-template-columns: 1fr;
   }
 
   .section-heading,

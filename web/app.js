@@ -129,6 +129,7 @@ function activateSource(source, focusPanel = false) {
       }
     }
   }
+  updateTargetSelectionControls();
   setMessage("");
 }
 
@@ -195,6 +196,110 @@ function csvValues(raw) {
   );
 }
 
+function pythonIdentifier(value) {
+  return /^[_\p{ID_Start}][_\p{ID_Continue}]*$/u.test(value);
+}
+
+function validateQualifiedTargetName(value) {
+  if (!value || value !== value.trim()) {
+    return false;
+  }
+  const parts = value.split(".");
+  return (parts.length === 1 || parts.length === 2)
+    && parts.every((part) => pythonIdentifier(part));
+}
+
+function validateModuleIdentity(value) {
+  if (!value || value !== value.trim()) {
+    return false;
+  }
+  return value.split(".").every((part) => pythonIdentifier(part));
+}
+
+function createModuleTargetRow() {
+  const row = createNode("div", "module-target-row");
+  const moduleInput = createNode("input");
+  moduleInput.type = "text";
+  moduleInput.placeholder = "package.module";
+  moduleInput.autocomplete = "off";
+  moduleInput.dataset.moduleIdentity = "";
+  moduleInput.setAttribute("aria-label", "Module identity");
+  const targetInput = createNode("input");
+  targetInput.type = "text";
+  targetInput.placeholder = "ClassName.method_name";
+  targetInput.autocomplete = "off";
+  targetInput.dataset.qualifiedTarget = "";
+  targetInput.setAttribute("aria-label", "Qualified target name");
+  const remove = createNode("button", "text-button", "Satırı kaldır");
+  remove.type = "button";
+  remove.addEventListener("click", () => {
+    row.remove();
+    if (!byId("module-target-rows").children.length) {
+      byId("module-target-rows").append(createModuleTargetRow());
+    }
+  });
+  row.append(moduleInput, targetInput, remove);
+  return row;
+}
+
+function updateTargetSelectionControls() {
+  const explicit = byId("target-selection-mode").value
+    === "EXPLICIT_QUALIFIED_TARGETS";
+  const multiModule = state.activeSource === "github";
+  byId("explicit-target-names-field").hidden = !explicit || multiModule;
+  byId("explicit-module-targets-field").hidden = !explicit || !multiModule;
+  if (explicit && multiModule && !byId("module-target-rows").children.length) {
+    byId("module-target-rows").append(createModuleTargetRow());
+  }
+}
+
+function targetSelectionOptions() {
+  const mode = byId("target-selection-mode").value;
+  if (mode === "ALL_ELIGIBLE_WITH_LIMIT") {
+    return {
+      valid: true,
+      target_selection_mode: mode,
+      explicit_target_names: [],
+      explicit_module_targets: [],
+    };
+  }
+  if (state.activeSource !== "github") {
+    const values = byId("explicit-target-names").value
+      .split("\n")
+      .filter((value) => value.length > 0);
+    if (!values.length || values.some((value) => !validateQualifiedTargetName(value))) {
+      return { valid: false };
+    }
+    return {
+      valid: true,
+      target_selection_mode: mode,
+      explicit_target_names: Array.from(new Set(values)),
+      explicit_module_targets: [],
+    };
+  }
+  const selectors = [];
+  const seen = new Set();
+  for (const row of byId("module-target-rows").children) {
+    const moduleIdentity = row.querySelector("[data-module-identity]").value;
+    const qualifiedName = row.querySelector("[data-qualified-target]").value;
+    if (!validateModuleIdentity(moduleIdentity)
+      || !validateQualifiedTargetName(qualifiedName)) {
+      return { valid: false };
+    }
+    const key = `${moduleIdentity}\u0000${qualifiedName}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      selectors.push({ module_identity: moduleIdentity, qualified_name: qualifiedName });
+    }
+  }
+  return {
+    valid: selectors.length > 0,
+    target_selection_mode: mode,
+    explicit_target_names: [],
+    explicit_module_targets: selectors,
+  };
+}
+
 function numericValue(id, label, { integer = false, nullable = false } = {}) {
   const raw = byId(id).value.trim();
   if (nullable && raw === "") {
@@ -214,6 +319,10 @@ function buildAnalysisOptions() {
   if (selectionMode !== "ALL_ELIGIBLE_WITH_LIMIT" && values.length === 0) {
     throw new Error("Explicit modül seçimi en az bir değer gerektirir.");
   }
+  const selection = targetSelectionOptions();
+  if (!selection.valid) {
+    throw new Error("Explicit target seçimi geçerli exact hedefler gerektirir.");
+  }
 
   const options = {
     policy,
@@ -223,6 +332,9 @@ function buildAnalysisOptions() {
     selection_mode: selectionMode,
     explicit_relative_paths: selectionMode === "EXPLICIT_RELATIVE_PATHS" ? values : [],
     explicit_module_names: selectionMode === "EXPLICIT_MODULE_NAMES" ? values : [],
+    target_selection_mode: selection.target_selection_mode,
+    explicit_target_names: selection.explicit_target_names,
+    explicit_module_targets: selection.explicit_module_targets,
     maximum_module_count: numericValue("maximum-module-count", "Maksimum modül", { integer: true }),
     maximum_function_count: numericValue("maximum-function-count", "Maksimum fonksiyon", { integer: true }),
   };
@@ -760,6 +872,7 @@ function renderProjectCoverage(projectCoverage) {
   appendMetric(metrics, "Timed out", measured(scope.timed_out_function_count));
   appendMetric(metrics, "Unsupported", measured(scope.unsupported_function_count));
   appendMetric(metrics, "SKIPPED_LIMIT", measured(scope.skipped_limit_function_count));
+  appendMetric(metrics, "SKIPPED_SELECTION", measured(scope.skipped_selection_function_count));
   appendMetric(metrics, "Algorithm", measured(projectCoverage.algorithm));
   appendMetric(
     metrics,
@@ -823,6 +936,7 @@ function renderResult(result) {
   appendMetric(summary, "Keşfedilen fonksiyon", measured(result.discovered_function_count));
   appendMetric(summary, "Çalıştırılan fonksiyon", measured(result.analyzed_function_count));
   appendMetric(summary, "SKIPPED_LIMIT", measured(result.limit_skipped_function_count));
+  appendMetric(summary, "SKIPPED_SELECTION", measured(result.selection_skipped_function_count));
   appendMetric(summary, "Toplam süre", formatDuration(result.duration_seconds));
   appendMetric(summary, "Cleanup", measured(result.cleanup_status));
   appendMetric(summary, "Kategori", measured(result.issues?.[0]));
@@ -984,6 +1098,10 @@ for (const radio of document.querySelectorAll('input[name="analysis-mode"]')) {
 }
 
 byId("selection-mode").addEventListener("change", updateSelectionControls);
+byId("target-selection-mode").addEventListener("change", updateTargetSelectionControls);
+byId("add-module-target").addEventListener("click", () => {
+  byId("module-target-rows").append(createModuleTargetRow());
+});
 byId("strategy-comparison").addEventListener("change", (event) => {
   if (event.currentTarget.checked) {
     byId("greedy-minimization").checked = true;
@@ -1023,5 +1141,6 @@ dropZone.addEventListener("drop", (event) => {
 window.addEventListener("beforeunload", stopPolling);
 updateModeControls();
 updateSelectionControls();
+updateTargetSelectionControls();
 updateSourceByteCount();
 checkHealth();

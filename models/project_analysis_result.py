@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import keyword
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -16,8 +17,109 @@ from models.strategy_comparison_result import StrategyComparisonResult
 class FunctionSelectionMode(str, Enum):
     """Kaynak analizinde hedef fonksiyonların nasıl seçildiğidir."""
 
-    SINGLE = "SINGLE"
-    ALL = "ALL"
+    ALL_ELIGIBLE_WITH_LIMIT = "ALL_ELIGIBLE_WITH_LIMIT"
+    EXPLICIT_QUALIFIED_TARGETS = "EXPLICIT_QUALIFIED_TARGETS"
+    ALL = ALL_ELIGIBLE_WITH_LIMIT
+    SINGLE = EXPLICIT_QUALIFIED_TARGETS
+
+
+TargetSelectionMode = FunctionSelectionMode
+
+
+def validate_qualified_target_name(value: str) -> str:
+    """Top-level function veya iki segmentli instance-method adını doğrular."""
+    if not isinstance(value, str):
+        raise TypeError("qualified target name string olmalıdır.")
+    if not value or value != value.strip():
+        raise ValueError("qualified target name geçersiz.")
+    parts = value.split(".")
+    if len(parts) not in {1, 2} or any(
+        not part.isidentifier() or keyword.iskeyword(part)
+        for part in parts
+    ):
+        raise ValueError("qualified target name geçersiz.")
+    return value
+
+
+def validate_module_identity(value: str) -> str:
+    """Selector için canonical dotted module identity doğrular."""
+    if not isinstance(value, str):
+        raise TypeError("module identity string olmalıdır.")
+    if not value or value != value.strip():
+        raise ValueError("module identity geçersiz.")
+    if any(
+        not part.isidentifier() or keyword.iskeyword(part)
+        for part in value.split(".")
+    ):
+        raise ValueError("module identity geçersiz.")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class QualifiedTargetSelector:
+    """Bir modüldeki exact discovery target kimliğidir."""
+
+    module_identity: str
+    qualified_name: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "module_identity",
+            validate_module_identity(self.module_identity),
+        )
+        object.__setattr__(
+            self,
+            "qualified_name",
+            validate_qualified_target_name(self.qualified_name),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "module_identity": self.module_identity,
+            "qualified_name": self.qualified_name,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TargetSelection:
+    """Default veya explicit qualified target seçim sözleşmesidir."""
+
+    mode: TargetSelectionMode = TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT
+    selectors: tuple[QualifiedTargetSelector, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, TargetSelectionMode):
+            raise TypeError("target selection mode geçersiz.")
+        if not isinstance(self.selectors, tuple) or any(
+            not isinstance(item, QualifiedTargetSelector)
+            for item in self.selectors
+        ):
+            raise TypeError("target selectors tuple olmalıdır.")
+        explicit = self.mode is TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS
+        if explicit != bool(self.selectors):
+            raise ValueError(
+                "Explicit target selection selector değerleriyle kullanılmalıdır."
+            )
+        object.__setattr__(
+            self,
+            "selectors",
+            tuple(dict.fromkeys(self.selectors)),
+        )
+
+    def for_module(self, module_identity: str) -> tuple[str, ...]:
+        normalized = validate_module_identity(module_identity)
+        return tuple(
+            item.qualified_name
+            for item in self.selectors
+            if item.module_identity == normalized
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode.value,
+            "selectors": [item.to_dict() for item in self.selectors],
+        }
 
 
 class FunctionRunStatus(str, Enum):
@@ -28,6 +130,7 @@ class FunctionRunStatus(str, Enum):
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
     SKIPPED = "SKIPPED"
+    SKIPPED_SELECTION = "SKIPPED_SELECTION"
     SKIPPED_LIMIT = "SKIPPED_LIMIT"
     UNSUPPORTED = "UNSUPPORTED"
 
@@ -123,6 +226,7 @@ class FunctionAnalysisResult:
             raise TypeError("output_directory Path olmalıdır.")
         if self.status in {
             FunctionRunStatus.SKIPPED,
+            FunctionRunStatus.SKIPPED_SELECTION,
             FunctionRunStatus.SKIPPED_LIMIT,
             FunctionRunStatus.UNSUPPORTED,
         } and not self.skip_reason:
@@ -298,22 +402,32 @@ class ProjectAnalysisResult:
         statuses: Iterable[FunctionRunStatus],
     ) -> ProjectRunStatus:
         values = tuple(statuses)
-        if values and all(
-            status is FunctionRunStatus.COMPLETED for status in values
+        relevant = tuple(
+            status
+            for status in values
+            if status is not FunctionRunStatus.SKIPPED_SELECTION
+        )
+        if values and not relevant:
+            return ProjectRunStatus.COMPLETED
+        if relevant and all(
+            status is FunctionRunStatus.COMPLETED for status in relevant
         ):
             return ProjectRunStatus.COMPLETED
         if any(
             status in {FunctionRunStatus.COMPLETED, FunctionRunStatus.PARTIAL}
-            for status in values
+            for status in relevant
         ):
             return ProjectRunStatus.PARTIAL
-        if any(status is FunctionRunStatus.TIMED_OUT for status in values):
+        if any(status is FunctionRunStatus.TIMED_OUT for status in relevant):
             return ProjectRunStatus.TIMED_OUT
         return ProjectRunStatus.FAILED
 
     @property
     def selected_function_count(self) -> int:
-        return len(self.function_results)
+        return sum(
+            item.status is not FunctionRunStatus.SKIPPED_SELECTION
+            for item in self.function_results
+        )
 
     @property
     def executed_function_count(self) -> int:
@@ -321,6 +435,7 @@ class ProjectAnalysisResult:
             item.status
             not in {
                 FunctionRunStatus.SKIPPED,
+                FunctionRunStatus.SKIPPED_SELECTION,
                 FunctionRunStatus.SKIPPED_LIMIT,
                 FunctionRunStatus.UNSUPPORTED,
             }
@@ -359,8 +474,16 @@ class ProjectAnalysisResult:
         return self._count(FunctionRunStatus.SKIPPED_LIMIT)
 
     @property
+    def selection_skipped_function_count(self) -> int:
+        return self._count(FunctionRunStatus.SKIPPED_SELECTION)
+
+    @property
     def skipped_function_count(self) -> int:
-        return self.skipped_count + self.limit_skipped_function_count
+        return (
+            self.skipped_count
+            + self.selection_skipped_function_count
+            + self.limit_skipped_function_count
+        )
 
     @property
     def unsupported_count(self) -> int:
@@ -389,6 +512,9 @@ class ProjectAnalysisResult:
                 "failed_count": self.failed_count,
                 "timed_out_count": self.timed_out_count,
                 "skipped_count": self.skipped_count,
+                "selection_skipped_function_count": (
+                    self.selection_skipped_function_count
+                ),
                 "skipped_function_count": self.skipped_function_count,
                 "limit_skipped_function_count": self.limit_skipped_function_count,
                 "unsupported_count": self.unsupported_count,

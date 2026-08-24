@@ -27,12 +27,20 @@ from models.external_source_analysis_result import (
     PublicGitHubRepository,
     UploadedPythonFile,
 )
+from models.project_analysis_result import (
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
+)
 from services.analysis_job_service import (
     AnalysisArtifactNotFoundError,
     AnalysisJobNotFoundError,
     AnalysisJobQueueFullError,
     AnalysisJobService,
     AnalysisJobStateConflictError,
+)
+from services.external_source_analysis_service import (
+    portable_upload_module_identity,
 )
 
 
@@ -43,7 +51,52 @@ def _service(request: Request) -> AnalysisJobService:
     return request.app.state.analysis_job_service
 
 
-def _configuration(options: AnalysisOptionsRequest, output_root: Path) -> ExternalAnalysisConfiguration:
+def _target_selection(
+    options: AnalysisOptionsRequest,
+    source: object,
+) -> TargetSelection:
+    if options.target_selection_mode is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT:
+        return TargetSelection()
+    if isinstance(source, PublicGitHubRepository):
+        if options.explicit_target_names or not options.explicit_module_targets:
+            raise HTTPException(
+                status_code=422,
+                detail="GitHub target seçimi module identity gerektirir.",
+            )
+        selectors = tuple(
+            QualifiedTargetSelector(item.module_identity, item.qualified_name)
+            for item in options.explicit_module_targets
+        )
+    else:
+        if options.explicit_module_targets or not options.explicit_target_names:
+            raise HTTPException(
+                status_code=422,
+                detail="Inline/upload target seçimi yalnız qualified target adı kabul eder.",
+            )
+        if isinstance(source, InlinePythonSource):
+            module_identity = "inline_source"
+        elif isinstance(source, UploadedPythonFile):
+            module_identity = portable_upload_module_identity(source)
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Target selection kaynak türü için desteklenmiyor.",
+            )
+        selectors = tuple(
+            QualifiedTargetSelector(module_identity, qualified_name)
+            for qualified_name in options.explicit_target_names
+        )
+    return TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        selectors,
+    )
+
+
+def _configuration(
+    options: AnalysisOptionsRequest,
+    output_root: Path,
+    source: object,
+) -> ExternalAnalysisConfiguration:
     if options.selection_mode is ExternalModuleSelectionMode.ALL_ELIGIBLE_WITH_LIMIT:
         values: tuple[str, ...] = ()
     elif options.selection_mode is ExternalModuleSelectionMode.EXPLICIT_RELATIVE_PATHS:
@@ -53,6 +106,7 @@ def _configuration(options: AnalysisOptionsRequest, output_root: Path) -> Extern
     return ExternalAnalysisConfiguration(
         output_root=output_root,
         module_selection=ExternalModuleSelection(options.selection_mode, values),
+        target_selection=_target_selection(options, source),
         maximum_selected_modules=options.maximum_module_count,
         maximum_functions_per_module=options.maximum_function_count,
         episode_count=options.episode_count,
@@ -68,7 +122,7 @@ def _submit(service: AnalysisJobService, source: object, options: AnalysisOption
     request = ExternalSourceAnalysisRequest(
         source=source,
         execution_policy=options.policy,
-        configuration=_configuration(options, service.settings.output_root),
+        configuration=_configuration(options, service.settings.output_root, source),
     )
     try:
         summary = service.submit(request)

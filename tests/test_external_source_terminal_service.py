@@ -15,6 +15,7 @@ from models.external_source_analysis_result import (
     PublicGitHubRepository,
     UploadedPythonFile,
 )
+from models.project_analysis_result import TargetSelectionMode
 from services.external_source_terminal_service import (
     ExternalSourceInteractiveValidationError,
     ExternalSourceTerminalAdapter,
@@ -79,10 +80,30 @@ def test_submenu_keeps_four_source_kinds_separate() -> None:
     service.run.assert_not_called()
 
 
+def test_terminal_explicit_qualified_target_selection_uses_exact_public_identity() -> None:
+    service = _successful_service()
+    adapter, _ = _adapter(
+        (
+            "1", "class Vessel:", "    def inspect(self):", "        return 1",
+            "__END__", "1", "", "1", "2", "1", "Vessel.inspect", "", "", "0",
+        ),
+        service,
+    )
+
+    adapter.run_menu()
+
+    selection = service.run.call_args.args[0].configuration.target_selection
+    assert selection.mode is TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS
+    assert selection.selectors[0].to_dict() == {
+        "module_identity": "inline_source",
+        "qualified_name": "Vessel.inspect",
+    }
+
+
 def test_inline_multiline_static_request_excludes_end_marker() -> None:
     service = _successful_service()
     adapter, output = _adapter(
-        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "", "", "0"),
+        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "1", "", "", "0"),
         service,
     )
 
@@ -111,7 +132,7 @@ def test_uploaded_python_file_is_read_without_mutating_original(tmp_path: Path) 
     original = b"def first():\n    return 1\n"
     source.write_bytes(original)
     service = _successful_service()
-    adapter, _ = _adapter(("2", str(source), "1", "", "1", "", "", "0"), service)
+    adapter, _ = _adapter(("2", str(source), "1", "", "1", "1", "", "", "0"), service)
 
     adapter.run_menu()
 
@@ -138,7 +159,7 @@ def test_uploaded_python_file_validation_is_controlled(tmp_path: Path, name: str
 
 def test_local_directory_remains_user_owned_payload(tmp_path: Path) -> None:
     service = _successful_service()
-    adapter, _ = _adapter(("3", str(tmp_path), "1", "", "1", "", "", "0"), service)
+    adapter, _ = _adapter(("3", str(tmp_path), "1", "", "1", "1", "", "", "0"), service)
 
     adapter.run_menu()
 
@@ -151,7 +172,7 @@ def test_local_directory_remains_user_owned_payload(tmp_path: Path) -> None:
 def test_github_url_is_forwarded_without_terminal_revalidation() -> None:
     service = _successful_service()
     adapter, _ = _adapter(
-        ("4", "https://github.com/owner/repository", "1", "", "1", "", "", "0"),
+        ("4", "https://github.com/owner/repository", "1", "", "1", "1", "", "", "0"),
         service,
     )
 
@@ -167,7 +188,7 @@ def test_trusted_dynamic_requires_confirmation_and_forwards_configuration() -> N
     adapter, output = _adapter(
         (
             "1", "def first():", "    return 1", "__END__", "2", "EVET",
-            "", "3", " pkg.alpha ,pkg.alpha, pkg.beta ", "4", "5", "45", "7", "9",
+            "", "3", " pkg.alpha ,pkg.alpha, pkg.beta ", "1", "4", "5", "45", "7", "9",
             "e", "e", "0",
         ),
         service,
@@ -217,7 +238,7 @@ def test_service_domain_value_error_returns_to_submenu() -> None:
         "output root source içinde olamaz"
     )
     adapter, output = _adapter(
-        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "", "", "0"),
+        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "1", "", "", "0"),
         service,
     )
 
@@ -230,7 +251,7 @@ def test_unexpected_internal_value_error_propagates() -> None:
     service = Mock()
     service.run.side_effect = ValueError("internal bug")
     adapter, _ = _adapter(
-        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "", ""),
+        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "1", "", ""),
         service,
     )
 
@@ -243,7 +264,7 @@ def test_programming_errors_propagate(error: BaseException) -> None:
     service = Mock()
     service.run.side_effect = error
     adapter, _ = _adapter(
-        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "", ""),
+        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "1", "", ""),
         service,
     )
 
@@ -255,7 +276,7 @@ def test_keyboard_interrupt_is_reported_as_controlled_cancel() -> None:
     service = Mock()
     service.run.side_effect = KeyboardInterrupt
     adapter, output = _adapter(
-        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "", "", "0"),
+        ("1", "def first():", "    return 1", "__END__", "1", "", "1", "1", "", "", "0"),
         service,
     )
 
@@ -275,7 +296,7 @@ def test_real_inline_syntax_error_is_controlled_and_source_is_not_printed(
     adapter, output = _adapter(
         (
             "1", f"def {marker}(:", "__END__", "1", str(tmp_path / "output"),
-            "1", "", "", "0",
+            "1", "1", "", "", "0",
         ),
         service,
     )
@@ -295,8 +316,8 @@ def test_consecutive_sources_build_isolated_requests(tmp_path: Path) -> None:
     service.run.side_effect = (_result(), _result())
     adapter, _ = _adapter(
         (
-            "1", "def first():", "    return 1", "__END__", "1", "", "1", "", "",
-            "2", str(source_file), "1", "", "1", "", "", "0",
+            "1", "def first():", "    return 1", "__END__", "1", "", "1", "1", "", "",
+            "2", str(source_file), "1", "", "1", "1", "", "", "0",
         ),
         service,
     )
@@ -320,7 +341,7 @@ def test_real_terminal_inline_trusted_dynamic_runs_comparison(tmp_path: Path) ->
         (
             "1", "def classify(value: int) -> str:", "    if value > 0:",
             "        return 'positive'", "    return 'other'", "__END__",
-            "2", "EVET", str(output_root), "1", "1", "2", "60", "1", "42",
+            "2", "EVET", str(output_root), "1", "1", "1", "2", "60", "1", "42",
             "e", "e", "0",
         ),
         service,
@@ -354,7 +375,7 @@ def test_real_terminal_local_multimodule_trusted_dynamic(tmp_path: Path) -> None
     output_root = tmp_path / "local_dynamic"
     adapter, output = _adapter(
         (
-            "3", str(project), "2", "EVET", str(output_root), "1", "2", "1",
+            "3", str(project), "2", "EVET", str(output_root), "1", "1", "2", "1",
             "60", "1", "42", "h", "h", "0",
         ),
         ExternalSourceAnalysisService(),

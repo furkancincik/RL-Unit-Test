@@ -153,11 +153,32 @@ def test_project_coverage_has_a_distinct_exact_scope_section() -> None:
     assert '"Eksik fonksiyon"' in script
     assert '"Unsupported"' in script
     assert '"SKIPPED_LIMIT"' in script
+    assert '"SKIPPED_SELECTION"' in script
     assert '"Globally minimal"' in script
     assert "analiz kapsamı eksik" in script
     assert '"Combined pytest indir"' in script
     assert '"Minimized pytest indir"' in script
     assert '"Project JSON indir"' in script
+
+
+def test_explicit_qualified_target_controls_validate_without_ambiguous_csv() -> None:
+    script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    assert 'id="target-selection-mode"' in markup
+    assert 'value="ALL_ELIGIBLE_WITH_LIMIT"' in markup
+    assert 'value="EXPLICIT_QUALIFIED_TARGETS"' in markup
+    assert 'id="explicit-target-names"' in markup
+    assert 'id="module-target-rows"' in markup
+    assert 'id="add-module-target"' in markup
+    assert "validateQualifiedTargetName" in script
+    assert "validateModuleIdentity" in script
+    assert "explicit_target_names" in script
+    assert "explicit_module_targets" in script
+    assert "target_selection_mode" in script
+    assert 'split("\\n")' in script
+    assert 'split(",")' not in script.split("explicit-target-names", 1)[-1]
+    assert "if (!selection.valid)" in script
 
 
 def test_artifact_section_explains_generated_pytest_import_root_contract() -> None:

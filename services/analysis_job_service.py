@@ -428,6 +428,9 @@ class AnalysisJobService:
                     discovered_function_count=module.discovered_function_count,
                     analyzed_function_count=module.analyzed_function_count,
                     limit_skipped_function_count=module.limit_skipped_function_count,
+                    selection_skipped_function_count=(
+                        module.selection_skipped_function_count
+                    ),
                     discovered_function_names=module.discovered_function_names,
                     functions=tuple(functions),
                 )
@@ -443,6 +446,9 @@ class AnalysisJobService:
             discovered_function_count=result.discovered_function_count,
             analyzed_function_count=result.analyzed_function_count,
             limit_skipped_function_count=result.limit_skipped_function_count,
+            selection_skipped_function_count=(
+                result.selection_skipped_function_count
+            ),
             project_line_coverage_percent=(
                 result.project_coverage.full_line_coverage_percent
                 if result.project_coverage is not None

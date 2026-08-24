@@ -100,3 +100,27 @@ def test_project_coverage_result_serializes_exact_scope_without_absolute_paths(
     assert payload["scope"]["incomplete_function_count"] == 0
     assert payload["globally_minimal"] is False
     assert str(tmp_path.resolve()) not in str(payload)
+
+
+def test_scope_serializes_selection_skips_as_incomplete_analysis_scope() -> None:
+    scope = ProjectCoverageScopeSummary(
+        discovered_module_count=2,
+        selected_module_count=2,
+        completed_module_count=2,
+        discovered_function_count=4,
+        eligible_function_count=4,
+        analyzed_function_count=1,
+        completed_function_count=1,
+        partial_function_count=0,
+        failed_function_count=0,
+        timed_out_function_count=0,
+        unsupported_function_count=0,
+        skipped_limit_function_count=0,
+        scope_complete=False,
+        skipped_selection_function_count=3,
+    )
+
+    payload = scope.to_dict()
+
+    assert payload["skipped_selection_function_count"] == 3
+    assert payload["scope_complete"] is False

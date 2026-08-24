@@ -135,6 +135,24 @@
                 <input id="explicit-values" type="text" autocomplete="off" placeholder="package/core.py, package/utils.py">
                 <small>Virgülle ayırın; boşluklar ve tekrarlar temizlenir.</small>
               </div>
+              <div class="field span-two">
+                <label for="target-selection-mode">Target selection mode</label>
+                <select id="target-selection-mode">
+                  <option value="ALL_ELIGIBLE_WITH_LIMIT">Limit dahil tüm uygun hedefler</option>
+                  <option value="EXPLICIT_QUALIFIED_TARGETS">Explicit qualified target seçimi</option>
+                </select>
+              </div>
+              <div class="field span-two" id="explicit-target-names-field" hidden>
+                <label for="explicit-target-names">Qualified target adları</label>
+                <textarea id="explicit-target-names" rows="4" autocomplete="off" placeholder="TopLevelFunction&#10;ClassName.method_name"></textarea>
+                <small>Her satıra bir exact discovery hedefi yazın. Virgül kullanılmaz.</small>
+              </div>
+              <div class="field span-two" id="explicit-module-targets-field" hidden>
+                <span class="field-label">Module identity + qualified target</span>
+                <div id="module-target-rows"></div>
+                <button id="add-module-target" type="button" class="secondary-button">Target satırı ekle</button>
+                <small>Public GitHub projelerinde her target, canonical dotted module identity ile birlikte seçilir.</small>
+              </div>
               <div class="field">
                 <label for="maximum-module-count">Maksimum modül</label>
                 <input id="maximum-module-count" type="number" min="1" max="100" value="10">

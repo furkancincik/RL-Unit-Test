@@ -10,12 +10,34 @@ from models.external_source_analysis_result import (
     ExternalModuleSelectionMode,
     ExternalSourceKind,
 )
+from models.project_analysis_result import (
+    TargetSelectionMode,
+    validate_module_identity,
+    validate_qualified_target_name,
+)
 
 
 TRUSTED_WARNING = (
     "Timeout bir güvenlik sandbox'ı değildir. Dinamik analiz yalnız güvenilen "
     "kaynaklarda kullanılmalıdır."
 )
+
+
+class QualifiedTargetSelectorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    module_identity: str
+    qualified_name: str
+
+    @field_validator("module_identity")
+    @classmethod
+    def validate_module(cls, value: str) -> str:
+        return validate_module_identity(value)
+
+    @field_validator("qualified_name")
+    @classmethod
+    def validate_target(cls, value: str) -> str:
+        return validate_qualified_target_name(value)
 
 
 class AnalysisOptionsRequest(BaseModel):
@@ -32,6 +54,11 @@ class AnalysisOptionsRequest(BaseModel):
     selection_mode: ExternalModuleSelectionMode = ExternalModuleSelectionMode.ALL_ELIGIBLE_WITH_LIMIT
     explicit_relative_paths: tuple[str, ...] = ()
     explicit_module_names: tuple[str, ...] = ()
+    target_selection_mode: TargetSelectionMode = (
+        TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT
+    )
+    explicit_target_names: tuple[str, ...] = ()
+    explicit_module_targets: tuple[QualifiedTargetSelectorRequest, ...] = ()
     maximum_module_count: Annotated[int, Field(ge=1, le=100)] = 10
     maximum_function_count: Annotated[int, Field(ge=1, le=100)] = 10
     episode_count: Annotated[int, Field(ge=1, le=1000)] = 3
@@ -40,6 +67,11 @@ class AnalysisOptionsRequest(BaseModel):
     function_pipeline_timeout_seconds: Annotated[float | None, Field(gt=0, le=7200)] = 120.0
     greedy_minimization: bool = False
     strategy_comparison: bool = False
+
+    @field_validator("explicit_target_names")
+    @classmethod
+    def validate_target_names(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(validate_qualified_target_name(value) for value in values)
 
     @model_validator(mode="after")
     def validate_contract(self) -> AnalysisOptionsRequest:
@@ -56,6 +88,21 @@ class AnalysisOptionsRequest(BaseModel):
                 raise ValueError("Explicit relative-path selection yalnız relative path gerektirir.")
         elif not self.explicit_module_names or self.explicit_relative_paths:
             raise ValueError("Explicit module-name selection yalnız module name gerektirir.")
+        target_explicit = (
+            self.target_selection_mode
+            is TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS
+        )
+        has_target_values = bool(
+            self.explicit_target_names or self.explicit_module_targets
+        )
+        if target_explicit != has_target_values:
+            raise ValueError(
+                "Explicit target selection target değerleriyle kullanılmalıdır."
+            )
+        if self.explicit_target_names and self.explicit_module_targets:
+            raise ValueError(
+                "Tek-modül ve çok-modül target seçimleri birlikte kullanılamaz."
+            )
         return self
 
 
@@ -134,6 +181,7 @@ class ModuleResultResponse(BaseModel):
     discovered_function_count: int
     analyzed_function_count: int
     limit_skipped_function_count: int
+    selection_skipped_function_count: int
     discovered_function_names: list[str]
     functions: list[FunctionResultResponse]
 
@@ -149,6 +197,7 @@ class JobResultResponse(BaseModel):
     discovered_function_count: int
     analyzed_function_count: int
     limit_skipped_function_count: int
+    selection_skipped_function_count: int
     project_line_coverage_percent: float | None
     project_branch_coverage_percent: float | None
     project_coverage: dict[str, Any] | None

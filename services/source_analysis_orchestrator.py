@@ -20,6 +20,10 @@ from models.project_analysis_result import (
     FunctionTarget,
     ProjectAnalysisResult,
     ProjectRunStatus,
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
+    validate_qualified_target_name,
 )
 from models.project_coverage_result import ProjectTestCandidate
 from services.project_analysis_report_service import ProjectAnalysisReportWriter
@@ -75,6 +79,7 @@ class SourceAnalysisOrchestrator:
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
         relative_module_path: str | None = None,
+        target_selection: TargetSelection | None = None,
     ) -> ProjectAnalysisResult:
         started_at = time.perf_counter()
         normalized_source = self._normalize_source_file(source_file)
@@ -89,7 +94,12 @@ class SourceAnalysisOrchestrator:
             source_file=normalized_source,
             import_root=normalized_import_root,
         )
-        self._validate_selection(function_name, all_functions)
+        normalized_selection = self._normalize_target_selection(
+            module_identity=normalized_module,
+            function_name=function_name,
+            all_functions=all_functions,
+            target_selection=target_selection,
+        )
         self._validate_maximum_functions(maximum_functions)
         self._validate_optional_timeout(per_function_timeout_seconds)
         self._validate_optional_timeout(comparison_timeout_seconds)
@@ -106,14 +116,15 @@ class SourceAnalysisOrchestrator:
         discovered_targets = self._resolve_duplicate_targets(
             tuple(self._to_target(function) for function in analysis.functions)
         )
-        selected_targets, selection_mode = self._select_targets(
+        selected_targets, selection_mode, selected_names = self._select_targets(
             discovered_targets,
-            function_name=function_name,
-            all_functions=all_functions,
+            module_identity=normalized_module,
+            target_selection=normalized_selection,
         )
         limit_skipped_ordinals = self._limit_skipped_ordinals(
             selected_targets,
             maximum_functions,
+            selected_names,
         )
         report_path = normalized_output / "project_analysis_report.json"
         function_results: list[FunctionAnalysisResult] = []
@@ -123,6 +134,17 @@ class SourceAnalysisOrchestrator:
             function_output = self._function_output_directory(
                 normalized_output, target.qualified_name, ordinal
             )
+            if target.qualified_name not in selected_names:
+                function_results.append(
+                    FunctionAnalysisResult(
+                        target=target,
+                        status=FunctionRunStatus.SKIPPED_SELECTION,
+                        diagnostic=None,
+                        output_directory=function_output,
+                        skip_reason="TARGET_NOT_SELECTED",
+                    )
+                )
+                continue
             if not target.is_supported:
                 function_results.append(
                     FunctionAnalysisResult(
@@ -287,35 +309,46 @@ class SourceAnalysisOrchestrator:
     def _select_targets(
         targets: tuple[FunctionTarget, ...],
         *,
-        function_name: str | None,
-        all_functions: bool,
-    ) -> tuple[tuple[FunctionTarget, ...], FunctionSelectionMode]:
-        if all_functions:
+        module_identity: str,
+        target_selection: TargetSelection,
+    ) -> tuple[
+        tuple[FunctionTarget, ...],
+        FunctionSelectionMode,
+        frozenset[str],
+    ]:
+        if target_selection.mode is TargetSelectionMode.ALL_ELIGIBLE_WITH_LIMIT:
             if not targets:
                 raise SourceAnalysisValidationError(
                     "Kaynak dosyada fonksiyon bulunamadı."
                 )
-            return targets, FunctionSelectionMode.ALL
-
-        assert function_name is not None
-        matching = tuple(
-            target
-            for target in targets
-            if target.qualified_name == function_name
-            or target.name == function_name
-        )
-        supported = tuple(target for target in matching if target.is_supported)
-        if len(supported) == 1:
-            return supported, FunctionSelectionMode.SINGLE
-        if len(supported) > 1:
-            raise SourceAnalysisValidationError(
-                f"Birden fazla desteklenen {function_name!r} hedefi bulundu."
+            return (
+                targets,
+                FunctionSelectionMode.ALL_ELIGIBLE_WITH_LIMIT,
+                frozenset(target.qualified_name for target in targets),
             )
-        if matching:
-            return (matching[0],), FunctionSelectionMode.SINGLE
-        available = ", ".join(target.qualified_name for target in targets) or "Yok"
-        raise SourceAnalysisValidationError(
-            f"Fonksiyon bulunamadı: {function_name}. Kullanılabilir hedefler: {available}"
+
+        requested = target_selection.for_module(module_identity)
+        available = frozenset(target.qualified_name for target in targets)
+        missing = tuple(name for name in requested if name not in available)
+        if missing:
+            raise SourceAnalysisValidationError(
+                f"Fonksiyon bulunamadı: {missing[0]}."
+            )
+        selected = tuple(
+            target
+            for name in requested
+            for target in targets
+            if target.qualified_name == name
+        )
+        selected_ids = {id(target) for target in selected}
+        ordered = (
+            *selected,
+            *(target for target in targets if id(target) not in selected_ids),
+        )
+        return (
+            tuple(ordered),
+            FunctionSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+            frozenset(requested),
         )
 
     @staticmethod
@@ -420,13 +453,17 @@ class SourceAnalysisOrchestrator:
     def _limit_skipped_ordinals(
         targets: tuple[FunctionTarget, ...],
         maximum_functions: int | None,
+        selected_names: frozenset[str],
     ) -> frozenset[int]:
         if maximum_functions is None:
             return frozenset()
         eligible_count = 0
         skipped: set[int] = set()
         for ordinal, target in enumerate(targets, start=1):
-            if not target.is_supported:
+            if (
+                target.qualified_name not in selected_names
+                or not target.is_supported
+            ):
                 continue
             if eligible_count >= maximum_functions:
                 skipped.add(ordinal)
@@ -435,20 +472,32 @@ class SourceAnalysisOrchestrator:
         return frozenset(skipped)
 
     @staticmethod
-    def _validate_selection(
+    def _normalize_target_selection(
+        *,
+        module_identity: str,
         function_name: str | None,
         all_functions: bool,
-    ) -> None:
+        target_selection: TargetSelection | None,
+    ) -> TargetSelection:
         if not isinstance(all_functions, bool):
             raise SourceAnalysisValidationError("all_functions bool olmalıdır.")
+        if target_selection is not None:
+            if not isinstance(target_selection, TargetSelection):
+                raise SourceAnalysisValidationError(
+                    "target_selection geçersiz."
+                )
+            if function_name is not None or all_functions:
+                raise SourceAnalysisValidationError(
+                    "Legacy function selection ve target_selection birlikte kullanılamaz."
+                )
+            return target_selection
         if function_name is not None:
-            if not isinstance(function_name, str) or not function_name.strip():
-                raise SourceAnalysisValidationError("function_name boş olamaz.")
-            if any(
-                not part.isidentifier()
-                for part in function_name.split(".")
-            ) or len(function_name.split(".")) not in {1, 2}:
-                raise SourceAnalysisValidationError("function_name geçersiz.")
+            try:
+                validate_qualified_target_name(function_name)
+            except (TypeError, ValueError) as error:
+                raise SourceAnalysisValidationError(
+                    "function_name geçersiz."
+                ) from error
         if all_functions and function_name is not None:
             raise SourceAnalysisValidationError(
                 "function_name ve all_functions aynı anda kullanılamaz."
@@ -457,6 +506,13 @@ class SourceAnalysisOrchestrator:
             raise SourceAnalysisValidationError(
                 "function_name veya all_functions seçilmelidir."
             )
+        if all_functions:
+            return TargetSelection()
+        assert function_name is not None
+        return TargetSelection(
+            TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+            (QualifiedTargetSelector(module_identity, function_name),),
+        )
 
     @staticmethod
     def _validate_optional_timeout(value: float | None) -> None:

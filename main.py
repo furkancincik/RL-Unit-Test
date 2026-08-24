@@ -28,6 +28,7 @@ from services.real_rl_training_service import (
 from models.project_analysis_result import (
     ProjectAnalysisResult,
     ProjectRunStatus,
+    validate_qualified_target_name,
 )
 from services.source_analysis_orchestrator import (
     SourceAnalysisOrchestrator,
@@ -105,6 +106,16 @@ def _python_identifier(value: str) -> str:
         )
 
     return normalized_value
+
+
+def _qualified_target_name(value: str) -> str:
+    """Top-level function veya exact ``Class.method`` hedefini doğrular."""
+    try:
+        return validate_qualified_target_name(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            f"Geçersiz qualified target: {value!r}"
+        ) from error
 
 
 def _python_module_path(value: str) -> str:
@@ -210,10 +221,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
         "--function-name",
-        type=_python_identifier,
+        type=_qualified_target_name,
         default=None,
         help=(
-            "RL eğitimi uygulanacak fonksiyon. Production RL işleminde "
+            "RL eğitimi uygulanacak top-level function veya Class.method hedefi. "
+            "Production RL işleminde "
             "--all-functions kullanılmıyorsa açıkça verilmelidir."
         ),
     )
@@ -1111,15 +1123,21 @@ def _interactive_target_selection(
         )
     print("Desteklenen fonksiyonlar:")
     for function in functions:
-        print(f"- {function.name}")
-    raw_name = input("Function name: ").strip()
-    if not raw_name.isidentifier():
-        raise SourceAnalysisValidationError("Geçerli bir function name girilmelidir.")
-    if raw_name not in {function.name for function in functions}:
+        print(f"- {function.qualified_name}")
+    raw_name = input("Qualified target: ")
+    try:
+        normalized_name = validate_qualified_target_name(raw_name)
+    except (TypeError, ValueError) as error:
         raise SourceAnalysisValidationError(
-            f"Desteklenen fonksiyon bulunamadı: {raw_name}"
+            "Geçerli bir qualified target girilmelidir."
+        ) from error
+    if normalized_name not in {
+        function.qualified_name for function in functions
+    }:
+        raise SourceAnalysisValidationError(
+            f"Desteklenen fonksiyon bulunamadı: {normalized_name}"
         )
-    return raw_name, False
+    return normalized_name, False
 
 
 def _interactive_output_root(source_file: Path) -> Path:

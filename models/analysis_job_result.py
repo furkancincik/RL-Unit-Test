@@ -116,6 +116,7 @@ class AnalysisModuleSummary:
     discovered_function_count: int
     analyzed_function_count: int
     limit_skipped_function_count: int
+    selection_skipped_function_count: int
     discovered_function_names: tuple[str, ...]
     functions: tuple[AnalysisFunctionSummary, ...]
 
@@ -127,6 +128,7 @@ class AnalysisModuleSummary:
             "discovered_function_count": self.discovered_function_count,
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
+            "selection_skipped_function_count": self.selection_skipped_function_count,
             "discovered_function_names": list(self.discovered_function_names),
             "functions": [item.to_dict() for item in self.functions],
         }
@@ -144,6 +146,7 @@ class AnalysisJobResultSummary:
     discovered_function_count: int
     analyzed_function_count: int
     limit_skipped_function_count: int
+    selection_skipped_function_count: int
     project_line_coverage_percent: float | None
     project_branch_coverage_percent: float | None
     duration_seconds: float
@@ -164,6 +167,7 @@ class AnalysisJobResultSummary:
             "discovered_function_count": self.discovered_function_count,
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
+            "selection_skipped_function_count": self.selection_skipped_function_count,
             "project_line_coverage_percent": self.project_line_coverage_percent,
             "project_branch_coverage_percent": self.project_branch_coverage_percent,
             "project_coverage": self.project_coverage,

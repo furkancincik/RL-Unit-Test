@@ -107,6 +107,43 @@ def test_real_upload_static_accepts_utf8_bom_without_public_source_leak(
     service.shutdown()
 
 
+def test_real_hyphenated_upload_explicit_target_matches_canonical_module(
+    tmp_path: Path,
+) -> None:
+    source = b"def chosen():\n    return 7\n\ndef other():\n    return 9\n"
+    analysis = {
+        "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+        "explicit_target_names": ["chosen"],
+    }
+    service = _service(tmp_path)
+
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("my-file.py", source, "text/x-python")},
+            data={"analysis": json.dumps(analysis)},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=30)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}").json()
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot["safe_error_category"] != "INTERNAL_WORKER_ERROR"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "COMPLETED"
+    assert payload["modules"][0]["discovered_function_names"] == [
+        "chosen",
+        "other",
+    ]
+    serialized = json.dumps(payload)
+    assert source.decode("utf-8") not in serialized
+    assert source.hex() not in serialized
+    assert str(tmp_path) not in serialized
+    service.shutdown()
+
+
 def test_real_inline_static_accepts_nonblank_sources_without_functions(
     tmp_path: Path,
 ) -> None:
@@ -128,6 +165,36 @@ def test_real_inline_static_accepts_nonblank_sources_without_functions(
             assert result.json()["discovered_function_count"] == 0
             assert source not in json.dumps(result.json())
 
+    service.shutdown()
+
+
+def test_unknown_explicit_target_is_controlled_without_internal_worker_error(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "def available() -> int:\n    return 1\n",
+                "analysis": {
+                    "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                    "explicit_target_names": ["Missing.run"],
+                },
+            },
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=30)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}").json()
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot["safe_error_category"] != "INTERNAL_WORKER_ERROR"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "FAILED"
+    assert payload["issues"] == ["UNKNOWN_TARGET_SELECTION"]
+    assert "available" not in json.dumps(payload)
     service.shutdown()
 
 
@@ -305,12 +372,17 @@ class Flag:
         if self.enabled:
             return "enabled"
         return "disabled"
+
+def helper(value: int) -> int:
+    return value + 1
 """
     analysis = {
         "policy": "TRUSTED_DYNAMIC_ANALYSIS",
         "trusted_execution_acknowledged": True,
         "maximum_module_count": 1,
-        "maximum_function_count": 1,
+        "maximum_function_count": 10,
+        "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+        "explicit_target_names": ["Flag.label"],
         "episode_count": 1,
         "random_seed": 42,
         "pytest_coverage_timeout_seconds": 30,
@@ -321,7 +393,7 @@ class Flag:
     with TestClient(create_app(job_service=service)) as client:
         submitted = client.post(
             "/api/v1/jobs/upload",
-            files={"file": ("method.py", source, "text/x-python")},
+            files={"file": ("my-file.py", source, "text/x-python")},
             data={"analysis": json.dumps(analysis)},
         )
         assert submitted.status_code == 202
@@ -331,16 +403,45 @@ class Flag:
 
     assert response.status_code == 200
     payload = response.json()
+    assert client.get(f"/api/v1/jobs/{job_id}").json()[
+        "safe_error_category"
+    ] != "INTERNAL_WORKER_ERROR"
     method = next(
         item
         for item in payload["modules"][0]["functions"]
         if item["qualified_name"] == "Flag.label"
     )
     assert method["status"] == "COMPLETED"
+    helper = next(
+        item
+        for item in payload["modules"][0]["functions"]
+        if item["qualified_name"] == "helper"
+    )
+    assert helper["status"] == "SKIPPED_SELECTION"
+    assert helper["skip_reason"] == "TARGET_NOT_SELECTED"
+    selection_skipped = [
+        item
+        for item in payload["modules"][0]["functions"]
+        if item["status"] == "SKIPPED_SELECTION"
+    ]
+    assert payload["selection_skipped_function_count"] == len(selection_skipped)
+    assert helper in selection_skipped
+    coverage = payload["project_coverage"]
+    assert coverage["scope"]["skipped_selection_function_count"] == len(
+        selection_skipped
+    )
+    assert coverage["scope"]["scope_complete"] is False
+    assert all(
+        "Flag.label" in project_test_id
+        for project_test_id in coverage["selected_project_test_ids"]
+    )
     serialized = json.dumps(payload)
     assert '"self"' not in serialized
+    assert "module_identity" not in serialized
+    assert source.decode("utf-8") not in serialized
     assert "constructor_arguments" not in serialized
     assert "keyword_arguments" not in serialized
+    assert str(tmp_path) not in serialized
     service.shutdown()
 
 

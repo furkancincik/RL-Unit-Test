@@ -15,9 +15,17 @@ from models.external_source_analysis_result import (
     PublicGitHubRepository,
     UploadedPythonFile,
 )
+from models.project_analysis_result import (
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
+    validate_module_identity,
+    validate_qualified_target_name,
+)
 from services.external_source_analysis_service import (
     ExternalSourceAnalysisService,
     ExternalSourceAnalysisValidationError,
+    portable_upload_module_identity,
 )
 
 
@@ -56,7 +64,7 @@ class ExternalSourceTerminalAdapter:
                 if policy is None:
                     self._output("Dış kaynak analizi iptal edildi.")
                     continue
-                configuration = self._configuration(policy)
+                configuration = self._configuration(policy, source)
                 request = ExternalSourceAnalysisRequest(
                     source=source,
                     execution_policy=policy,
@@ -158,12 +166,14 @@ class ExternalSourceTerminalAdapter:
     def _configuration(
         self,
         policy: ExternalExecutionPolicy,
+        source: object,
     ) -> ExternalAnalysisConfiguration:
         suggested_output = (Path("output") / "external_source_analysis").resolve()
         output_value = self._input(f"Output root [{suggested_output}]: ").strip()
         output_root = Path(output_value).expanduser().resolve() if output_value else suggested_output
         defaults = ExternalAnalysisConfiguration(output_root=output_root)
         module_selection = self._module_selection()
+        target_selection = self._target_selection(source)
         maximum_modules = self._positive_int(
             "Maximum module count", defaults.maximum_selected_modules
         )
@@ -174,6 +184,7 @@ class ExternalSourceTerminalAdapter:
             return ExternalAnalysisConfiguration(
                 output_root=output_root,
                 module_selection=module_selection,
+                target_selection=target_selection,
                 maximum_selected_modules=maximum_modules,
                 maximum_functions_per_module=maximum_functions,
             )
@@ -191,6 +202,7 @@ class ExternalSourceTerminalAdapter:
         return ExternalAnalysisConfiguration(
             output_root=output_root,
             module_selection=module_selection,
+            target_selection=target_selection,
             maximum_selected_modules=maximum_modules,
             maximum_functions_per_module=maximum_functions,
             episode_count=episode_count,
@@ -230,6 +242,56 @@ class ExternalSourceTerminalAdapter:
             return ExternalModuleSelection(mode=mode, values=values)
         except (TypeError, ValueError) as error:
             raise ExternalSourceInteractiveValidationError(str(error)) from error
+
+    def _target_selection(self, source: object) -> TargetSelection:
+        self._output("\nHEDEF SEÇİMİ")
+        self._output("1. Tüm uygun hedefler (limitli)")
+        self._output("2. Explicit qualified target")
+        choice = self._input("Target selection [1]: ").strip() or "1"
+        if choice == "1":
+            return TargetSelection()
+        if choice != "2":
+            raise ExternalSourceInteractiveValidationError(
+                "Target selection 1 veya 2 olmalıdır."
+            )
+        target_count = self._positive_int("Target count", 1)
+        multi_module = isinstance(
+            source,
+            (LocalProjectDirectory, PublicGitHubRepository),
+        )
+        if isinstance(source, InlinePythonSource):
+            single_module_identity = "inline_source"
+        elif isinstance(source, UploadedPythonFile):
+            single_module_identity = portable_upload_module_identity(source)
+        else:
+            single_module_identity = None
+        selectors: list[QualifiedTargetSelector] = []
+        for ordinal in range(1, target_count + 1):
+            if multi_module:
+                module_identity = self._input(
+                    f"Target {ordinal} module identity: "
+                )
+            else:
+                assert single_module_identity is not None
+                module_identity = single_module_identity
+            qualified_name = self._input(
+                f"Target {ordinal} qualified name: "
+            )
+            try:
+                selectors.append(
+                    QualifiedTargetSelector(
+                        validate_module_identity(module_identity),
+                        validate_qualified_target_name(qualified_name),
+                    )
+                )
+            except (TypeError, ValueError) as error:
+                raise ExternalSourceInteractiveValidationError(
+                    "Explicit qualified target geçersiz."
+                ) from error
+        return TargetSelection(
+            TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+            tuple(selectors),
+        )
 
     def _positive_int(self, label: str, default: int) -> int:
         raw_value = self._input(f"{label} [{default}]: ").strip()
@@ -317,6 +379,7 @@ class ExternalSourceTerminalAdapter:
             f"Keşfedilen fonksiyon : {result.discovered_function_count}",
             f"Çalıştırılan fonksiyon: {result.analyzed_function_count}",
             f"SKIPPED_LIMIT        : {result.limit_skipped_function_count}",
+            f"SKIPPED_SELECTION    : {result.selection_skipped_function_count}",
         ]
         for function in functions:
             diagnostic = getattr(function, "diagnostic", None)

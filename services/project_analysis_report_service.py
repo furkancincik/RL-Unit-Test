@@ -50,6 +50,8 @@ class ProjectAnalysisReportFormatter:
             f"Keşfedilen fonksiyon  : {len(result.discovered_targets)}",
             f"Seçilen fonksiyon     : {result.selected_function_count}",
             f"Çalıştırılan fonksiyon: {result.executed_function_count}",
+            f"SKIPPED_SELECTION    : {result.selection_skipped_function_count}",
+            f"SKIPPED_LIMIT        : {result.limit_skipped_function_count}",
             (
                 "Completed / Partial / Failed / Timed out / Unsupported: "
                 f"{result.completed_count} / {result.partial_count} / "

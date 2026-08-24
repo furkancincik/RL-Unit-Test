@@ -5,12 +5,14 @@ from unittest.mock import Mock
 
 import pytest
 
+from analyzer.python_analyzer import PythonAnalyzer
 from main import (
     FUNCTION_NAME,
     GENERATED_TEST_DIRECTORY,
     MODULE_PATH,
     SOURCE_FILE,
     ApplicationConfiguration,
+    _interactive_target_selection,
     main,
     parse_cli_arguments,
     print_menu,
@@ -367,6 +369,114 @@ def test_parse_cli_arguments_supports_all_functions_and_pipeline_timeout(
     assert configuration.function_name is None
     assert configuration.all_functions is True
     assert configuration.pipeline_timeout_seconds == pytest.approx(12.5)
+
+
+def test_parse_cli_arguments_accepts_qualified_instance_method(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "renamed_source.py"
+    source_file.write_text(
+        "class Renamed:\n"
+        "    def execute(self, value: int) -> int:\n"
+        "        return value\n",
+        encoding="utf-8",
+    )
+
+    configuration = parse_cli_arguments(
+        [
+            "--source-file",
+            str(source_file),
+            "--module-path",
+            "renamed_source",
+            "--function-name",
+            "Renamed.execute",
+            "--operation",
+            "rl",
+        ]
+    )
+
+    assert configuration.function_name == "Renamed.execute"
+    assert configuration.all_functions is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("Owner.method.extra", ".method", "Owner.", "Owner/method", "Owner.method()"),
+)
+def test_parse_cli_arguments_rejects_malformed_qualified_target(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    source_file = tmp_path / "target.py"
+    source_file.write_text("def target():\n    return 1\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as error:
+        parse_cli_arguments(
+            [
+                "--source-file",
+                str(source_file),
+                "--module-path",
+                "target",
+                "--function-name",
+                value,
+                "--operation",
+                "rl",
+            ]
+        )
+
+    assert error.value.code == 2
+
+
+def test_direct_rl_unknown_qualified_target_returns_exit_two(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "known_target.py"
+    source_file.write_text(
+        "class Known:\n"
+        "    def run(self, value: int) -> int:\n"
+        "        return value\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--source-file",
+            str(source_file),
+            "--module-path",
+            "known_target",
+            "--function-name",
+            "Missing.run",
+            "--operation",
+            "rl",
+            "--output-directory",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    assert exit_code == 2
+
+
+def test_interactive_target_selection_displays_and_returns_qualified_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_file = tmp_path / "interactive_source.py"
+    source_file.write_text(
+        "class Vessel:\n"
+        "    def inspect(self, enabled: bool) -> str:\n"
+        "        return 'yes' if enabled else 'no'\n",
+        encoding="utf-8",
+    )
+    analysis = PythonAnalyzer().analyze_file(source_file)
+    answers = iter(("1", "Vessel.inspect"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    function_name, all_functions = _interactive_target_selection(analysis)
+
+    assert function_name == "Vessel.inspect"
+    assert all_functions is False
+    assert "Vessel.inspect" in capsys.readouterr().out
 
 
 def test_parse_cli_arguments_rejects_conflicting_target_modes(
