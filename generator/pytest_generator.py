@@ -4,6 +4,10 @@ import keyword
 from collections.abc import Sequence
 from typing import Any
 
+from analyzer.safe_custom_object import (
+    MAX_SAFE_OBJECTS_PER_SCENARIO,
+    SafeObjectConstructionBlueprint,
+)
 from generator.scenario_generator import Scenario
 
 
@@ -61,11 +65,18 @@ class PytestGenerator:
             for scenario in scenarios
         )
         target_class_name = self._target_class_name(scenarios)
+        custom_object_class_names = {
+            value.class_name
+            for scenario in scenarios
+            for _, value in scenario.keyword_arguments
+            if isinstance(value, SafeObjectConstructionBlueprint)
+        }
 
         code_lines = self._create_header(
             module_path=normalized_module_path,
             function_name=normalized_function_name,
             target_class_name=target_class_name,
+            custom_object_class_names=custom_object_class_names,
             requires_pytest_import=requires_pytest_import,
         )
 
@@ -104,6 +115,7 @@ class PytestGenerator:
         module_path: str,
         function_name: str,
         target_class_name: str | None,
+        custom_object_class_names: set[str],
         requires_pytest_import: bool,
     ) -> list[str]:
         """
@@ -122,9 +134,18 @@ class PytestGenerator:
                 ]
             )
 
-        imported_target = target_class_name or function_name
+        imported_targets = sorted(
+            {
+                target_class_name or function_name,
+                *custom_object_class_names,
+            }
+        )
         code_lines.extend(
-            [f"from {module_path} import {imported_target}", "", ""]
+            [
+                f"from {module_path} import {', '.join(imported_targets)}",
+                "",
+                "",
+            ]
         )
 
         return code_lines
@@ -234,6 +255,12 @@ class PytestGenerator:
             raise ValueError("Senaryo target class adı geçersizdir.")
         if scenario.target_class_name is None and scenario.constructor_arguments:
             raise ValueError("Constructor arguments yalnız method hedefinde kullanılabilir.")
+        blueprint_count = sum(
+            isinstance(value, SafeObjectConstructionBlueprint)
+            for _, value in scenario.keyword_arguments
+        )
+        if blueprint_count > MAX_SAFE_OBJECTS_PER_SCENARIO:
+            raise ValueError("Scenario custom object limitini aşıyor.")
 
         if (
             scenario.expected_exception is not None
@@ -311,11 +338,23 @@ class PytestGenerator:
                 f"{list(scenario.edge_labels)}"
             ),
         ]
+        argument_expressions: dict[str, str] = {}
+        for argument_name, argument_value in scenario.keyword_arguments:
+            if not isinstance(argument_value, SafeObjectConstructionBlueprint):
+                continue
+            variable_name = f"{argument_name}_object"
+            constructor_call = self._create_function_call(
+                function_name=argument_value.class_name,
+                keyword_arguments=argument_value.constructor_arguments,
+            )
+            code_lines.append(f"    {variable_name} = {constructor_call}")
+            argument_expressions[argument_name] = variable_name
 
         if target_class_name is None:
             function_call = self._create_function_call(
                 function_name=function_name,
                 keyword_arguments=scenario.keyword_arguments,
+                argument_expressions=argument_expressions,
             )
         else:
             constructor_call = self._create_function_call(
@@ -326,6 +365,7 @@ class PytestGenerator:
             function_call = self._create_function_call(
                 function_name=f"target.{function_name}",
                 keyword_arguments=scenario.keyword_arguments,
+                argument_expressions=argument_expressions,
             )
 
         if scenario.expects_exception:
@@ -367,6 +407,7 @@ class PytestGenerator:
             tuple[str, Any],
             ...,
         ],
+        argument_expressions: dict[str, str] | None = None,
     ) -> str:
         """
         Scenario parametrelerinden fonksiyon çağrısı oluşturur.
@@ -375,7 +416,12 @@ class PytestGenerator:
             ``calculate_score(score=50)``
         """
         rendered_arguments = ", ".join(
-            f"{argument_name}={argument_value!r}"
+            (
+                f"{argument_name}={argument_expressions[argument_name]}"
+                if argument_expressions is not None
+                and argument_name in argument_expressions
+                else f"{argument_name}={argument_value!r}"
+            )
             for argument_name, argument_value
             in keyword_arguments
         )

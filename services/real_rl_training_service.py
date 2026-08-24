@@ -15,6 +15,11 @@ from types import ModuleType
 from typing import Any, Callable
 
 from analyzer.python_analyzer import PythonAnalyzer
+from analyzer.safe_custom_object import (
+    SafeObjectConstructionBlueprint,
+    analyze_safe_custom_object_target,
+    materialize_safe_blueprint,
+)
 from analyzer.simple_instance_method import (
     SimpleInstanceMethodSpec,
     method_spec_for_target,
@@ -862,16 +867,25 @@ class RealRLTrainingService:
             PipelineStage.FUNCTION_DISCOVERY, stage_started
         )
 
+        source_tree = ast.parse(
+            normalized_source_file.read_text(encoding="utf-8")
+        )
         method_spec = (
             method_spec_for_target(
-                ast.parse(
-                    normalized_source_file.read_text(encoding="utf-8")
-                ),
+                source_tree,
                 normalized_function_name,
             )
             if getattr(function, "is_method", False) is True
             else None
         )
+        custom_object_spec, custom_object_reason = (
+            analyze_safe_custom_object_target(
+                source_tree,
+                normalized_function_name,
+            )
+        )
+        if custom_object_reason is not None:
+            raise _ControlledPipelineFailure(custom_object_reason)
 
         stage_started = diagnostic.start_stage(
             PipelineStage.PATH_DISCOVERY
@@ -902,6 +916,13 @@ class RealRLTrainingService:
             if method_spec is not None
             else function.parameter_types
         )
+        if custom_object_spec is not None:
+            parameter_names, parameter_types = (
+                custom_object_spec.analysis_metadata(
+                    tuple(parameter_names),
+                    dict(parameter_types),
+                )
+            )
 
         stage_started = diagnostic.start_stage(
             PipelineStage.PATH_FEASIBILITY
@@ -1016,6 +1037,14 @@ class RealRLTrainingService:
                 candidate_values_by_path
             ),
         )
+        if custom_object_spec is not None:
+            scenarios = [
+                custom_object_spec.bind_scenario(
+                    scenario,
+                    module_identity=normalized_module_path,
+                )
+                for scenario in scenarios
+            ]
         if method_spec is not None:
             scenarios = [
                 self._bind_method_scenario(scenario, method_spec)
@@ -1515,13 +1544,16 @@ class RealRLTrainingService:
                     "Concrete validation senaryoları aynı target'ı kullanmalıdır."
                 )
             target_class_name = next(iter(target_classes))
-            target_function = self._load_target_function(
+            target_module = self._load_target_module(
                 source_file=source_file,
                 module_path=(
                     module_path
                     if import_root is not None and module_path is not None
                     else None
                 ),
+            )
+            target_function = self._target_function_from_module(
+                module=target_module,
                 function_name=target_class_name or function_name,
             )
 
@@ -1529,6 +1561,7 @@ class RealRLTrainingService:
             for scenario in scenarios:
                 if self._scenario_matches_execution(
                     target_function=target_function,
+                    target_module=target_module,
                     scenario=scenario,
                     method_name=(function_name if target_class_name else None),
                 ):
@@ -1556,12 +1589,11 @@ class RealRLTrainingService:
         )
 
     @staticmethod
-    def _load_target_function(
+    def _load_target_module(
         *,
         source_file: Path,
         module_path: str | None,
-        function_name: str,
-    ) -> Callable[..., Any]:
+    ) -> ModuleType:
         """
         Kaynak dosyayı izole bir modül adıyla yükler ve hedef
         fonksiyonu döndürür.
@@ -1589,6 +1621,14 @@ class RealRLTrainingService:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
+        return module
+
+    @staticmethod
+    def _target_function_from_module(
+        *,
+        module: ModuleType,
+        function_name: str,
+    ) -> Callable[..., Any]:
         target_function = getattr(
             module,
             function_name,
@@ -1611,10 +1651,28 @@ class RealRLTrainingService:
         return target_function
 
     @classmethod
+    def _load_target_function(
+        cls,
+        *,
+        source_file: Path,
+        module_path: str | None,
+        function_name: str,
+    ) -> Callable[..., Any]:
+        module = cls._load_target_module(
+            source_file=source_file,
+            module_path=module_path,
+        )
+        return cls._target_function_from_module(
+            module=module,
+            function_name=function_name,
+        )
+
+    @classmethod
     def _scenario_matches_execution(
         cls,
         *,
         target_function: Callable[..., Any],
+        target_module: ModuleType | None = None,
         scenario: Scenario,
         method_name: str | None = None,
     ) -> bool:
@@ -1622,7 +1680,19 @@ class RealRLTrainingService:
         Tek bir senaryonun gerçek çalışma sonucu ile beklenen
         davranışının uyuşup uyuşmadığını döndürür.
         """
-        keyword_arguments = copy.deepcopy(scenario.keyword_argument_dict)
+        keyword_arguments: dict[str, Any] = {}
+        for name, value in scenario.keyword_arguments:
+            if isinstance(value, SafeObjectConstructionBlueprint):
+                if target_module is None:
+                    raise TypeError(
+                        "Custom object concrete validation target module gerektirir."
+                    )
+                keyword_arguments[name] = materialize_safe_blueprint(
+                    value,
+                    target_module,
+                )
+            else:
+                keyword_arguments[name] = copy.deepcopy(value)
 
         try:
             if method_name is None:

@@ -116,7 +116,11 @@ def analyze_simple_instance_method(
     if method_node.decorator_list:
         return None, "Decorated instance methods are unsupported."
 
-    method_parameters, reason = _parameters(method_node, require_self=True)
+    method_parameters, reason = _parameters(
+        method_node,
+        require_self=True,
+        allow_local_object_annotation=True,
+    )
     if reason is not None:
         return None, reason
 
@@ -237,7 +241,24 @@ def find_analysis_target(
         for statement in tree.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if statement.name == target_name:
-                    return statement
+                    if isinstance(statement, ast.AsyncFunctionDef):
+                        return statement
+                    from analyzer.safe_custom_object import (
+                        analyze_safe_custom_object_target,
+                        normalized_custom_object_target,
+                    )
+
+                    custom_spec, reason = analyze_safe_custom_object_target(
+                        tree,
+                        target_name,
+                    )
+                    if reason is not None:
+                        raise ValueError(reason)
+                    return (
+                        normalized_custom_object_target(custom_spec)
+                        if custom_spec is not None
+                        else statement
+                    )
         raise ValueError(f"Fonksiyon bulunamadı: {target_name}")
     if len(parts) != 2 or any(not part.isidentifier() for part in parts):
         raise ValueError(f"Geçersiz analiz hedefi: {target_name}")
@@ -266,7 +287,23 @@ def find_analysis_target(
     spec, reason = analyze_simple_instance_method(class_node, method_node)
     if spec is None:
         raise ValueError(reason or "Instance method desteklenmiyor.")
-    return normalized_method_node(spec)
+    normalized = normalized_method_node(spec)
+    from analyzer.safe_custom_object import (
+        analyze_safe_custom_object_target,
+        normalized_custom_object_target,
+    )
+
+    custom_spec, custom_reason = analyze_safe_custom_object_target(
+        tree,
+        target_name,
+    )
+    if custom_reason is not None:
+        raise ValueError(custom_reason)
+    return (
+        normalized_custom_object_target(custom_spec, normalized)
+        if custom_spec is not None
+        else normalized
+    )
 
 
 def method_spec_for_target(
@@ -309,6 +346,7 @@ def _parameters(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     *,
     require_self: bool,
+    allow_local_object_annotation: bool = False,
 ) -> tuple[tuple[SimpleParameter, ...], str | None]:
     if node.args.posonlyargs or node.args.kwonlyargs:
         return (), "Positional-only and keyword-only parameters are unsupported."
@@ -328,13 +366,36 @@ def _parameters(
         type_name = primitive_annotation_type(argument.annotation)
         if type_name is None:
             type_name = inference.type_for(argument.arg)
-        if type_name not in _PRIMITIVE_TYPES:
+        if type_name is None and allow_local_object_annotation:
+            type_name = _local_object_annotation_token(argument.annotation)
+        is_local_object_annotation = (
+            allow_local_object_annotation
+            and type_name is not None
+            and type_name == _local_object_annotation_token(argument.annotation)
+        )
+        if type_name not in _PRIMITIVE_TYPES and not is_local_object_annotation:
             rejection = inference.rejection_for(argument.arg)
             if rejection is not None:
                 return (), f"Parameter {argument.arg!r} {rejection}"
             return (), f"Parameter {argument.arg!r} is not a supported primitive."
         parameters.append(SimpleParameter(argument.arg, type_name))
     return tuple(parameters), None
+
+
+def _local_object_annotation_token(annotation: ast.expr | None) -> str | None:
+    if (
+        isinstance(annotation, ast.Name)
+        and annotation.id not in {"object", "Any", "None"}
+    ):
+        return annotation.id
+    if (
+        isinstance(annotation, ast.Constant)
+        and isinstance(annotation.value, str)
+        and annotation.value.isidentifier()
+        and annotation.value not in {"object", "Any", "None"}
+    ):
+        return annotation.value
+    return None
 
 
 def _constructor_state(

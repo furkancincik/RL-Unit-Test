@@ -8,6 +8,10 @@ from analyzer.simple_instance_method import (
     analyze_simple_instance_method,
     normalized_method_node,
 )
+from analyzer.safe_custom_object import (
+    analyze_safe_custom_object_target,
+    normalized_custom_object_target,
+)
 
 
 @dataclass
@@ -114,6 +118,23 @@ class ControlFlowGraphBuilder:
                     )
                 if spec is not None:
                     analysis_node = normalized_method_node(spec)
+            if (
+                isinstance(analysis_node, ast.FunctionDef)
+                and (
+                    isinstance(direct_parent, ast.Module)
+                    or isinstance(direct_parent, ast.ClassDef)
+                    and isinstance(parents.get(direct_parent), ast.Module)
+                )
+            ):
+                custom_spec, custom_reason = analyze_safe_custom_object_target(
+                    tree,
+                    graph_name,
+                )
+                if custom_spec is not None and custom_reason is None:
+                    analysis_node = normalized_custom_object_target(
+                        custom_spec,
+                        analysis_node,
+                    )
             graphs.append(
                 self._build_function_graph(
                     analysis_node,

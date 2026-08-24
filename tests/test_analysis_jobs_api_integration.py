@@ -365,6 +365,64 @@ class Shelf:
     service.shutdown()
 
 
+def test_annotated_custom_object_job_is_safe_and_hides_construction_data(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    source = b"""\
+class Parcel:
+    def __init__(self, private_measure: int = 6):
+        self.private_measure = private_measure
+
+def classify(parcel: Parcel, boundary: int) -> str:
+    if parcel.private_measure >= boundary:
+        return "accepted"
+    return "rejected"
+"""
+    analysis = {
+        "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+        "trusted_execution_acknowledged": True,
+        "maximum_module_count": 1,
+        "maximum_function_count": 1,
+        "episode_count": 1,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30,
+        "function_pipeline_timeout_seconds": 90,
+        "greedy_minimization": True,
+        "strategy_comparison": False,
+    }
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("custom_input.py", source, "text/x-python")},
+            data={"analysis": json.dumps(analysis)},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=120)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}").json()
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot["safe_error_category"] != "INTERNAL_WORKER_ERROR"
+    assert response.status_code == 200
+    payload = response.json()
+    target = next(
+        item
+        for item in payload["modules"][0]["functions"]
+        if item["qualified_name"] == "classify"
+    )
+    assert target["status"] == "COMPLETED"
+    serialized = json.dumps(payload)
+    assert "private_measure" not in serialized
+    assert "constructor_arguments" not in serialized
+    assert "keyword_arguments" not in serialized
+    assert "module_identity" not in serialized
+    assert "SafeObjectConstructionBlueprint" not in serialized
+    assert "object at 0x" not in serialized
+    assert source.decode("utf-8") not in serialized
+    service.shutdown()
+
+
 def test_same_dynamic_configuration_is_coverage_deterministic(
     tmp_path: Path,
 ) -> None:

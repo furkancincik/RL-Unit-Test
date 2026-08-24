@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from analyzer.primitive_parameter_inference import infer_primitive_parameter_types
+from analyzer.safe_custom_object import analyze_safe_custom_object_target
 from analyzer.simple_instance_method import analyze_simple_instance_method
 
 
@@ -177,6 +178,21 @@ class PythonAnalyzer:
                 is_method=is_method,
                 method_reason=method_reason,
             )
+            custom_object_reason = None
+            if (
+                isinstance(node, ast.FunctionDef)
+                and (
+                    isinstance(direct_parent, ast.Module)
+                    or isinstance(direct_parent, ast.ClassDef)
+                    and isinstance(parents.get(direct_parent), ast.Module)
+                )
+            ):
+                _, custom_object_reason = analyze_safe_custom_object_target(
+                    tree,
+                    self._qualified_name(node, ancestry),
+                )
+            if unsupported_reason is None:
+                unsupported_reason = custom_object_reason
             if method_spec is not None:
                 parameters = [
                     parameter.name
