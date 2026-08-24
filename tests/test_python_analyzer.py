@@ -292,6 +292,150 @@ def test_cfg_normalizes_self_state_comparison_and_mutation(
     assert all("self." not in label for label in labels)
 
 
+@pytest.mark.parametrize(
+    ("initializer", "method_body"),
+    [
+        ("{}", "        return not self.records\n"),
+        ("[]", "        return bool(self.entries)\n"),
+        (
+            "{}",
+            "        if key in self.records:\n"
+            "            return 'present'\n"
+            "        return 'missing'\n",
+        ),
+        (
+            "[]",
+            "        if key not in self.entries:\n"
+            "            return 'missing'\n"
+            "        return 'present'\n",
+        ),
+        (
+            "[]",
+            "        count = 0\n"
+            "        for entry in self.entries:\n"
+            "            count += 1\n"
+            "        return count\n",
+        ),
+        (
+            "{}",
+            "        count = 0\n"
+            "        for key, value in self.records.items():\n"
+            "            count += 1\n"
+            "        for value in self.records.values():\n"
+            "            count += 1\n"
+            "        return count\n",
+        ),
+    ],
+)
+def test_safe_empty_collection_state_is_analyzable(
+    tmp_path: Path,
+    initializer: str,
+    method_body: str,
+) -> None:
+    attribute = "records" if initializer == "{}" else "entries"
+    source_file = tmp_path / "empty_state.py"
+    source_file.write_text(
+        "class Store:\n"
+        "    def __init__(self):\n"
+        f"        self.{attribute} = {initializer}\n\n"
+        "    def inspect(self, key: str) -> object:\n"
+        f"{method_body}",
+        encoding="utf-8",
+    )
+
+    target = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.name == "inspect"
+    )
+
+    assert target.is_supported is True
+    assert target.unsupported_reason is None
+
+
+@pytest.mark.parametrize(
+    ("constructor_statement", "method_body", "reason_fragment"),
+    [
+        ("self.data = {'key': 1}", "return len(self.data)", "empty"),
+        ("self.data = [1]", "return len(self.data)", "empty"),
+        ("self.data = [[]]", "return len(self.data)", "empty"),
+        (
+            "self.data = {object(): 1}",
+            "return len(self.data)",
+            "empty",
+        ),
+        ("self.data = []", "self.data.append(value)\n        return 0", "mutation"),
+        ("self.data = {}", "self.data[value] = 1\n        return 0", "mutation"),
+        (
+            "self.data = []",
+            "alias = self.data\n        alias.append(value)\n        return 0",
+            "alias",
+        ),
+    ],
+)
+def test_unsafe_collection_state_remains_controlled_unsupported(
+    tmp_path: Path,
+    constructor_statement: str,
+    method_body: str,
+    reason_fragment: str,
+) -> None:
+    source_file = tmp_path / "unsupported_collection.py"
+    source_file.write_text(
+        "class Container:\n"
+        "    def __init__(self):\n"
+        f"        {constructor_statement}\n\n"
+        "    def inspect(self, value: int) -> int:\n"
+        f"        {method_body}\n",
+        encoding="utf-8",
+    )
+
+    target = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.name == "inspect"
+    )
+
+    assert target.is_supported is False
+    assert reason_fragment in (target.unsupported_reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "method_name", "attribute_name", "parameter_name"),
+    [
+        ("first_shape", "Archive", "locate", "index", "needle"),
+        ("second_shape", "Registry", "lookup", "mapping", "token"),
+        ("third_shape", "Ledger", "contains", "entries", "label"),
+    ],
+)
+def test_empty_collection_support_is_independent_of_source_identifiers(
+    tmp_path: Path,
+    module_name: str,
+    class_name: str,
+    method_name: str,
+    attribute_name: str,
+    parameter_name: str,
+) -> None:
+    source_file = tmp_path / f"{module_name}.py"
+    source_file.write_text(
+        f"class {class_name}:\n"
+        "    def __init__(self):\n"
+        f"        self.{attribute_name} = {{}}\n\n"
+        f"    def {method_name}(self, {parameter_name}: str) -> bool:\n"
+        f"        return {parameter_name} in self.{attribute_name}\n",
+        encoding="utf-8",
+    )
+
+    target = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.name == method_name
+    )
+
+    assert target.qualified_name == f"{class_name}.{method_name}"
+    assert target.is_supported is True
+    assert target.parameters == [parameter_name]
+
+
 def test_analyze_file_raises_error_when_file_does_not_exist() -> None:
     analyzer = PythonAnalyzer()
 

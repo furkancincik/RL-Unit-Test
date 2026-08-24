@@ -311,6 +311,60 @@ class Flag:
     service.shutdown()
 
 
+def test_empty_collection_instance_state_is_not_exposed_by_public_api(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    source = b"""\
+class Shelf:
+    def __init__(self):
+        self.private_records = {}
+
+    def missing(self, key: str) -> bool:
+        return key not in self.private_records
+"""
+    analysis = {
+        "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+        "trusted_execution_acknowledged": True,
+        "maximum_module_count": 1,
+        "maximum_function_count": 1,
+        "episode_count": 1,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30,
+        "function_pipeline_timeout_seconds": 90,
+        "greedy_minimization": False,
+        "strategy_comparison": False,
+    }
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("shelf.py", source, "text/x-python")},
+            data={"analysis": json.dumps(analysis)},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=120)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}")
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot.json()["safe_error_category"] != "INTERNAL_WORKER_ERROR"
+    assert response.status_code == 200
+    payload = response.json()
+    method = next(
+        item
+        for item in payload["modules"][0]["functions"]
+        if item["qualified_name"] == "Shelf.missing"
+    )
+    assert method["status"] == "COMPLETED"
+    serialized = json.dumps(payload)
+    assert "private_records" not in serialized
+    assert "__self_" not in serialized
+    assert "constructor_arguments" not in serialized
+    assert "keyword_arguments" not in serialized
+    assert source.decode("utf-8") not in serialized
+    service.shutdown()
+
+
 def test_same_dynamic_configuration_is_coverage_deterministic(
     tmp_path: Path,
 ) -> None:

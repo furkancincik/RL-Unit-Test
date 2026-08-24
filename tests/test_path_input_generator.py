@@ -3881,6 +3881,66 @@ def test_generate_rejects_non_none_identity(condition: str) -> None:
         )
 
 
+def test_generate_replays_verified_empty_collection_local_state() -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5, 6],
+        edge_labels=[None, None, "False", "True", None],
+        node_labels=[
+            "START",
+            "__self_values = []",
+            "key in __self_values",
+            "not __self_values",
+            "return 'empty'",
+            "END",
+        ],
+        node_types=["start", "Assign", "if", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4, 5, 6],
+    )
+
+    generated = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("key",),
+        parameter_types={"key": "str"},
+    )
+
+    assert generated.expected_result == "empty"
+    assert set(generated.keyword_argument_dict) == {"key"}
+    assert isinstance(generated.keyword_argument_dict["key"], str)
+
+
+def test_generate_accepts_only_zero_iteration_for_fixed_empty_collection() -> None:
+    complete_path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5],
+        edge_labels=[None, None, "Complete", None],
+        node_labels=[
+            "START", "values = []", "value in values", "return 0", "END",
+        ],
+        node_types=["start", "Assign", "for", "return", "end"],
+        line_numbers=[1, 2, 3, 4, 5],
+    )
+    iterate_path = ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5],
+        edge_labels=[None, None, "Iterate", None],
+        node_labels=[
+            "START", "values = []", "value in values", "return 1", "END",
+        ],
+        node_types=["start", "Assign", "for", "return", "end"],
+        line_numbers=[1, 2, 3, 4, 5],
+    )
+
+    generated = PathInputGenerator().generate(
+        path=complete_path,
+        parameter_names=(),
+    )
+
+    assert generated.expected_result == 0
+    with pytest.raises(UnreachablePathError, match="boş koleksiyon"):
+        PathInputGenerator().generate(
+            path=iterate_path,
+            parameter_names=(),
+        )
+
+
 def _create_dict_get_path(
     *,
     lookup: str = 'mapping.get("wanted")',

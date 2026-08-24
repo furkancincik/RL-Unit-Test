@@ -262,6 +262,14 @@ class DerivedValueInputSynthesizer:
     @staticmethod
     def _is_safe_structured_external_expression(expression: ast.expr) -> bool:
         """PathInputGenerator'ın doğruladığı dar structured provenance biçimleri."""
+        if isinstance(expression, ast.List) and not expression.elts:
+            return True
+        if (
+            isinstance(expression, ast.Dict)
+            and not expression.keys
+            and not expression.values
+        ):
+            return True
         if isinstance(expression, ast.Subscript) and isinstance(
             expression.value, ast.Name
         ):

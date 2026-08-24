@@ -224,6 +224,8 @@ class PathInputGenerator:
             )
         )
 
+        self._validate_fixed_empty_collection_path(path)
+
         direct_values = self._initialize_candidate_values(
             candidate_values=candidate_values,
             parameter_names=parameter_names,
@@ -969,6 +971,17 @@ class PathInputGenerator:
                 f"{step.node_label}"
             ) from error
 
+        if PathInputGenerator._is_fixed_empty_collection_expression(
+            iterable_expression,
+            {},
+        ):
+            if iteration_count != 0:
+                raise UnreachablePathError(
+                    "Execution path boş literal iterable üzerinde "
+                    f"iterasyon gerektiriyor: {step.node_label}"
+                )
+            return
+
         if not isinstance(iterable_expression, ast.Name):
             raise ValueError(
                 "For döngüsü iterable değeri doğrudan bir "
@@ -1109,6 +1122,150 @@ class PathInputGenerator:
                 "yolundaki iterasyon sayısıyla uyuşmuyor: "
                 f"{variable_name}={local_initial_value!r}"
             )
+
+    @classmethod
+    def _validate_fixed_empty_collection_path(
+        cls,
+        path: ExecutionPath,
+    ) -> None:
+        """Doğrudan boş literal state ile çelişen path kenarlarını reddeder."""
+        fixed_collections: dict[str, list[Any] | dict[Any, Any]] = {}
+
+        for step in path.steps:
+            if step.node_type in {"Assign", "AnnAssign"}:
+                assignment = cls._parse_single_assignment(step.node_label)
+                if assignment is None:
+                    continue
+                target_name, value = assignment
+                fixed_value = cls._empty_collection_literal(value)
+                if fixed_value is None:
+                    fixed_collections.pop(target_name, None)
+                else:
+                    fixed_collections[target_name] = fixed_value
+                continue
+
+            if (
+                step.node_type in {"if", "while"}
+                and step.outgoing_edge_label in {"True", "False"}
+            ):
+                try:
+                    condition = ast.parse(step.node_label, mode="eval").body
+                except SyntaxError:
+                    continue
+                actual = cls._fixed_collection_condition(
+                    condition,
+                    fixed_collections,
+                )
+                if actual is not None and actual is not (
+                    step.outgoing_edge_label == "True"
+                ):
+                    raise UnreachablePathError(
+                        "Execution path, doğrulanmış boş koleksiyon "
+                        f"state'iyle çelişiyor: {step.node_label}"
+                    )
+                continue
+
+            if step.node_type == "for" and step.outgoing_edge_label in {
+                "Iterate",
+                "Complete",
+            }:
+                iterable_is_empty = cls._fixed_empty_loop_iterable(
+                    step.node_label,
+                    fixed_collections,
+                )
+                if iterable_is_empty and step.outgoing_edge_label == "Iterate":
+                    raise UnreachablePathError(
+                        "Execution path doğrulanmış boş koleksiyon üzerinde "
+                        f"iterasyon gerektiriyor: {step.node_label}"
+                    )
+
+    @staticmethod
+    def _empty_collection_literal(
+        expression: ast.expr,
+    ) -> list[Any] | dict[Any, Any] | None:
+        if isinstance(expression, ast.List) and not expression.elts:
+            return []
+        if (
+            isinstance(expression, ast.Dict)
+            and not expression.keys
+            and not expression.values
+        ):
+            return {}
+        return None
+
+    @classmethod
+    def _fixed_collection_condition(
+        cls,
+        expression: ast.expr,
+        fixed_collections: dict[str, list[Any] | dict[Any, Any]],
+    ) -> bool | None:
+        if isinstance(expression, ast.Name) and expression.id in fixed_collections:
+            return bool(fixed_collections[expression.id])
+        if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+            operand = cls._fixed_collection_condition(
+                expression.operand,
+                fixed_collections,
+            )
+            return None if operand is None else not operand
+        if (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Name)
+            and expression.func.id == "bool"
+            and len(expression.args) == 1
+            and not expression.keywords
+        ):
+            return cls._fixed_collection_condition(
+                expression.args[0],
+                fixed_collections,
+            )
+        if (
+            isinstance(expression, ast.Compare)
+            and len(expression.ops) == 1
+            and isinstance(expression.ops[0], (ast.In, ast.NotIn))
+            and len(expression.comparators) == 1
+            and cls._is_fixed_empty_collection_expression(
+                expression.comparators[0],
+                fixed_collections,
+            )
+        ):
+            return isinstance(expression.ops[0], ast.NotIn)
+        return None
+
+    @classmethod
+    def _fixed_empty_loop_iterable(
+        cls,
+        label: str,
+        fixed_collections: dict[str, list[Any] | dict[Any, Any]],
+    ) -> bool:
+        try:
+            expression = ast.parse(label, mode="eval").body
+        except SyntaxError:
+            return False
+        return bool(
+            isinstance(expression, ast.Compare)
+            and len(expression.ops) == 1
+            and isinstance(expression.ops[0], ast.In)
+            and len(expression.comparators) == 1
+            and cls._is_fixed_empty_collection_expression(
+                expression.comparators[0],
+                fixed_collections,
+            )
+        )
+
+    @staticmethod
+    def _is_fixed_empty_collection_expression(
+        expression: ast.expr,
+        fixed_collections: dict[str, list[Any] | dict[Any, Any]],
+    ) -> bool:
+        if isinstance(expression, ast.Name):
+            return expression.id in fixed_collections
+        return (
+            isinstance(expression, (ast.List, ast.Tuple))
+            and not expression.elts
+            or isinstance(expression, ast.Dict)
+            and not expression.keys
+            and not expression.values
+        )
 
     @staticmethod
     def _extract_local_loop_initial_expression(

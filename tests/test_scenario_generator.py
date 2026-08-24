@@ -1280,6 +1280,113 @@ def evaluate(source: int) -> int:
     )
 
 
+def test_real_cfg_empty_collection_state_produces_concrete_valid_scenario(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "empty_state_method.py"
+    source_file.write_text(
+        "class Box:\n"
+        "    def __init__(self):\n"
+        "        self.values = []\n\n"
+        "    def inspect(self, key: str) -> str:\n"
+        "        if key in self.values:\n"
+        "            return 'present'\n"
+        "        if not self.values:\n"
+        "            return 'empty'\n"
+        "        return 'other'\n",
+        encoding="utf-8",
+    )
+    function = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.name == "inspect"
+    )
+    graph = next(
+        item
+        for item in ControlFlowGraphBuilder().build_from_file(source_file)
+        if item.function_name == "Box.inspect"
+    )
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=2)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="inspect",
+        paths=paths,
+        scores=scores,
+        parameter_names=("key",),
+        parameter_types=function.parameter_types,
+    )
+
+    assert scenarios, tuple(
+        (rejection.path_index, rejection.message)
+        for rejection in generator.rejections
+    )
+    instance = runpy.run_path(str(source_file))["Box"]()
+    assert all(
+        instance.inspect(**scenario.keyword_argument_dict)
+        == scenario.expected_result
+        for scenario in scenarios
+    ), tuple(
+        (
+            scenario.path_index,
+            scenario.keyword_argument_dict,
+            scenario.expected_result,
+            instance.inspect(**scenario.keyword_argument_dict),
+        )
+        for scenario in scenarios
+    )
+    assert {scenario.expected_result for scenario in scenarios} == {"empty"}
+
+
+def test_real_cfg_empty_dict_view_preserves_zero_iteration_semantics(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "empty_dict_view_method.py"
+    source_file.write_text(
+        "class Index:\n"
+        "    def __init__(self):\n"
+        "        self.mapping = {}\n\n"
+        "    def count(self) -> int:\n"
+        "        total = 0\n"
+        "        for key, value in self.mapping.items():\n"
+        "            total += 1\n"
+        "        return total\n",
+        encoding="utf-8",
+    )
+    function = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.name == "count"
+    )
+    graph = next(
+        item
+        for item in ControlFlowGraphBuilder().build_from_file(source_file)
+        if item.function_name == "Index.count"
+    )
+    paths = CFGPathAnalyzer().find_paths(graph, max_visits_per_node=2)
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="count",
+        paths=paths,
+        scores=scores,
+        parameter_names=(),
+        parameter_types=function.parameter_types,
+    )
+
+    assert len(scenarios) == 1
+    assert scenarios[0].expected_result == 0
+    instance = runpy.run_path(str(source_file))["Index"]()
+    assert instance.count() == scenarios[0].expected_result
+    assert generator.rejections
+    assert all(
+        rejection.category is ScenarioRejectionCategory.UNREACHABLE_INPUT
+        for rejection in generator.rejections
+    )
+
+
 def test_real_cfg_round_scenario_matches_execution_and_pytest_assertion(
     tmp_path: Path,
 ) -> None:

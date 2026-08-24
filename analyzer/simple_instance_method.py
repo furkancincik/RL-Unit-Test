@@ -73,6 +73,22 @@ class SimpleInstanceMethodSpec:
 
 
 class _SelfStateTransformer(ast.NodeTransformer):
+    def __init__(self, *, empty_dict_attributes: frozenset[str]) -> None:
+        self._empty_dict_attributes = empty_dict_attributes
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        if (
+            isinstance(node.func, ast.Attribute)
+            and _is_self_attribute(node.func.value)
+            and node.func.value.attr in self._empty_dict_attributes
+            and node.func.attr in {"items", "keys", "values"}
+            and not node.args
+            and not node.keywords
+        ):
+            replacement = ast.Tuple(elts=[], ctx=ast.Load())
+            return ast.copy_location(replacement, node)
+        return self.generic_visit(node)
+
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
             replacement = ast.Name(
@@ -133,7 +149,10 @@ def analyze_simple_instance_method(
 
     reason = _validate_method_state(
         method_node,
-        initialized_attributes={name for name, _ in state_initializers},
+        initialized_state={
+            name: _empty_collection_kind(initializer)
+            for name, initializer in state_initializers
+        },
         parameter_names={parameter.name for parameter in method_parameters},
     )
     if reason is not None:
@@ -154,7 +173,13 @@ def analyze_simple_instance_method(
 
 def normalized_method_node(spec: SimpleInstanceMethodSpec) -> ast.FunctionDef:
     method = copy.deepcopy(spec.method_node)
-    transformer = _SelfStateTransformer()
+    transformer = _SelfStateTransformer(
+        empty_dict_attributes=frozenset(
+            name
+            for name, initializer in spec.state_initializers
+            if _empty_collection_kind(initializer) == "dict"
+        )
+    )
     body = [transformer.visit(statement) for statement in method.body]
     constructor_names = {
         parameter.name: parameter.analysis_name
@@ -317,6 +342,7 @@ def _constructor_state(
     parameter_names: set[str],
 ) -> tuple[tuple[tuple[str, ast.expr], ...], str | None]:
     initializers: list[tuple[str, ast.expr]] = []
+    initialized_attributes: set[str] = set()
     for statement in constructor.body:
         if _is_docstring(statement) or isinstance(statement, ast.Pass):
             continue
@@ -325,20 +351,28 @@ def _constructor_state(
         target = statement.targets[0]
         if not _is_self_attribute(target):
             return (), "Constructor may only assign direct self attributes."
+        if target.attr in initialized_attributes:
+            return (), "Constructor self attributes may only be initialized once."
         if not (
             _is_primitive_literal(statement.value)
+            or _empty_collection_kind(statement.value) is not None
             or isinstance(statement.value, ast.Name)
             and statement.value.id in parameter_names
         ):
-            return (), "Constructor state must use a literal or primitive parameter."
+            return (
+                (),
+                "Constructor collection state must be a direct empty list or dict; "
+                "other state must use a primitive literal or parameter.",
+            )
         initializers.append((target.attr, copy.deepcopy(statement.value)))
+        initialized_attributes.add(target.attr)
     return tuple(initializers), None
 
 
 def _validate_method_state(
     method: ast.FunctionDef,
     *,
-    initialized_attributes: set[str],
+    initialized_state: dict[str, str | None],
     parameter_names: set[str],
 ) -> str | None:
     parents = {
@@ -346,7 +380,10 @@ def _validate_method_state(
         for parent in ast.walk(method)
         for child in ast.iter_child_nodes(parent)
     }
-    assigned = set(initialized_attributes)
+    assigned = set(initialized_state)
+    collection_state = {
+        name: kind for name, kind in initialized_state.items() if kind is not None
+    }
     for node in ast.walk(method):
         if node is not method and isinstance(
             node,
@@ -363,9 +400,22 @@ def _validate_method_state(
             continue
         parent = parents.get(node)
         if isinstance(parent, ast.Attribute) and parent.value is node:
+            if _is_safe_empty_dict_view(node, parent, parents, collection_state):
+                continue
+            if node.attr in collection_state:
+                return "Empty collection mutation or arbitrary method calls are unsupported."
             return "Nested or dynamic self attributes are unsupported."
         if isinstance(parent, ast.Call) and parent.func is node:
             return "Arbitrary instance method calls are unsupported."
+        if node.attr in collection_state:
+            if isinstance(node.ctx, ast.Store):
+                return "Empty collection state mutation is unsupported."
+            if isinstance(parent, ast.Subscript) and parent.value is node:
+                return "Empty collection subscript access or mutation is unsupported."
+            if _is_collection_alias(node, parent):
+                return "Empty collection state aliasing is unsupported."
+            if not _is_safe_empty_collection_read(node, parent, parents):
+                return "Unsupported empty collection state read."
         if isinstance(node.ctx, ast.Store):
             assigned.add(node.attr)
 
@@ -397,6 +447,76 @@ def _is_primitive_literal(value: ast.expr) -> bool:
         and isinstance(value.operand, ast.Constant)
         and type(value.operand.value) in (int, float)
     )
+
+
+def _empty_collection_kind(value: ast.expr) -> str | None:
+    if isinstance(value, ast.List) and not value.elts:
+        return "list"
+    if isinstance(value, ast.Dict) and not value.keys and not value.values:
+        return "dict"
+    return None
+
+
+def _is_safe_empty_dict_view(
+    node: ast.Attribute,
+    parent: ast.Attribute,
+    parents: dict[ast.AST, ast.AST],
+    collection_state: dict[str, str],
+) -> bool:
+    if collection_state.get(node.attr) != "dict":
+        return False
+    if parent.attr not in {"items", "keys", "values"}:
+        return False
+    call = parents.get(parent)
+    if not isinstance(call, ast.Call) or call.func is not parent:
+        return False
+    if call.args or call.keywords:
+        return False
+    loop = parents.get(call)
+    return isinstance(loop, ast.For) and loop.iter is call
+
+
+def _is_collection_alias(node: ast.Attribute, parent: ast.AST | None) -> bool:
+    return (
+        isinstance(parent, ast.Assign) and parent.value is node
+        or isinstance(parent, ast.AnnAssign) and parent.value is node
+        or isinstance(parent, ast.NamedExpr) and parent.value is node
+    )
+
+
+def _is_safe_empty_collection_read(
+    node: ast.Attribute,
+    parent: ast.AST | None,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    if isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not):
+        return True
+    if isinstance(parent, (ast.If, ast.While, ast.IfExp)) and parent.test is node:
+        return True
+    if isinstance(parent, ast.BoolOp):
+        return True
+    if isinstance(parent, ast.Compare):
+        return (
+            len(parent.ops) == 1
+            and isinstance(parent.ops[0], (ast.In, ast.NotIn))
+            and len(parent.comparators) == 1
+            and parent.comparators[0] is node
+        )
+    if isinstance(parent, ast.For) and parent.iter is node:
+        return True
+    if (
+        isinstance(parent, ast.Call)
+        and isinstance(parent.func, ast.Name)
+        and parent.func.id == "bool"
+        and parent.args == [node]
+        and not parent.keywords
+    ):
+        return True
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        call = parents.get(parent)
+        loop = parents.get(call) if call is not None else None
+        return isinstance(call, ast.Call) and isinstance(loop, ast.For)
+    return False
 
 
 def _safe_mutation_value(value: ast.expr, parameter_names: set[str]) -> bool:

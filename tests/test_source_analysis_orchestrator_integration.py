@@ -238,3 +238,77 @@ def test_inferred_instance_parameters_run_pytest_coverage_greedy_and_rl(
     assert "def withdraw" not in report
     assert "keyword_arguments" not in report
     assert "constructor_arguments" not in report
+
+
+def test_empty_collection_method_runs_real_pytest_coverage_and_greedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = tmp_path / "empty_collection_fixture.py"
+    source_file.write_text(
+        "class Repository:\n"
+        "    def __init__(self):\n"
+        "        self.entries = []\n\n"
+        "    def classify(self, token: str) -> str:\n"
+        "        if token in self.entries:\n"
+        "            return 'present'\n"
+        "        if not self.entries:\n"
+        "            return 'empty'\n"
+        "        return 'other'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path="empty_collection_fixture",
+        function_name="Repository.classify",
+        all_functions=False,
+        output_root=tmp_path / "collection_output",
+        max_visits_per_node=2,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=42,
+        timeout_seconds=30.0,
+        per_function_timeout_seconds=60.0,
+        run_greedy_baseline=True,
+    )
+
+    function_result = result.function_results[0]
+    assert function_result.status is FunctionRunStatus.COMPLETED, (
+        (
+            function_result.diagnostic.error_category,
+            function_result.diagnostic.error_message,
+            function_result.diagnostic.stopped_stage,
+            function_result.diagnostic.scenario_rejection_counts,
+        )
+        if function_result.diagnostic is not None
+        else None
+    )
+    assert function_result.scenario_count > 0
+    assert function_result.scenario_pool_coverage is not None
+    assert function_result.scenario_pool_coverage.covered_lines
+    assert function_result.minimization_result is not None
+    assert function_result.minimization_result.coverage_preserved is True
+    assert result.coverage_candidates
+    assert all(
+        not candidate.scenario.constructor_arguments
+        for candidate in result.coverage_candidates
+    )
+    assert all(
+        "self" not in candidate.scenario.keyword_argument_dict
+        for candidate in result.coverage_candidates
+    )
+    generated_tests = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in function_result.output_directory.rglob("test_*.py")
+    )
+    assert "from empty_collection_fixture import Repository" in generated_tests
+    assert "target = Repository()" in generated_tests
+    assert "target.classify(" in generated_tests
+    assert "assert result ==" in generated_tests
+    report = result.report_path.read_text(encoding="utf-8")
+    assert "__self_" not in report
+    assert "constructor_arguments" not in report

@@ -789,3 +789,39 @@ def test_graph_discovery_preserves_lexical_source_order(
         "Handler.method",
         "last",
     ]
+
+
+def test_empty_collection_method_normalization_preserves_safe_zero_iteration(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "empty_collection_method.py"
+    source_file.write_text(
+        "class Catalog:\n"
+        "    def __init__(self):\n"
+        "        self.mapping = {}\n"
+        "        self.entries = []\n\n"
+        "    def inspect(self, key: str) -> int:\n"
+        "        count = 0\n"
+        "        for name, value in self.mapping.items():\n"
+        "            count += 1\n"
+        "        for entry in self.entries:\n"
+        "            count += 1\n"
+        "        if key in self.mapping:\n"
+        "            count += 1\n"
+        "        return count\n",
+        encoding="utf-8",
+    )
+
+    graph = next(
+        item
+        for item in ControlFlowGraphBuilder().build_from_file(source_file)
+        if item.function_name == "Catalog.inspect"
+    )
+    labels = [node.label for node in graph.nodes]
+
+    assert "__self_mapping = {}" in labels
+    assert "__self_entries = []" in labels
+    assert "(name, value) in ()" in labels
+    assert "entry in __self_entries" in labels
+    assert "key in __self_mapping" in labels
+    assert all("self." not in label for label in labels)
