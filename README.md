@@ -77,9 +77,11 @@ Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async an
 
 ---
 
-## Safe Annotated Custom-Object Parameter Synthesis
+## Safe Local Custom-Object Parameter Synthesis
 
 - Explicit Annotations Resolving to a Top-Level Class in the Same Module
+- Unique Structural Inference for Annotation-Free Parameters
+- Direct Read-Only Attribute and Statically Compatible Callable-Interface Evidence
 - Primitive Constructor Parameters and Direct Primitive `self.attr` Provenance
 - Fresh, Independent Object Construction for Every Scenario and Generated Test
 - Construction Depth Limited to `1` and Object Count Limited to `4` per Scenario
@@ -88,7 +90,9 @@ Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async an
 
 Each immutable internal construction blueprint has a deterministic SHA-256 fingerprint over the validated dotted module identity, class name, constructor/state schema, depth, and typed canonical primitive constructor values. This module-qualified identity keeps same-named, structurally identical classes in different modules separate without using absolute paths, temporary workspace names, working directories, object representations, or memory addresses.
 
-Object synthesis requires an explicit local class annotation. Annotation-free, imported, union/generic, recursive, complex-constructor, nested-object, and arbitrary object-graph inputs remain controlled unsupported targets. Blueprint data, module identity, constructor values, object state, keyword arguments, and expected/actual runtime values are not serialized into public project, API, or Web results.
+Explicit local class annotations take precedence. For an annotation-free parameter that has no resolved primitive evidence, structural inference considers only direct `parameter.attribute` reads and statically compatible direct callable signatures. A candidate must be a safe top-level class in the same module and pass the existing primitive-constructor, direct-state, depth, and object-count rules. Exactly one complete match is accepted as an internal `STRUCTURAL_UNIQUE` binding; multiple matches produce a controlled ambiguity, while no match remains on the existing path-based controlled-unsupported route. Candidate selection never uses parameter, class, function, file, dataset, or attribute names as semantic hints.
+
+Aliasing, bare receiver use alongside structural evidence, attribute writes or deletes, nested or dynamic access, imported/cross-module candidates, unsafe constructors, recursive object graphs, and arbitrary method execution or replay remain controlled unsupported. Callable metadata may distinguish candidates but does not authorize execution during inference. Blueprint data, candidate lists, module identity, constructor values, object state, synthetic keyword arguments, and expected/actual runtime values are not serialized into public project, API, or Web results.
 
 ## Qualified Analysis Target Selection
 
@@ -445,7 +449,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2237 passed, 1 skipped in 435.42s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2265 passed, 1 skipped in 588.66s`.
 
 ---
 
@@ -938,14 +942,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2237 passed, 1 skipped in 435.42s`
+`2265 passed, 1 skipped in 588.66s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,237 |
+| Passed | 2,265 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 435.42s |
+| Duration | 588.66s |
 
 ---
 
@@ -1104,8 +1108,8 @@ RL-Unit-Test
 - Per-function global timeout is available through the service API and `main.py` option 1. External source analysis additionally exposes an optional total project deadline through the service, terminal, API, and Web UI; cooperative in-process stages can only observe that deadline at explicit stage boundaries.
 - Exact analyzed-project-scope coverage is measured with a real combined suite; whole-repository coverage remains unmeasured unless it is independently measured over every repository target.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
-- Instance-method analysis is limited to top-level classes with primitive constructor/method inputs, simple `self.attr` state, and explicitly annotated safe local custom-object parameters. Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, unannotated/imported/recursive object inputs, custom-object state graphs, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
-- Untyped inference is limited to primitive parameter evidence. Annotation-free custom-object synthesis, non-empty collection-state or element-schema inference, and ambiguous runtime-dependent typing remain unsupported.
+- Instance-method analysis is limited to top-level classes with primitive constructor/method inputs, simple `self.attr` state, and safe local custom-object parameters resolved by an explicit annotation or one unique structural match. Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, imported/recursive object inputs, custom-object state graphs, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
+- Untyped inference is limited to validated primitive evidence and unique direct-interface matches against safe top-level classes in the same module. Alias-based, cross-module, ambiguous, runtime-dependent, non-empty collection-state, and element-schema inference remain unsupported.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function and total-project timeouts do not prevent source code from accessing host files, processes, or networks.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
