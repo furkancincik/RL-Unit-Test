@@ -283,7 +283,7 @@ This allows the agent to optimize not only coverage growth but also the number o
 - Deterministic Worker Process-Handle Closure
 - Separate Per-Test and Pipeline-Wide Timeout Configuration
 
-`timeout_seconds` remains the pytest/coverage execution timeout. `pipeline_timeout_seconds` is the independent deadline for the complete service pipeline. Checkpoints contain aggregate stage, funnel, rejection, and coverage metadata; they do not persist generated inputs, expected/actual values, source code, or tracebacks.
+`timeout_seconds` remains the pytest/coverage subprocess timeout. `pipeline_timeout_seconds` independently bounds one function pipeline, while external analysis can additionally apply `project_timeout_seconds` to the complete acquisition, discovery, multi-function, and combined-coverage run. The project deadline uses a monotonic clock and every lower-level subprocess timeout is clamped to the remaining project budget. Checkpoints contain aggregate stage, funnel, rejection, and coverage metadata; they do not persist generated inputs, expected/actual values, source code, or tracebacks.
 
 ```text
 Pipeline worker
@@ -302,7 +302,11 @@ Diagnostic checkpoint
         TIMED_OUT partial result
 ```
 
-Global timeout is integrated into both the service API and the interactive project-analysis workflow. Multi-function source orchestration applies this limit independently to each supported function.
+Hard interruption is available only where work runs in a spawned pipeline worker or pytest/coverage/Git subprocess. In-process acquisition coordination, AST discovery, report finalization, and cleanup observe the deadline cooperatively between stages; the deadline is a resource bound, not a security sandbox. A target already running when its clamped worker budget expires is `TIMED_OUT`, while unstarted targets are `SKIPPED_DEADLINE` with `PROJECT_DEADLINE_EXCEEDED`. Completed immutable results are retained, so a run with usable work is `PARTIAL`; a run with no usable work is `TIMED_OUT`. Combined coverage starts only when budget remains and otherwise stays `null` / `Ölçülmedi`.
+
+The optional total project timeout is exposed by the external service, terminal, API, and Web UI. Each request creates a fresh deadline, counters, stage state, and output scope. A regression-tested second trusted-dynamic run on the same service instance therefore starts its workers, pytest, and coverage with a new budget instead of inheriting timeout or cancellation state from the preceding partial run.
+
+After worker termination and pipe/process-handle closure, pipeline cleanup retries expected Windows `PermissionError` / `OSError` failures with a bounded increasing backoff. Cleanup is restricted to the exact run-owned `rl-unit-test-pipeline-*` directory directly below the system temporary directory; symlink, junction, reparse-point, user-owned, and unrelated pre-existing roots are rejected. A persistent deletion failure produces the controlled `PIPELINE_CLEANUP_FAILED` diagnostic while preserving the preceding stage and funnel snapshot; raw OS paths and WinError details are not exposed.
 
 ---
 
@@ -337,7 +341,7 @@ DIŞ KAYNAK ANALİZİ
 
 Pasted Python is collected as multiline input until a line containing only `__END__`; the marker is not included in the source. Empty input is rejected. File selection accepts an explicit existing `.py` path, while local projects require an existing directory. GitHub URLs use the existing acquisition-service validation and are never combined with paste or upload input.
 
-External analysis defaults to `STATIC_DISCOVERY_ONLY`. `TRUSTED_DYNAMIC_ANALYSIS` requires a separate explicit `EVET` confirmation after warning that source code will execute and that timeout is not a sandbox. Dynamic settings expose output root, module-selection mode, module/function limits, per-function pipeline timeout, episode count, random seed, greedy minimization, and RL–greedy comparison. Enabling comparison also enables its production greedy baseline.
+External analysis defaults to `STATIC_DISCOVERY_ONLY`. `TRUSTED_DYNAMIC_ANALYSIS` requires a separate explicit `EVET` confirmation after warning that source code will execute and that timeout is not a sandbox. Settings expose output root, module-selection mode, module/function limits, optional total project timeout, and—in dynamic mode—per-function pipeline timeout, episode count, random seed, greedy minimization, and RL–greedy comparison. Enabling comparison also enables its production greedy baseline.
 
 The research and diagnostic operations remain available through the advanced CLI: `analyze`, `cfg`, `dqm`, `dqm-json`, `test`, `coverage`, `demo`, and `rl`. Non-interactive `rl` requires explicit source, module, and single/all-functions selection arguments.
 
@@ -383,7 +387,7 @@ All-functions CLI example:
 python main.py --operation rl --source-file datasets/sample_robustness_code.py --module-path datasets.sample_robustness_code --all-functions --pipeline-timeout-seconds 30
 ```
 
-`timeout_seconds` remains the pytest/coverage subprocess limit. `pipeline_timeout_seconds` is applied independently to each selected function. A separate project-wide deadline is not implemented; without one, every selected target is attempted in deterministic source order.
+`timeout_seconds` remains the pytest/coverage subprocess limit and `pipeline_timeout_seconds` is applied independently to each selected function. External source orchestration can also supply a run-local `project_timeout_seconds`; when it is `None`, the previous unlimited project-level behavior is preserved and every selected target is attempted in deterministic source order.
 
 ---
 
@@ -435,13 +439,13 @@ Public GitHub URL -------+          v                        |
                                       +-------------->+--> RL vs greedy report
 ```
 
-`STATIC_DISCOVERY_ONLY` is the default and never starts pytest, coverage, greedy minimization, or RL. Real execution requires the caller to select `TRUSTED_DYNAMIC_ANALYSIS` explicitly. A timeout bounds work; it is not a security sandbox. Trusted external code can still access host resources, so arbitrary untrusted execution remains unsupported.
+`STATIC_DISCOVERY_ONLY` is the default and never starts pytest, coverage, greedy minimization, or RL. Real execution requires the caller to select `TRUSTED_DYNAMIC_ANALYSIS` explicitly. Per-function and optional total-project timeouts bound work; they are not a security sandbox. Trusted external code can still access host resources, so arbitrary untrusted execution remains unsupported.
 
 Inline and upload payloads are byte-limited, encoding/syntax checked, written to unique tool-owned system-temp files, retained through analysis, and cleaned afterward. Their source text and bytes are never serialized. Local directories remain user-owned. Public GitHub sources retain the secure anonymous clone and commit-SHA policy, and their tool-owned clone survives until persistent artifacts and the atomic external report are written.
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The 38.3 interactive adapter acceptance additionally verified separate terminal source kinds, static-by-default requests, explicit trusted confirmation, multiline paste termination, state isolation, interrupt cleanup, and internal `ValueError` propagation. Current regression: `2177 passed, 1 skipped in 432.34s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2237 passed, 1 skipped in 435.42s`.
 
 ---
 
@@ -475,7 +479,7 @@ GitHub HTTPS ----+          |                    |
 
 The backend limits concurrent and queued jobs, inline/upload bytes, and terminal-job retention. Expired terminal records and their server-owned output directories are removed lazily and idempotently; running jobs and user-owned sources are not retention cleanup targets. Raw source, upload bytes, kwargs, expected/actual values, tracebacks, credentials, environment values, and tool-temp paths are not stored in public job models.
 
-`STATIC_DISCOVERY_ONLY` remains the default. `TRUSTED_DYNAMIC_ANALYSIS` requires both `trusted_execution_acknowledged: true` and a positive per-function pipeline timeout. Strategy comparison enables its production greedy baseline. Timeout is not a security sandbox; dynamic execution is only for trusted sources.
+`STATIC_DISCOVERY_ONLY` remains the default. `TRUSTED_DYNAMIC_ANALYSIS` requires both `trusted_execution_acknowledged: true` and a positive per-function pipeline timeout. An optional bounded `project_timeout_seconds` is validated before job creation, so invalid values do not consume queue capacity. Partial and timed-out jobs retain safe results through the normal HTTP `200` result endpoint. Strategy comparison enables its production greedy baseline. Timeout is not a security sandbox; dynamic execution is only for trusted sources.
 
 Queued jobs can be cancelled before execution. Running jobs are not falsely reported as cancelled because the production pipeline does not expose a safe job-level worker termination handle; a cancellation request is recorded and the API returns `409` while existing per-function timeout protection remains active. Terminal jobs cannot be cancelled again.
 
@@ -506,7 +510,7 @@ Public GitHub URL ---+          |
 
 The three browser inputs are separate tabs and map directly to the inline, multipart upload, and public GitHub endpoints. The browser does not guess whether one value is code, a path, or a URL. Server filesystem and local project-directory input is intentionally absent from the Web UI; local project analysis remains available through the terminal workflow.
 
-`STATIC_DISCOVERY_ONLY` is selected by default. `TRUSTED_DYNAMIC_ANALYSIS` reveals a visible execution warning and requires a separate acknowledgement before submission. Timeout limits work but is not a sandbox; dynamic mode must only be used for trusted code. Advanced settings expose the existing API module-selection modes, module/function limits, episode count, deterministic random seed `42`, pytest/coverage timeout, per-function pipeline timeout, greedy minimization, and RL–greedy comparison without duplicating analysis logic in the browser. Greedy minimization is enabled by default in the Web UI because it is the primary minimum-suite baseline; the more expensive RL–greedy comparison remains optional. The backward-compatible API and service defaults are unchanged.
+`STATIC_DISCOVERY_ONLY` is selected by default. `TRUSTED_DYNAMIC_ANALYSIS` reveals a visible execution warning and requires a separate acknowledgement before submission. Timeout limits work but is not a sandbox; dynamic mode must only be used for trusted code. Advanced settings expose the existing API module-selection modes, module/function limits, optional total project timeout, episode count, deterministic random seed `42`, pytest/coverage timeout, per-function pipeline timeout, greedy minimization, and RL–greedy comparison without duplicating analysis logic in the browser. Greedy minimization is enabled by default in the Web UI because it is the primary minimum-suite baseline; the more expensive RL–greedy comparison remains optional. The backward-compatible API and service defaults are unchanged.
 
 The page polls one opaque job ID at a time with bounded retry/backoff and stops at `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, or `CANCELLED`. Queued cancellation is distinguished from the `409` response for a running job. Dynamic function cards keep three measured results distinct: the concrete-valid full scenario pool is the attainable target, greedy is the independently verified minimized suite, and best RL is the actual coverage snapshot of the highest-ranked episode. A lower RL result never replaces the attainable target. Greedy and RL preservation are reported against exact line and branch identities, and a non-preserving greedy candidate is not presented as a successful minimum. `null` remains `Ölçülmedi`, and the UI does not calculate its own strategy winner. A separate Project Coverage section renders only the backend's combined project result; it never derives project coverage from function percentages. Generated pytest and JSON reports are listed and downloaded only through server-issued artifact IDs.
 
@@ -934,14 +938,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2177 passed, 1 skipped in 432.34s`
+`2237 passed, 1 skipped in 435.42s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,177 |
+| Passed | 2,237 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 432.34s |
+| Duration | 435.42s |
 
 ---
 
@@ -1097,14 +1101,13 @@ RL-Unit-Test
 - The `analyze_transactions` benchmark has only a partial concrete-suite observation because the 180-second orchestration limit expired.
 - The observed 96 temporary-suite tests are neither the final scenario-pool size nor the number of RL-executed tests.
 - Final line and branch coverage for `analyze_transactions` have not been measured.
-- Per-function global timeout is available through the service API and `main.py` option 1; a separate total project deadline is not implemented.
+- Per-function global timeout is available through the service API and `main.py` option 1. External source analysis additionally exposes an optional total project deadline through the service, terminal, API, and Web UI; cooperative in-process stages can only observe that deadline at explicit stage boundaries.
 - Exact analyzed-project-scope coverage is measured with a real combined suite; whole-repository coverage remains unmeasured unless it is independently measured over every repository target.
 - Arbitrary Python expression replay and unrestricted external-project execution are intentionally unsupported; replay is limited to explicitly safe constructs.
 - Instance-method analysis is limited to top-level classes with primitive constructor/method inputs, simple `self.attr` state, and explicitly annotated safe local custom-object parameters. Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, unannotated/imported/recursive object inputs, custom-object state graphs, dynamic or nested attributes, and arbitrary method-call replay remain controlled unsupported targets.
 - Untyped inference is limited to primitive parameter evidence. Annotation-free custom-object synthesis, non-empty collection-state or element-schema inference, and ambiguous runtime-dependent typing remain unsupported.
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
-- External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function timeout does not prevent source code from accessing host files, processes, or networks.
-- A separate total external-project deadline is not implemented; deterministic module/function limits and per-function deadlines bound individual work units.
+- External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function and total-project timeouts do not prevent source code from accessing host files, processes, or networks.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
 - The FastAPI job backend and local Web UI completed final localhost browser hardening, but authentication and rate limiting are not implemented. The terminal workflow remains the only interface for user-owned local project directories.
 - Job records are held in the application process memory. Restarting the API server does not restore previous job states; even when artifact files remain on disk, access through the old job endpoint is not guaranteed because the new process does not know the previous opaque job identifiers.
