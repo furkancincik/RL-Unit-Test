@@ -337,7 +337,12 @@ function buildAnalysisOptions() {
     explicit_module_targets: selection.explicit_module_targets,
     maximum_module_count: numericValue("maximum-module-count", "Maksimum modül", { integer: true }),
     maximum_function_count: numericValue("maximum-function-count", "Maksimum fonksiyon", { integer: true }),
+    project_timeout_seconds: numericValue("project-timeout", "Toplam proje timeout", { nullable: true }),
   };
+  if (options.project_timeout_seconds !== null
+      && (options.project_timeout_seconds <= 0 || options.project_timeout_seconds > 14400)) {
+    throw new Error("Toplam proje timeout 0 ile 14400 saniye arasında olmalıdır.");
+  }
 
   if (policy === "TRUSTED_DYNAMIC_ANALYSIS") {
     if (!trustedAcknowledgement.checked) {
@@ -937,6 +942,14 @@ function renderResult(result) {
   appendMetric(summary, "Çalıştırılan fonksiyon", measured(result.analyzed_function_count));
   appendMetric(summary, "SKIPPED_LIMIT", measured(result.limit_skipped_function_count));
   appendMetric(summary, "SKIPPED_SELECTION", measured(result.selection_skipped_function_count));
+  appendMetric(summary, "SKIPPED_DEADLINE", measured(result.deadline_skipped_function_count));
+  appendMetric(summary, "Completed target", measured(result.completed_function_count));
+  appendMetric(summary, "Partial target", measured(result.partial_function_count));
+  appendMetric(summary, "Timed-out target", measured(result.timed_out_function_count));
+  appendMetric(summary, "Toplam proje timeout", formatDuration(result.project_timeout_seconds));
+  appendMetric(summary, "Deadline'a ulaşıldı", measured(result.project_deadline_exceeded));
+  appendMetric(summary, "Son tamamlanan aşama", measured(result.last_completed_stage));
+  appendMetric(summary, "Deadline aşaması", measured(result.deadline_stage));
   appendMetric(summary, "Toplam süre", formatDuration(result.duration_seconds));
   appendMetric(summary, "Cleanup", measured(result.cleanup_status));
   appendMetric(summary, "Kategori", measured(result.issues?.[0]));

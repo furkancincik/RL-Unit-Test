@@ -42,6 +42,21 @@ def test_submission_guards_and_polling_lifecycle_are_explicit() -> None:
     assert "setTimeout" in script
 
 
+def test_project_deadline_has_distinct_input_and_backend_authoritative_metrics() -> None:
+    script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    assert 'id="project-timeout"' in markup
+    assert "Toplam proje timeout" in markup
+    assert "project_timeout_seconds" in script
+    assert "project_deadline_exceeded" in script
+    assert "deadline_skipped_function_count" in script
+    assert "last_completed_stage" in script
+    assert "deadline_stage" in script
+    assert "function_pipeline_timeout_seconds" in script
+    assert "calculateDeadline" not in script
+
+
 def test_frontend_does_not_persist_or_unsafely_render_payloads() -> None:
     script = _script()
 

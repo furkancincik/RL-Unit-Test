@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import multiprocessing.process
 import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -141,6 +144,65 @@ def child_process_worker(
         _partial_diagnostic(PipelineStage.TEST_EXECUTION)
     )
     time.sleep(10.0)
+
+
+def coverage_subprocess_worker(
+    connection: Any,
+    checkpoint_path: str,
+    temporary_root: str,
+    run_arguments: dict[str, Any],
+) -> None:
+    del connection
+    coverage_root = Path(temporary_root) / "coverage_subprocess"
+    coverage_root.mkdir()
+    source_file = coverage_root / "target_module.py"
+    test_file = coverage_root / "test_target_module.py"
+    source_file.write_text("def value() -> int:\n    return 7\n", encoding="utf-8")
+    test_file.write_text(
+        "import time\n"
+        "from target_module import value\n\n"
+        "def test_value() -> None:\n"
+        "    assert value() == 7\n"
+        "    time.sleep(10.0)\n",
+        encoding="utf-8",
+    )
+    coverage_file = coverage_root / ".coverage"
+    child = subprocess.Popen(
+        (
+            sys.executable,
+            "-m",
+            "coverage",
+            "run",
+            f"--data-file={coverage_file}",
+            "-m",
+            "pytest",
+            "-q",
+            test_file.name,
+        ),
+        cwd=coverage_root,
+    )
+    Path(run_arguments["pid_file"]).write_text(
+        str(child.pid), encoding="utf-8"
+    )
+    PipelineDiagnosticCheckpointStore(Path(checkpoint_path)).write(
+        _partial_diagnostic(PipelineStage.COVERAGE_MEASUREMENT)
+    )
+    time.sleep(10.0)
+
+
+def _system_pipeline_root() -> Path:
+    return Path(tempfile.mkdtemp(prefix="rl-unit-test-pipeline-"))
+
+
+def _remove_test_pipeline_root(root: Path) -> None:
+    if not root.exists():
+        return
+    for candidate in sorted(root.rglob("*"), reverse=True):
+        try:
+            candidate.chmod(stat.S_IWRITE)
+        except OSError:
+            pass
+    shutil.rmtree(root)
 
 
 def test_checkpoint_round_trip_is_atomic_and_json_safe(tmp_path: Path) -> None:
@@ -463,3 +525,432 @@ def test_timeout_runner_can_be_reused_after_timeout() -> None:
 
     assert first.status is PipelineRunStatus.TIMED_OUT
     assert second == "completed"
+
+
+def test_cleanup_retries_permission_error_then_succeeds() -> None:
+    root = _system_pipeline_root()
+    attempts: list[Path] = []
+    sleeps: list[float] = []
+
+    def flaky_rmtree(path: Path, **kwargs: Any) -> None:
+        attempts.append(Path(path))
+        if len(attempts) == 1:
+            raise PermissionError("private locked path")
+        shutil.rmtree(path, **kwargs)
+
+    runner = GlobalPipelineTimeoutRunner(
+        cleanup_attempts=3,
+        cleanup_backoff_seconds=0.01,
+        cleanup_sleeper=sleeps.append,
+        cleanup_rmtree=flaky_rmtree,
+    )
+    try:
+        runner._cleanup_temporary_root(root)
+    finally:
+        _remove_test_pipeline_root(root)
+
+    assert attempts == [root.resolve(), root.resolve()]
+    assert sleeps == [pytest.approx(0.01)]
+    assert not root.exists()
+
+
+def test_cleanup_retries_delayed_release_with_increasing_backoff() -> None:
+    root = _system_pipeline_root()
+    attempts = 0
+    sleeps: list[float] = []
+
+    def delayed_rmtree(path: Path, **kwargs: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise OSError("delayed release")
+        shutil.rmtree(path, **kwargs)
+
+    runner = GlobalPipelineTimeoutRunner(
+        cleanup_attempts=4,
+        cleanup_backoff_seconds=0.02,
+        cleanup_sleeper=sleeps.append,
+        cleanup_rmtree=delayed_rmtree,
+    )
+    try:
+        runner._cleanup_temporary_root(root)
+    finally:
+        _remove_test_pipeline_root(root)
+
+    assert attempts == 3
+    assert sleeps == [pytest.approx(0.02), pytest.approx(0.04)]
+    assert not root.exists()
+
+
+def test_cleanup_makes_read_only_coverage_file_writable_inside_owned_root() -> None:
+    root = _system_pipeline_root()
+    coverage_file = root / ".coverage"
+    coverage_file.write_bytes(b"coverage")
+    coverage_file.chmod(stat.S_IREAD)
+
+    try:
+        GlobalPipelineTimeoutRunner()._cleanup_temporary_root(root)
+    finally:
+        _remove_test_pipeline_root(root)
+
+    assert not root.exists()
+
+
+def test_persistent_cleanup_failure_is_safe_domain_result() -> None:
+    created: list[Path] = []
+
+    def failing_rmtree(path: Path, **kwargs: Any) -> None:
+        del kwargs
+        created.append(Path(path))
+        raise PermissionError("private OS path and message")
+
+    runner = GlobalPipelineTimeoutRunner(
+        worker_target=successful_worker,
+        cleanup_attempts=2,
+        cleanup_backoff_seconds=0.0,
+        cleanup_sleeper=lambda _: None,
+        cleanup_rmtree=failing_rmtree,
+    )
+    try:
+        result = runner.run(
+            run_arguments={},
+            source_file=Path("sample.py"),
+            function_name="target",
+            timeout_seconds=2.0,
+        )
+        payload = json.dumps(result.to_dict())
+    finally:
+        for root in set(created):
+            _remove_test_pipeline_root(root)
+
+    assert result.status is PipelineRunStatus.FAILED
+    assert result.error_category == "PIPELINE_CLEANUP_FAILED"
+    assert result.exception_type == "PipelineCleanupError"
+    assert "private OS path" not in payload
+    assert "PermissionError" not in payload
+    assert runner.last_worker_alive is False
+    assert runner.last_temporary_root_exists is True
+
+
+def test_cleanup_failure_preserves_timeout_checkpoint_snapshot() -> None:
+    created: list[Path] = []
+
+    def failing_rmtree(path: Path, **kwargs: Any) -> None:
+        del kwargs
+        created.append(Path(path))
+        raise OSError("private cleanup failure")
+
+    runner = GlobalPipelineTimeoutRunner(
+        worker_target=blocking_checkpoint_worker,
+        cleanup_attempts=2,
+        cleanup_backoff_seconds=0.0,
+        cleanup_sleeper=lambda _: None,
+        cleanup_rmtree=failing_rmtree,
+    )
+    try:
+        result = runner.run(
+            run_arguments={"stage": PipelineStage.COVERAGE_MEASUREMENT.value},
+            source_file=Path("sample.py"),
+            function_name="target",
+            timeout_seconds=0.3,
+        )
+    finally:
+        for root in set(created):
+            _remove_test_pipeline_root(root)
+
+    assert result.status is PipelineRunStatus.FAILED
+    assert result.error_category == "PIPELINE_CLEANUP_FAILED"
+    assert result.last_completed_stage is PipelineStage.PATH_DISCOVERY
+    assert result.stopped_stage is PipelineStage.COVERAGE_MEASUREMENT
+    assert result.funnel.bounded_path_count == 7
+    assert result.pipeline_timeout_seconds == pytest.approx(0.3)
+
+
+def test_pipe_process_handle_and_filesystem_cleanup_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeConnection:
+        def __init__(
+            self,
+            name: str,
+            message: tuple[str, str] | None = None,
+        ) -> None:
+            self.name = name
+            self.message = message
+
+        def poll(self, timeout: float) -> bool:
+            del timeout
+            return self.message is not None
+
+        def recv(self) -> tuple[str, str]:
+            assert self.message is not None
+            message = self.message
+            self.message = None
+            return message
+
+        def close(self) -> None:
+            events.append(f"{self.name}_close")
+
+    class FakeProcess:
+        pid = 12345
+
+        def start(self) -> None:
+            events.append("start")
+
+        @staticmethod
+        def is_alive() -> bool:
+            return False
+
+        @staticmethod
+        def join(timeout: float) -> None:
+            del timeout
+            events.append("join")
+
+        @staticmethod
+        def close() -> None:
+            events.append("process_close")
+
+    receive_connection = FakeConnection("receive", ("result", "completed"))
+    send_connection = FakeConnection("send")
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(duplex: bool) -> tuple[FakeConnection, FakeConnection]:
+            assert duplex is False
+            return receive_connection, send_connection
+
+        @staticmethod
+        def Process(*args: Any, **kwargs: Any) -> FakeProcess:
+            del args, kwargs
+            return FakeProcess()
+
+    monkeypatch.setattr(
+        "services.pipeline_timeout_service.multiprocessing.get_context",
+        lambda method: FakeContext() if method == "spawn" else None,
+    )
+    runner = GlobalPipelineTimeoutRunner(worker_target=successful_worker)
+    original_cleanup = runner._cleanup_temporary_root
+
+    def tracked_cleanup(root: Path) -> None:
+        events.append("filesystem_cleanup")
+        original_cleanup(root)
+
+    monkeypatch.setattr(runner, "_cleanup_temporary_root", tracked_cleanup)
+
+    assert runner.run(
+        run_arguments={},
+        source_file=Path("sample.py"),
+        function_name="target",
+        timeout_seconds=2.0,
+    ) == "completed"
+    assert events.index("send_close") < events.index("join")
+    assert events.index("join") < events.index("receive_close")
+    assert events.index("receive_close") < events.index("process_close")
+    assert events.index("process_close") < events.index("filesystem_cleanup")
+
+
+def test_live_worker_never_closes_handle_or_deletes_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    created_root = _system_pipeline_root()
+
+    class FakeConnection:
+        @staticmethod
+        def poll(timeout: float) -> bool:
+            del timeout
+            return False
+
+        @staticmethod
+        def recv() -> tuple[str, str]:
+            raise AssertionError("recv çağrılmamalı")
+
+        @staticmethod
+        def close() -> None:
+            events.append("pipe_close")
+
+    class FakeProcess:
+        pid = 12345
+
+        @staticmethod
+        def start() -> None:
+            events.append("start")
+
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+        @staticmethod
+        def join(timeout: float) -> None:
+            del timeout
+            events.append("join")
+
+        @staticmethod
+        def close() -> None:
+            events.append("process_close")
+
+        @staticmethod
+        def kill() -> None:
+            events.append("kill")
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(duplex: bool) -> tuple[FakeConnection, FakeConnection]:
+            assert duplex is False
+            return FakeConnection(), FakeConnection()
+
+        @staticmethod
+        def Process(*args: Any, **kwargs: Any) -> FakeProcess:
+            del args, kwargs
+            return FakeProcess()
+
+    monkeypatch.setattr(
+        "services.pipeline_timeout_service.tempfile.mkdtemp",
+        lambda prefix: str(created_root),
+    )
+    monkeypatch.setattr(
+        "services.pipeline_timeout_service.multiprocessing.get_context",
+        lambda method: FakeContext() if method == "spawn" else None,
+    )
+    runner = GlobalPipelineTimeoutRunner(worker_target=successful_worker)
+    monkeypatch.setattr(runner, "_terminate_process_tree", lambda process: None)
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_temporary_root",
+        lambda root: events.append("filesystem_cleanup"),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="cleanup sonrasında çalışıyor"):
+            runner.run(
+                run_arguments={},
+                source_file=Path("sample.py"),
+                function_name="target",
+                timeout_seconds=0.01,
+            )
+    finally:
+        _remove_test_pipeline_root(created_root)
+
+    assert "process_close" not in events
+    assert "filesystem_cleanup" not in events
+
+
+@pytest.mark.parametrize(
+    "root_factory",
+    (
+        lambda: Path(tempfile.mkdtemp(prefix="foreign-prefix-")),
+        lambda: _system_pipeline_root() / "nested",
+    ),
+)
+def test_cleanup_rejects_unowned_or_nested_root(root_factory: Any) -> None:
+    root = root_factory()
+    root.mkdir(parents=True, exist_ok=True)
+    marker = root / "user-data.txt"
+    marker.write_text("preserve", encoding="utf-8")
+
+    try:
+        with pytest.raises(RuntimeError, match="güvenli cleanup kapsamı"):
+            GlobalPipelineTimeoutRunner()._cleanup_temporary_root(root)
+        assert marker.read_text(encoding="utf-8") == "preserve"
+    finally:
+        top = root
+        while top.parent.name.startswith("rl-unit-test-pipeline-"):
+            top = top.parent
+        _remove_test_pipeline_root(top)
+
+
+def test_cleanup_touches_only_the_current_pipeline_root() -> None:
+    current = _system_pipeline_root()
+    pre_existing = _system_pipeline_root()
+    marker = pre_existing / "keep.txt"
+    marker.write_text("preserve", encoding="utf-8")
+
+    try:
+        GlobalPipelineTimeoutRunner()._cleanup_temporary_root(current)
+        assert not current.exists()
+        assert marker.read_text(encoding="utf-8") == "preserve"
+    finally:
+        _remove_test_pipeline_root(current)
+        _remove_test_pipeline_root(pre_existing)
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    (AssertionError, TypeError, RuntimeError),
+)
+def test_unexpected_cleanup_exception_still_propagates(
+    exception_type: type[Exception],
+) -> None:
+    created: list[Path] = []
+
+    def unexpected_rmtree(path: Path, **kwargs: Any) -> None:
+        del kwargs
+        created.append(Path(path))
+        raise exception_type("programming bug")
+
+    runner = GlobalPipelineTimeoutRunner(
+        worker_target=successful_worker,
+        cleanup_rmtree=unexpected_rmtree,
+    )
+    try:
+        with pytest.raises(exception_type, match="programming bug"):
+            runner.run(
+                run_arguments={},
+                source_file=Path("sample.py"),
+                function_name="target",
+                timeout_seconds=2.0,
+            )
+    finally:
+        for root in set(created):
+            _remove_test_pipeline_root(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows coverage process-tree acceptance")
+def test_real_coverage_timeout_leaves_no_new_pipeline_temp_and_next_run_succeeds(
+    tmp_path: Path,
+) -> None:
+    temp_root = Path(tempfile.gettempdir())
+    pre_existing = _system_pipeline_root()
+    marker = pre_existing / "keep.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    before = frozenset(temp_root.glob("rl-unit-test-pipeline-*"))
+    pid_file = tmp_path / "coverage.pid"
+    runner = GlobalPipelineTimeoutRunner(worker_target=coverage_subprocess_worker)
+
+    try:
+        first = runner.run(
+            run_arguments={"pid_file": str(pid_file)},
+            source_file=Path("sample.py"),
+            function_name="target",
+            timeout_seconds=1.0,
+        )
+        runner.worker_target = successful_worker
+        second = runner.run(
+            run_arguments={},
+            source_file=Path("sample.py"),
+            function_name="target",
+            timeout_seconds=2.0,
+        )
+        after = frozenset(temp_root.glob("rl-unit-test-pipeline-*"))
+
+        import ctypes
+
+        coverage_pid = int(pid_file.read_text(encoding="utf-8"))
+        process_handle = ctypes.windll.kernel32.OpenProcess(
+            0x1000, False, coverage_pid
+        )
+        if process_handle:
+            ctypes.windll.kernel32.CloseHandle(process_handle)
+
+        assert first.status is PipelineRunStatus.TIMED_OUT
+        assert first.stopped_stage is PipelineStage.COVERAGE_MEASUREMENT
+        assert second == "completed"
+        assert after == before
+        assert marker.read_text(encoding="utf-8") == "preserve"
+        assert process_handle == 0
+        assert runner.last_worker_alive is False
+        assert runner.last_temporary_root_exists is False
+    finally:
+        _remove_test_pipeline_root(pre_existing)

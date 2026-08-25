@@ -88,6 +88,7 @@ def _function_result(
         ((FunctionRunStatus.FAILED,), ProjectRunStatus.FAILED),
         ((FunctionRunStatus.UNSUPPORTED,), ProjectRunStatus.FAILED),
         ((FunctionRunStatus.TIMED_OUT,), ProjectRunStatus.TIMED_OUT),
+        ((FunctionRunStatus.SKIPPED_DEADLINE,), ProjectRunStatus.TIMED_OUT),
         ((FunctionRunStatus.SKIPPED_SELECTION,), ProjectRunStatus.COMPLETED),
         (
             (
@@ -291,3 +292,31 @@ def test_selection_skip_is_visible_but_not_selected_or_executed() -> None:
     assert result.selection_skipped_function_count == 1
     assert payload["functions"][0]["status"] == "SKIPPED_SELECTION"
     assert payload["summary"]["selection_skipped_function_count"] == 1
+
+
+def test_deadline_skip_is_visible_unexecuted_and_uses_controlled_reason() -> None:
+    skipped = FunctionAnalysisResult(
+        target=_target("deadline_target"),
+        status=FunctionRunStatus.SKIPPED_DEADLINE,
+        diagnostic=None,
+        output_directory=Path("output/deadline_target"),
+        skip_reason="PROJECT_DEADLINE_EXCEEDED",
+    )
+    result = ProjectAnalysisResult(
+        source_file=Path("target.py"),
+        module_path="target",
+        selection_mode=FunctionSelectionMode.ALL,
+        discovered_targets=(skipped.target,),
+        function_results=(skipped,),
+        total_duration_seconds=0.1,
+        status=ProjectRunStatus.TIMED_OUT,
+        output_root=Path("output"),
+        report_path=Path("output/project_analysis_report.json"),
+    )
+
+    payload = result.to_dict()
+    assert result.deadline_skipped_function_count == 1
+    assert result.executed_function_count == 0
+    assert result.skipped_function_count == 1
+    assert payload["functions"][0]["status"] == "SKIPPED_DEADLINE"
+    assert payload["summary"]["deadline_skipped_function_count"] == 1

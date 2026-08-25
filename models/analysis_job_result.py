@@ -119,6 +119,7 @@ class AnalysisModuleSummary:
     selection_skipped_function_count: int
     discovered_function_names: tuple[str, ...]
     functions: tuple[AnalysisFunctionSummary, ...]
+    deadline_skipped_function_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +130,7 @@ class AnalysisModuleSummary:
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
             "selection_skipped_function_count": self.selection_skipped_function_count,
+            "deadline_skipped_function_count": self.deadline_skipped_function_count,
             "discovered_function_names": list(self.discovered_function_names),
             "functions": [item.to_dict() for item in self.functions],
         }
@@ -154,6 +156,14 @@ class AnalysisJobResultSummary:
     modules: tuple[AnalysisModuleSummary, ...]
     issues: tuple[str, ...]
     project_coverage: dict[str, Any] | None = None
+    deadline_skipped_function_count: int = 0
+    project_timeout_seconds: float | None = None
+    project_deadline_exceeded: bool = False
+    last_completed_stage: str | None = None
+    deadline_stage: str | None = None
+    completed_function_count: int = 0
+    partial_function_count: int = 0
+    timed_out_function_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +178,7 @@ class AnalysisJobResultSummary:
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
             "selection_skipped_function_count": self.selection_skipped_function_count,
+            "deadline_skipped_function_count": self.deadline_skipped_function_count,
             "project_line_coverage_percent": self.project_line_coverage_percent,
             "project_branch_coverage_percent": self.project_branch_coverage_percent,
             "project_coverage": self.project_coverage,
@@ -175,6 +186,13 @@ class AnalysisJobResultSummary:
             "cleanup_status": self.cleanup_status,
             "modules": [item.to_dict() for item in self.modules],
             "issues": list(self.issues),
+            "project_timeout_seconds": self.project_timeout_seconds,
+            "project_deadline_exceeded": self.project_deadline_exceeded,
+            "last_completed_stage": self.last_completed_stage,
+            "deadline_stage": self.deadline_stage,
+            "completed_function_count": self.completed_function_count,
+            "partial_function_count": self.partial_function_count,
+            "timed_out_function_count": self.timed_out_function_count,
         }
 
 
@@ -191,6 +209,10 @@ class AnalysisJobSummary:
     safe_error_category: str | None = None
     cancellation_requested: bool = False
     artifact_count: int = 0
+    project_timeout_seconds: float | None = None
+    project_deadline_exceeded: bool = False
+    last_completed_stage: str | None = None
+    deadline_stage: str | None = None
 
     def __post_init__(self) -> None:
         for value in (self.created_at, self.started_at, self.finished_at):
@@ -210,4 +232,8 @@ class AnalysisJobSummary:
             "safe_error_category": self.safe_error_category,
             "cancellation_requested": self.cancellation_requested,
             "artifact_count": self.artifact_count,
+            "project_timeout_seconds": self.project_timeout_seconds,
+            "project_deadline_exceeded": self.project_deadline_exceeded,
+            "last_completed_stage": self.last_completed_stage,
+            "deadline_stage": self.deadline_stage,
         }

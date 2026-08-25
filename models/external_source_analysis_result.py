@@ -50,6 +50,7 @@ class ExternalModuleStatus(str, Enum):
     TIMED_OUT = "TIMED_OUT"
     UNSUPPORTED = "UNSUPPORTED"
     SKIPPED_LIMIT = "SKIPPED_LIMIT"
+    SKIPPED_DEADLINE = "SKIPPED_DEADLINE"
 
 
 class ExternalWorkspaceCleanupStatus(str, Enum):
@@ -186,6 +187,7 @@ class ExternalAnalysisConfiguration:
     run_greedy_baseline: bool = False
     run_strategy_comparison: bool = False
     comparison_timeout_seconds: float | None = None
+    project_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.output_root, Path):
@@ -219,7 +221,11 @@ class ExternalAnalysisConfiguration:
                 raise ValueError(f"{name} sonlu olmalıdır.")
         if self.pytest_coverage_timeout_seconds <= 0:
             raise ValueError("pytest_coverage_timeout_seconds pozitif olmalıdır.")
-        for name in ("per_function_pipeline_timeout_seconds", "comparison_timeout_seconds"):
+        for name in (
+            "per_function_pipeline_timeout_seconds",
+            "comparison_timeout_seconds",
+            "project_timeout_seconds",
+        ):
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool)
@@ -251,6 +257,7 @@ class ExternalAnalysisConfiguration:
             "run_greedy_baseline": self.run_greedy_baseline,
             "run_strategy_comparison": self.run_strategy_comparison,
             "comparison_timeout_seconds": self.comparison_timeout_seconds,
+            "project_timeout_seconds": self.project_timeout_seconds,
         }
 
 
@@ -313,6 +320,7 @@ class ExternalModuleAnalysisResult:
                 FunctionRunStatus.SKIPPED,
                 FunctionRunStatus.SKIPPED_SELECTION,
                 FunctionRunStatus.SKIPPED_LIMIT,
+                FunctionRunStatus.SKIPPED_DEADLINE,
                 FunctionRunStatus.UNSUPPORTED,
             }
             for item in getattr(self.project_result, "function_results", ())
@@ -333,6 +341,19 @@ class ExternalModuleAnalysisResult:
             return 0
         return sum(
             item.status is FunctionRunStatus.SKIPPED_SELECTION
+            for item in self.project_result.function_results
+        )
+
+    @property
+    def deadline_skipped_function_count(self) -> int:
+        if self.project_result is None:
+            return (
+                self.discovered_function_count
+                if self.status is ExternalModuleStatus.SKIPPED_DEADLINE
+                else 0
+            )
+        return sum(
+            item.status is FunctionRunStatus.SKIPPED_DEADLINE
             for item in self.project_result.function_results
         )
 
@@ -471,6 +492,7 @@ class ExternalModuleAnalysisResult:
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
             "selection_skipped_function_count": self.selection_skipped_function_count,
+            "deadline_skipped_function_count": self.deadline_skipped_function_count,
             "line_coverage_percent": self.line_coverage_percent,
             "branch_coverage_percent": self.branch_coverage_percent,
             "greedy": greedy_summaries or None,
@@ -501,6 +523,10 @@ class ExternalSourceAnalysisResult:
     cleanup_status: ExternalWorkspaceCleanupStatus
     issues: tuple[str, ...]
     project_coverage: ProjectCoverageResult | None = None
+    project_timeout_seconds: float | None = None
+    project_deadline_exceeded: bool = False
+    last_completed_stage: str | None = None
+    deadline_stage: str | None = None
 
     @property
     def analyzed_module_count(self) -> int:
@@ -524,6 +550,40 @@ class ExternalSourceAnalysisResult:
             item.selection_skipped_function_count for item in self.module_results
         )
 
+    @property
+    def deadline_skipped_function_count(self) -> int:
+        return sum(
+            item.deadline_skipped_function_count for item in self.module_results
+        )
+
+    def _function_status_count(self, status: FunctionRunStatus) -> int:
+        return sum(
+            function.status is status
+            for module in self.module_results
+            for function in (
+                getattr(module.project_result, "function_results", ())
+                if module.project_result is not None
+                else ()
+            )
+        )
+
+    @property
+    def completed_function_count(self) -> int:
+        return self._function_status_count(FunctionRunStatus.COMPLETED)
+
+    @property
+    def partial_function_count(self) -> int:
+        return self._function_status_count(FunctionRunStatus.PARTIAL)
+
+    @property
+    def timed_out_function_count(self) -> int:
+        return self._function_status_count(FunctionRunStatus.TIMED_OUT) + sum(
+            item.discovered_function_count
+            for item in self.module_results
+            if item.status is ExternalModuleStatus.TIMED_OUT
+            and item.project_result is None
+        )
+
     def to_dict(self) -> dict[str, Any]:
         counts = {status.value: sum(item.status is status for item in self.module_results) for status in ExternalModuleStatus}
         return {
@@ -543,11 +603,19 @@ class ExternalSourceAnalysisResult:
             "analyzed_function_count": self.analyzed_function_count,
             "limit_skipped_function_count": self.limit_skipped_function_count,
             "selection_skipped_function_count": self.selection_skipped_function_count,
+            "deadline_skipped_function_count": self.deadline_skipped_function_count,
+            "completed_function_count": self.completed_function_count,
+            "partial_function_count": self.partial_function_count,
+            "timed_out_function_count": self.timed_out_function_count,
             "module_status_counts": counts,
             "modules": [item.to_dict(self.output_root) for item in self.module_results],
             "output_root": ".",
             "report_path": self.report_path.name,
             "duration_seconds": self.duration_seconds,
+            "project_timeout_seconds": self.project_timeout_seconds,
+            "project_deadline_exceeded": self.project_deadline_exceeded,
+            "last_completed_stage": self.last_completed_stage,
+            "deadline_stage": self.deadline_stage,
             "cleanup_status": self.cleanup_status.value,
             "issues": list(self.issues),
             "project_coverage": (

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import tempfile
 import threading
@@ -30,6 +29,11 @@ from models.source_acquisition_result import (
     SourceIssueCategory,
     SourceTargetKind,
     SourceWorkspaceOwnership,
+)
+from services.project_deadline import ProjectDeadline
+from services.safe_filesystem_cleanup import (
+    is_link_like,
+    remove_workspace_tree,
 )
 
 
@@ -253,12 +257,21 @@ class SourceAcquisitionService:
         self._cleaned_workspaces: set[Path] = set()
         self._workspace_lock = threading.Lock()
 
-    def resolve(self, request: SourceAcquisitionRequest) -> ResolvedSourceTarget:
+    def resolve(
+        self,
+        request: SourceAcquisitionRequest,
+        *,
+        project_deadline: ProjectDeadline | None = None,
+    ) -> ResolvedSourceTarget:
         if not isinstance(request, SourceAcquisitionRequest):
             raise TypeError("request SourceAcquisitionRequest olmalıdır.")
         started = self._clock()
+        if project_deadline is not None and not isinstance(
+            project_deadline, ProjectDeadline
+        ):
+            raise TypeError("project_deadline ProjectDeadline olmalıdır.")
         if request.source_kind is SourceTargetKind.PUBLIC_GITHUB_REPOSITORY:
-            return self._resolve_github(request, started)
+            return self._resolve_github(request, started, project_deadline)
         return self._resolve_local(request, started)
 
     @contextmanager
@@ -384,6 +397,7 @@ class SourceAcquisitionService:
         self,
         request: SourceAcquisitionRequest,
         started: float,
+        project_deadline: ProjectDeadline | None,
     ) -> ResolvedSourceTarget:
         try:
             normalized, owner, repository = self._validate_github(
@@ -425,14 +439,22 @@ class SourceAcquisitionService:
             self._owned_workspaces.add(workspace)
         client = GitSubprocessClient(executable, self._runner)
         try:
+            clone_timeout = self._deadline_timeout(
+                float(request.limits.clone_timeout_seconds),
+                project_deadline,
+            )
             client.clone(
                 url=normalized,
                 destination=repository_root,
                 ref=request.ref,
-                timeout_seconds=float(request.limits.clone_timeout_seconds),
+                timeout_seconds=clone_timeout,
+            )
+            commit_timeout = self._deadline_timeout(
+                float(request.limits.clone_timeout_seconds),
+                project_deadline,
             )
             commit_sha = client.resolve_commit_sha(
-                repository_root, float(request.limits.clone_timeout_seconds)
+                repository_root, commit_timeout
             )
             limit_issue = self._repository_limit_issue(repository_root, request.limits)
             if limit_issue is not None:
@@ -472,6 +494,23 @@ class SourceAcquisitionService:
         except Exception:
             self._remove_owned_workspace(workspace)
             raise
+
+    @staticmethod
+    def _deadline_timeout(
+        configured_timeout: float,
+        project_deadline: ProjectDeadline | None,
+    ) -> float:
+        if project_deadline is None:
+            return configured_timeout
+        remaining = project_deadline.remaining_seconds()
+        if remaining is None:
+            return configured_timeout
+        if remaining <= 0.0:
+            raise _ControlledAcquisitionError(
+                SourceIssueCategory.CLONE_TIMEOUT,
+                "Project deadline public repository acquisition sırasında aşıldı.",
+            )
+        return min(configured_timeout, remaining)
 
     def _failed_temporary_result(
         self,
@@ -786,44 +825,11 @@ class SourceAcquisitionService:
 
     @staticmethod
     def _is_link_like(path: Path) -> bool:
-        try:
-            if path.is_symlink():
-                return True
-            is_junction = getattr(path, "is_junction", None)
-            if is_junction is not None and is_junction():
-                return True
-            attributes = getattr(path.lstat(), "st_file_attributes", 0)
-            return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-        except OSError:
-            return True
+        return is_link_like(path)
 
     @staticmethod
     def _remove_workspace_tree(workspace: Path) -> None:
-        resolved_workspace = workspace.resolve()
-
-        def make_writable_and_retry(
-            function: Callable[[str], object],
-            path: str,
-            error_info: tuple[type[BaseException], BaseException, object],
-        ) -> None:
-            error = error_info[1]
-            candidate = Path(path)
-            try:
-                resolved_candidate = candidate.resolve(strict=False)
-            except OSError:
-                raise error
-            if (
-                not resolved_candidate.is_relative_to(resolved_workspace)
-                or candidate.is_symlink()
-            ):
-                raise error
-            try:
-                candidate.chmod(stat.S_IWRITE)
-                function(path)
-            except OSError:
-                raise error
-
-        shutil.rmtree(resolved_workspace, onerror=make_writable_and_retry)
+        remove_workspace_tree(workspace, rmtree=shutil.rmtree)
 
     @staticmethod
     def _is_test_file(name: str) -> bool:

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import codecs
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -12,7 +14,10 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from services.analysis_job_service import AnalysisJobService, AnalysisJobSettings
 from services.external_source_analysis_service import ExternalSourceAnalysisService
+from services.pipeline_timeout_service import GlobalPipelineTimeoutRunner
+from services.real_rl_training_service import RealRLTrainingService
 from services.source_acquisition_service import SourceAcquisitionService
+from services.source_analysis_orchestrator import SourceAnalysisOrchestrator
 
 
 def _service(tmp_path: Path) -> AnalysisJobService:
@@ -271,6 +276,77 @@ def test_real_upload_trusted_dynamic_runs_coverage_greedy_and_comparison(
     assert artifacts.json()["artifacts"]
     assert tuple(sys.path) == before_path
     service.shutdown()
+
+
+def test_pipeline_cleanup_failure_is_a_safe_api_result(
+    tmp_path: Path,
+) -> None:
+    private_detail = str(tmp_path / "private-cleanup-path")
+    retained_roots: list[Path] = []
+
+    def fail_cleanup(path: Path, **kwargs: object) -> None:
+        del kwargs
+        retained_roots.append(Path(path))
+        raise PermissionError(private_detail)
+
+    timeout_runner = GlobalPipelineTimeoutRunner(
+        cleanup_attempts=1,
+        cleanup_backoff_seconds=0.0,
+        cleanup_sleeper=lambda _: None,
+        cleanup_rmtree=fail_cleanup,
+    )
+    external_service = ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: SourceAnalysisOrchestrator(
+            training_service_factory=lambda: RealRLTrainingService(
+                global_timeout_runner=timeout_runner
+            )
+        )
+    )
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path / "api-output"),
+        runner_factory=lambda: external_service,
+    )
+    source = "def classify(value: int) -> str:\n    return 'yes' if value else 'no'\n"
+    analysis = {
+        "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+        "trusted_execution_acknowledged": True,
+        "maximum_module_count": 1,
+        "maximum_function_count": 1,
+        "episode_count": 1,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30,
+        "function_pipeline_timeout_seconds": 90,
+        "greedy_minimization": False,
+        "strategy_comparison": False,
+    }
+    try:
+        with TestClient(create_app(job_service=service)) as client:
+            submitted = client.post(
+                "/api/v1/jobs/inline",
+                json={"source_code": source, "analysis": analysis},
+            )
+            assert submitted.status_code == 202
+            job_id = submitted.json()["job_id"]
+            service.wait(job_id, timeout=120)
+            snapshot = client.get(f"/api/v1/jobs/{job_id}").json()
+            response = client.get(f"/api/v1/jobs/{job_id}/result")
+    finally:
+        service.shutdown()
+        system_temp = Path(tempfile.gettempdir()).resolve()
+        for root in set(retained_roots):
+            assert root.parent.resolve() == system_temp
+            assert root.name.startswith("rl-unit-test-pipeline-")
+            shutil.rmtree(root)
+            assert not root.exists()
+
+    assert snapshot["safe_error_category"] != "INTERNAL_WORKER_ERROR"
+    assert response.status_code == 200
+    payload = response.json()
+    function = payload["modules"][0]["functions"][0]
+    assert function["error_category"] == "PIPELINE_CLEANUP_FAILED"
+    serialized = json.dumps(payload)
+    assert private_detail not in serialized
+    assert source not in serialized
 
 
 def test_tuple_handler_rejection_does_not_become_internal_worker_error(

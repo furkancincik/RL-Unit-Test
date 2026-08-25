@@ -25,6 +25,7 @@ from services.source_acquisition_service import (
     SourceCleanupError,
     SourceAcquisitionService,
 )
+from services.project_deadline import ProjectDeadline
 
 
 def _request(kind: SourceTargetKind, origin: str | Path, **kwargs: object) -> SourceAcquisitionRequest:
@@ -556,3 +557,41 @@ def test_windows_drive_path_is_not_accepted_as_github_origin() -> None:
         _request(SourceTargetKind.PUBLIC_GITHUB_REPOSITORY, r"C:\\repository")
     )
     assert SourceIssueCategory.INVALID_GITHUB_URL in _categories(result)
+
+
+def test_project_deadline_is_recomputed_before_each_git_subprocess() -> None:
+    class Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = Clock()
+    calls: list[tuple[str, ...]] = []
+
+    def runner(arguments: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        destination = Path(arguments[-1])
+        destination.mkdir(parents=True)
+        clock.value = 2.0
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    deadline = ProjectDeadline.start(1.0, clock=clock)
+    service = SourceAcquisitionService(
+        subprocess_runner=runner,
+        git_executable="git",
+        clock=clock,
+    )
+
+    result = service.resolve(
+        _request(
+            SourceTargetKind.PUBLIC_GITHUB_REPOSITORY,
+            "https://github.com/owner/repository",
+        ),
+        project_deadline=deadline,
+    )
+
+    assert len(calls) == 1
+    assert SourceIssueCategory.CLONE_TIMEOUT in _categories(result)
+    assert result.cleanup_required is False
+    assert not result.resolved_project_root.exists()

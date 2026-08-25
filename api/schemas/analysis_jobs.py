@@ -65,6 +65,7 @@ class AnalysisOptionsRequest(BaseModel):
     random_seed: int | None = 42
     pytest_coverage_timeout_seconds: Annotated[float, Field(gt=0, le=3600)] = 30.0
     function_pipeline_timeout_seconds: Annotated[float | None, Field(gt=0, le=7200)] = 120.0
+    project_timeout_seconds: Annotated[float | None, Field(gt=0, le=14_400)] = None
     greedy_minimization: bool = False
     strategy_comparison: bool = False
 
@@ -72,6 +73,13 @@ class AnalysisOptionsRequest(BaseModel):
     @classmethod
     def validate_target_names(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(validate_qualified_target_name(value) for value in values)
+
+    @field_validator("project_timeout_seconds", mode="before")
+    @classmethod
+    def reject_boolean_project_timeout(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Project timeout pozitif ve sonlu sayı olmalıdır.")
+        return value
 
     @model_validator(mode="after")
     def validate_contract(self) -> AnalysisOptionsRequest:
@@ -138,6 +146,10 @@ class JobStatusResponse(BaseModel):
     safe_error_category: str | None
     cancellation_requested: bool
     artifact_count: int
+    project_timeout_seconds: float | None
+    project_deadline_exceeded: bool
+    last_completed_stage: str | None
+    deadline_stage: str | None
 
 
 class FunctionResultResponse(BaseModel):
@@ -182,6 +194,7 @@ class ModuleResultResponse(BaseModel):
     analyzed_function_count: int
     limit_skipped_function_count: int
     selection_skipped_function_count: int
+    deadline_skipped_function_count: int
     discovered_function_names: list[str]
     functions: list[FunctionResultResponse]
 
@@ -198,6 +211,7 @@ class JobResultResponse(BaseModel):
     analyzed_function_count: int
     limit_skipped_function_count: int
     selection_skipped_function_count: int
+    deadline_skipped_function_count: int
     project_line_coverage_percent: float | None
     project_branch_coverage_percent: float | None
     project_coverage: dict[str, Any] | None
@@ -205,6 +219,13 @@ class JobResultResponse(BaseModel):
     cleanup_status: str
     modules: list[ModuleResultResponse]
     issues: list[str]
+    project_timeout_seconds: float | None
+    project_deadline_exceeded: bool
+    last_completed_stage: str | None
+    deadline_stage: str | None
+    completed_function_count: int
+    partial_function_count: int
+    timed_out_function_count: int
 
 
 class ArtifactResponse(BaseModel):

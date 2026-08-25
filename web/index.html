@@ -177,6 +177,11 @@
                 <label for="pipeline-timeout">Fonksiyon pipeline timeout</label>
                 <input id="pipeline-timeout" type="number" min="0.1" max="7200" step="0.1" value="120" disabled>
               </div>
+              <div class="field">
+                <label for="project-timeout">Toplam proje timeout</label>
+                <input id="project-timeout" type="number" min="0.1" max="14400" step="0.1" placeholder="Sınırsız">
+                <small>Boş bırakılırsa toplam proje deadline uygulanmaz.</small>
+              </div>
               <label class="toggle-row dynamic-setting" for="greedy-minimization">
                 <input id="greedy-minimization" type="checkbox" checked disabled>
                 <span><strong>Greedy minimization</strong><small>Deterministik küçültülmüş test takımı üret.</small></span>

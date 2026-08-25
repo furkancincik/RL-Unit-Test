@@ -120,6 +120,7 @@ class AnalysisJobService:
             status=AnalysisJobStatus.QUEUED,
             created_at=now,
             progress_stage="QUEUED",
+            project_timeout_seconds=request.configuration.project_timeout_seconds,
         )
         entry = _JobEntry(summary=summary, artifacts={})
         with self._lock:
@@ -242,9 +243,15 @@ class AnalysisJobService:
                     entry.summary,
                     status=terminal,
                     finished_at=self._utc_now(),
-                    progress_stage=terminal.value,
+                    progress_stage=(
+                        result.deadline_stage
+                        or terminal.value
+                    ),
                     safe_error_category=(result.issues[0] if result.issues and terminal is AnalysisJobStatus.FAILED else None),
                     artifact_count=len(artifacts),
+                    project_deadline_exceeded=result.project_deadline_exceeded,
+                    last_completed_stage=result.last_completed_stage,
+                    deadline_stage=result.deadline_stage,
                 )
             return result
         finally:
@@ -431,6 +438,9 @@ class AnalysisJobService:
                     selection_skipped_function_count=(
                         module.selection_skipped_function_count
                     ),
+                    deadline_skipped_function_count=(
+                        module.deadline_skipped_function_count
+                    ),
                     discovered_function_names=module.discovered_function_names,
                     functions=tuple(functions),
                 )
@@ -448,6 +458,9 @@ class AnalysisJobService:
             limit_skipped_function_count=result.limit_skipped_function_count,
             selection_skipped_function_count=(
                 result.selection_skipped_function_count
+            ),
+            deadline_skipped_function_count=(
+                result.deadline_skipped_function_count
             ),
             project_line_coverage_percent=(
                 result.project_coverage.full_line_coverage_percent
@@ -468,6 +481,13 @@ class AnalysisJobService:
                 if result.project_coverage is not None
                 else None
             ),
+            project_timeout_seconds=result.project_timeout_seconds,
+            project_deadline_exceeded=result.project_deadline_exceeded,
+            last_completed_stage=result.last_completed_stage,
+            deadline_stage=result.deadline_stage,
+            completed_function_count=result.completed_function_count,
+            partial_function_count=result.partial_function_count,
+            timed_out_function_count=result.timed_out_function_count,
         )
 
     @staticmethod

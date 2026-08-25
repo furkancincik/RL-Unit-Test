@@ -113,6 +113,7 @@ def _configuration(
         random_seed=options.random_seed,
         pytest_coverage_timeout_seconds=options.pytest_coverage_timeout_seconds,
         per_function_pipeline_timeout_seconds=options.function_pipeline_timeout_seconds,
+        project_timeout_seconds=options.project_timeout_seconds,
         run_greedy_baseline=options.greedy_minimization or options.strategy_comparison,
         run_strategy_comparison=options.strategy_comparison,
     )

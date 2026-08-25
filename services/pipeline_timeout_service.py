@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
 import os
 import shutil
@@ -19,10 +20,18 @@ from models.pipeline_diagnostic_result import (
     PipelineFunnelSnapshot,
     PipelineRunStatus,
 )
+from services.safe_filesystem_cleanup import (
+    is_link_like,
+    remove_workspace_tree,
+)
 
 
 class PipelineWorkerFailure(RuntimeError):
     """Global timeout worker'ı sonuç üretemeden durduğunda oluşur."""
+
+
+class PipelineCleanupError(RuntimeError):
+    """Run-specific pipeline temp root güvenle temizlenemediğinde oluşur."""
 
 
 class PipelineDiagnosticCheckpointStore:
@@ -126,8 +135,34 @@ class GlobalPipelineTimeoutRunner:
     def __init__(
         self,
         worker_target: WorkerTarget = _real_rl_training_worker,
+        *,
+        cleanup_attempts: int = 8,
+        cleanup_backoff_seconds: float = 0.1,
+        cleanup_sleeper: Callable[[float], None] = time.sleep,
+        cleanup_rmtree: Callable[..., None] = shutil.rmtree,
     ) -> None:
+        if (
+            isinstance(cleanup_attempts, bool)
+            or not isinstance(cleanup_attempts, int)
+            or cleanup_attempts <= 0
+        ):
+            raise ValueError("cleanup_attempts pozitif tam sayı olmalıdır.")
+        if (
+            isinstance(cleanup_backoff_seconds, bool)
+            or not isinstance(cleanup_backoff_seconds, (int, float))
+            or not math.isfinite(float(cleanup_backoff_seconds))
+            or cleanup_backoff_seconds < 0.0
+        ):
+            raise ValueError(
+                "cleanup_backoff_seconds negatif olmayan sonlu sayı olmalıdır."
+            )
+        if not callable(cleanup_sleeper) or not callable(cleanup_rmtree):
+            raise TypeError("Cleanup bağımlılıkları callable olmalıdır.")
         self.worker_target = worker_target
+        self._cleanup_attempts = cleanup_attempts
+        self._cleanup_backoff_seconds = float(cleanup_backoff_seconds)
+        self._cleanup_sleeper = cleanup_sleeper
+        self._cleanup_rmtree = cleanup_rmtree
         self.last_worker_pid: int | None = None
         self.last_worker_alive = False
         self.last_temporary_root_exists = False
@@ -163,6 +198,8 @@ class GlobalPipelineTimeoutRunner:
         )
         process_started = False
         process_stopped = False
+        cleanup_failure: PipelineCleanupError | None = None
+        run_result: Any
 
         try:
             process.start()
@@ -200,39 +237,39 @@ class GlobalPipelineTimeoutRunner:
                 self._terminate_process_tree(process)
                 elapsed = max(0.0, time.monotonic() - started_at)
                 checkpoint = checkpoint_store.read()
-                return self._create_timeout_result(
+                run_result = self._create_timeout_result(
                     checkpoint=checkpoint,
                     source_file=source_file,
                     function_name=function_name,
                     elapsed_seconds=elapsed,
                     timeout_seconds=float(timeout_seconds),
                 )
-
-            if message is not None:
+            elif message is not None:
                 message_type, payload = message
                 if message_type == "result":
-                    return payload
-                if message_type == "error" and isinstance(
+                    run_result = payload
+                elif message_type == "error" and isinstance(
                     payload, BaseException
                 ):
                     raise payload
-                return self._create_failure_result(
+                else:
+                    run_result = self._create_failure_result(
+                        checkpoint=checkpoint_store.read(),
+                        source_file=source_file,
+                        function_name=function_name,
+                        elapsed_seconds=max(
+                            0.0, time.monotonic() - started_at
+                        ),
+                        timeout_seconds=float(timeout_seconds),
+                    )
+            else:
+                run_result = self._create_failure_result(
                     checkpoint=checkpoint_store.read(),
                     source_file=source_file,
                     function_name=function_name,
-                    elapsed_seconds=max(
-                        0.0, time.monotonic() - started_at
-                    ),
+                    elapsed_seconds=max(0.0, time.monotonic() - started_at),
                     timeout_seconds=float(timeout_seconds),
                 )
-
-            return self._create_failure_result(
-                checkpoint=checkpoint_store.read(),
-                source_file=source_file,
-                function_name=function_name,
-                elapsed_seconds=max(0.0, time.monotonic() - started_at),
-                timeout_seconds=float(timeout_seconds),
-            )
         finally:
             try:
                 if process_started:
@@ -256,10 +293,29 @@ class GlobalPipelineTimeoutRunner:
                         if process_started and process_stopped:
                             process.close()
                     finally:
-                        self._cleanup_temporary_root(temporary_root)
-                        self.last_temporary_root_exists = (
-                            temporary_root.exists()
-                        )
+                        if not process_started or process_stopped:
+                            try:
+                                self._cleanup_temporary_root(temporary_root)
+                            except PipelineCleanupError as error:
+                                cleanup_failure = error
+                            finally:
+                                self.last_temporary_root_exists = (
+                                    temporary_root.exists()
+                                )
+                        else:
+                            self.last_temporary_root_exists = (
+                                temporary_root.exists()
+                            )
+
+        if cleanup_failure is not None:
+            return self._create_cleanup_failure_result(
+                previous_result=run_result,
+                source_file=source_file,
+                function_name=function_name,
+                elapsed_seconds=max(0.0, time.monotonic() - started_at),
+                timeout_seconds=float(timeout_seconds),
+            )
+        return run_result
 
     @staticmethod
     def _create_timeout_result(
@@ -334,6 +390,48 @@ class GlobalPipelineTimeoutRunner:
         )
 
     @staticmethod
+    def _create_cleanup_failure_result(
+        *,
+        previous_result: Any,
+        source_file: Path,
+        function_name: str,
+        elapsed_seconds: float,
+        timeout_seconds: float,
+    ) -> PipelineDiagnosticResult:
+        previous_diagnostic = (
+            previous_result
+            if isinstance(previous_result, PipelineDiagnosticResult)
+            else getattr(previous_result, "diagnostic", None)
+        )
+        if isinstance(previous_diagnostic, PipelineDiagnosticResult):
+            return replace(
+                previous_diagnostic,
+                status=PipelineRunStatus.FAILED,
+                error_category="PIPELINE_CLEANUP_FAILED",
+                error_message=(
+                    "Pipeline geçici kaynakları güvenli biçimde temizlenemedi."
+                ),
+                exception_type="PipelineCleanupError",
+                total_duration_seconds=elapsed_seconds,
+                pipeline_timeout_seconds=timeout_seconds,
+            )
+        return PipelineDiagnosticResult(
+            status=PipelineRunStatus.FAILED,
+            source_file=source_file,
+            function_name=function_name,
+            last_completed_stage=None,
+            stopped_stage=None,
+            error_category="PIPELINE_CLEANUP_FAILED",
+            error_message=(
+                "Pipeline geçici kaynakları güvenli biçimde temizlenemedi."
+            ),
+            exception_type="PipelineCleanupError",
+            total_duration_seconds=elapsed_seconds,
+            funnel=PipelineFunnelSnapshot(),
+            pipeline_timeout_seconds=timeout_seconds,
+        )
+
+    @staticmethod
     def _terminate_process_tree(process: multiprocessing.Process) -> None:
         pid = process.pid
         if pid is None:
@@ -358,18 +456,46 @@ class GlobalPipelineTimeoutRunner:
             process.kill()
             process.join(timeout=5.0)
 
-    @staticmethod
-    def _cleanup_temporary_root(temporary_root: Path) -> None:
-        resolved_root = temporary_root.resolve()
+    def _cleanup_temporary_root(self, temporary_root: Path) -> None:
         resolved_system_temp = Path(tempfile.gettempdir()).resolve()
+        candidate = temporary_root.absolute()
         if (
-            resolved_root.parent != resolved_system_temp
-            or not resolved_root.name.startswith("rl-unit-test-pipeline-")
+            candidate.parent.resolve() != resolved_system_temp
+            or not candidate.name.startswith("rl-unit-test-pipeline-")
+            or is_link_like(candidate)
         ):
-            raise RuntimeError(
+            raise PipelineCleanupError(
                 "Pipeline geçici klasörü güvenli cleanup kapsamı dışında."
             )
-        shutil.rmtree(resolved_root, ignore_errors=True)
+        if not candidate.exists():
+            return
+        resolved_root = candidate.resolve()
+        if (
+            resolved_root.parent != resolved_system_temp
+            or resolved_root.name != candidate.name
+        ):
+            raise PipelineCleanupError(
+                "Pipeline geçici klasörü güvenli cleanup kapsamı dışında."
+            )
+
+        last_error: OSError | None = None
+        for attempt in range(1, self._cleanup_attempts + 1):
+            try:
+                remove_workspace_tree(
+                    resolved_root,
+                    rmtree=self._cleanup_rmtree,
+                )
+            except OSError as error:
+                last_error = error
+            if not resolved_root.exists():
+                return
+            if attempt < self._cleanup_attempts:
+                self._cleanup_sleeper(
+                    self._cleanup_backoff_seconds * attempt
+                )
+        raise PipelineCleanupError(
+            "Pipeline geçici kaynakları güvenli biçimde temizlenemedi."
+        ) from last_error
 
     @staticmethod
     def _validate_timeout(value: float) -> None:

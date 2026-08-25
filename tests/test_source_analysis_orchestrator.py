@@ -23,6 +23,7 @@ from services.source_analysis_orchestrator import (
     SourceAnalysisOrchestrator,
     SourceAnalysisValidationError,
 )
+from services.project_deadline import ProjectDeadline
 
 
 SOURCE = """
@@ -857,3 +858,115 @@ def test_unsupported_method_target_dict_excludes_implicit_self(
     assert payload["unsupported_reason"] == (
         "Decorated instance methods are unsupported."
     )
+
+
+class _DeadlineClock:
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
+def test_project_deadline_preserves_completed_function_and_skips_unstarted_targets(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    clock = _DeadlineClock()
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        "first": _diagnostic(source_file, "first", PipelineRunStatus.COMPLETED),
+    }
+
+    class AdvancingTrainingService(FakeTrainingService):
+        def run_with_diagnostics(self, **arguments: Any) -> Any:
+            result = super().run_with_diagnostics(**arguments)
+            clock.value = 3.0
+            return result
+
+    orchestrator = SourceAnalysisOrchestrator(
+        training_service_factory=lambda: AdvancingTrainingService(outcomes, calls),
+        clock=clock,
+    )
+    deadline = ProjectDeadline.start(2.0, clock=clock)
+
+    result = orchestrator.run(
+        **_run_arguments(source_file, tmp_path / "deadline_output"),
+        function_name=None,
+        all_functions=True,
+        maximum_functions=1,
+        project_deadline=deadline,
+    )
+
+    statuses = {item.target.qualified_name: item.status for item in result.function_results}
+    assert statuses["first"] is FunctionRunStatus.COMPLETED
+    assert statuses["outer"] is FunctionRunStatus.SKIPPED_DEADLINE
+    assert statuses["last"] is FunctionRunStatus.SKIPPED_DEADLINE
+    assert result.deadline_skipped_function_count == 2
+    assert result.limit_skipped_function_count == 0
+    assert result.executed_function_count == 1
+    assert result.status is ProjectRunStatus.PARTIAL
+    assert [call["function_name"] for call in calls] == ["first"]
+    assert calls[0]["pipeline_timeout_seconds"] == pytest.approx(2.0)
+
+
+def test_project_deadline_before_first_function_produces_timed_out_project(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    clock = _DeadlineClock()
+    calls: list[dict[str, Any]] = []
+    deadline = ProjectDeadline.start(1.0, clock=clock)
+    clock.value = 1.0
+
+    result = SourceAnalysisOrchestrator(
+        training_service_factory=lambda: FakeTrainingService({}, calls),
+        clock=clock,
+    ).run(
+        **_run_arguments(source_file, tmp_path / "expired_output"),
+        function_name=None,
+        all_functions=True,
+        project_deadline=deadline,
+    )
+
+    assert result.status is ProjectRunStatus.TIMED_OUT
+    assert result.deadline_skipped_function_count == 3
+    assert result.executed_function_count == 0
+    assert calls == []
+    assert all(
+        item.skip_reason == "PROJECT_DEADLINE_EXCEEDED"
+        for item in result.function_results
+        if item.status is FunctionRunStatus.SKIPPED_DEADLINE
+    )
+
+
+def test_active_worker_timeout_is_preserved_before_deadline_skips_later_targets(
+    source_file: Path,
+    tmp_path: Path,
+) -> None:
+    clock = _DeadlineClock()
+    calls: list[dict[str, Any]] = []
+    outcomes = {
+        "first": _diagnostic(source_file, "first", PipelineRunStatus.TIMED_OUT),
+    }
+
+    class TimingOutTrainingService(FakeTrainingService):
+        def run_with_diagnostics(self, **arguments: Any) -> Any:
+            result = super().run_with_diagnostics(**arguments)
+            clock.value = 2.0
+            return result
+
+    deadline = ProjectDeadline.start(2.0, clock=clock)
+    result = SourceAnalysisOrchestrator(
+        training_service_factory=lambda: TimingOutTrainingService(outcomes, calls),
+        clock=clock,
+    ).run(
+        **_run_arguments(source_file, tmp_path / "active_timeout_output"),
+        function_name=None,
+        all_functions=True,
+        project_deadline=deadline,
+    )
+
+    assert result.function_results[0].status is FunctionRunStatus.TIMED_OUT
+    assert result.deadline_skipped_function_count == 2
+    assert result.status is ProjectRunStatus.TIMED_OUT

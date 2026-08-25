@@ -8,6 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from models.analysis_job_result import AnalysisJobStatus
 from models.external_source_analysis_result import (
     ExternalAnalysisConfiguration,
     ExternalAnalysisStatus,
@@ -20,7 +23,11 @@ from models.external_source_analysis_result import (
     LocalProjectDirectory,
     UploadedPythonFile,
 )
+from models.pipeline_diagnostic_result import PipelineDiagnosticResult
+from services.analysis_job_service import AnalysisJobService, AnalysisJobSettings
 from services.external_source_analysis_service import ExternalSourceAnalysisService
+from services.real_rl_training_service import RealRLTrainingResult, RealRLTrainingService
+from services.source_analysis_orchestrator import SourceAnalysisOrchestrator
 
 
 BRANCH_SOURCE = """\
@@ -377,3 +384,285 @@ def test_real_multi_module_project_produces_exact_combined_minimized_suite(
     payload = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert payload["project_coverage"]["coverage_scope"] == "ANALYZED_PROJECT_SCOPE_COVERAGE"
     assert payload["project_coverage"]["whole_repository_line_coverage_percent"] is None
+
+
+class _MutableProjectClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+
+class _DynamicDeadlineRunController:
+    def __init__(self, clock: _MutableProjectClock) -> None:
+        self.clock = clock
+        self.mode = ""
+        self.deadlines: dict[str, list[object]] = {"short": [], "wide": []}
+        self.calls: dict[str, list[dict[str, object]]] = {
+            "short": [],
+            "wide": [],
+        }
+
+    def begin(self, mode: str) -> None:
+        self.mode = mode
+        self.calls[mode].clear()
+
+    def record_deadline(self, deadline: object) -> None:
+        self.deadlines[self.mode].append(deadline)
+
+    def record_result(
+        self,
+        *,
+        arguments: dict[str, object],
+        result: RealRLTrainingResult | PipelineDiagnosticResult,
+    ) -> None:
+        entries = self.calls[self.mode]
+        entries.append(
+            {
+                "function_name": arguments["function_name"],
+                "pipeline_timeout_seconds": arguments[
+                    "pipeline_timeout_seconds"
+                ],
+                "result_type": type(result).__name__,
+                "status": result.diagnostic.status.value
+                if isinstance(result, RealRLTrainingResult)
+                else result.status.value,
+            }
+        )
+        deadline = self.deadlines[self.mode][-1]
+        if self.mode == "short":
+            if len(entries) == 1:
+                self.clock.value = (
+                    deadline.started_at + deadline.timeout_seconds - 0.05
+                )
+            else:
+                self.clock.value = deadline.started_at + deadline.timeout_seconds
+        else:
+            self.clock.value += 0.1
+
+
+class _RecordingTrainingService:
+    def __init__(self, controller: _DynamicDeadlineRunController) -> None:
+        self._controller = controller
+
+    def run_with_diagnostics(
+        self, **arguments: object
+    ) -> RealRLTrainingResult | PipelineDiagnosticResult:
+        result = RealRLTrainingService().run_with_diagnostics(**arguments)
+        self._controller.record_result(arguments=arguments, result=result)
+        return result
+
+
+class _RecordingOrchestrator:
+    def __init__(
+        self,
+        delegate: SourceAnalysisOrchestrator,
+        controller: _DynamicDeadlineRunController,
+    ) -> None:
+        self._delegate = delegate
+        self._controller = controller
+
+    def run(self, **arguments: object):
+        self._controller.record_deadline(arguments["project_deadline"])
+        return self._delegate.run(**arguments)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "function_names", "literals"),
+    (
+        ("harbor_tasks", ("signal", "anchor", "depart"), (11, 23, 37)),
+        ("garden_jobs", ("seed", "irrigate", "harvest"), (41, 53, 67)),
+    ),
+)
+def test_trusted_dynamic_second_run_resets_project_deadline_and_job_state(
+    tmp_path: Path,
+    module_name: str,
+    function_names: tuple[str, str, str],
+    literals: tuple[int, int, int],
+) -> None:
+    first_name, active_name, last_name = function_names
+    first_literal, threshold, last_literal = literals
+    source_marker = f"private_source_marker_{module_name}"
+    project = tmp_path / f"{module_name}_project"
+    project.mkdir()
+    (project / f"{module_name}.py").write_text(
+        f"# {source_marker}\n"
+        f"def {first_name}() -> int:\n"
+        f"    return {first_literal}\n\n"
+        f"def {active_name}(value: int) -> str:\n"
+        f"    if value < {threshold}:\n"
+        "        return 'below'\n"
+        "    return 'at_or_above'\n\n"
+        f"def {last_name}(enabled: bool) -> int:\n"
+        f"    return {last_literal} if enabled else -{last_literal}\n",
+        encoding="utf-8",
+    )
+
+    clock = _MutableProjectClock()
+    controller = _DynamicDeadlineRunController(clock)
+
+    def orchestrator_factory() -> _RecordingOrchestrator:
+        delegate = SourceAnalysisOrchestrator(
+            training_service_factory=lambda: _RecordingTrainingService(controller),
+            clock=clock,
+        )
+        return _RecordingOrchestrator(delegate, controller)
+
+    external_service = ExternalSourceAnalysisService(
+        orchestrator_factory=orchestrator_factory,
+        clock=clock,
+    )
+    job_root = tmp_path / f"{module_name}_jobs"
+    job_service = AnalysisJobService(
+        settings=AnalysisJobSettings(
+            output_root=job_root,
+            maximum_running_jobs=1,
+            maximum_queued_jobs=1,
+        ),
+        runner_factory=lambda: external_service,
+    )
+    common_configuration = {
+        "output_root": tmp_path / "request_output_is_replaced_per_job",
+        "max_visits_per_node": 2,
+        "episode_count": 1,
+        "epsilon": 0.0,
+        "learning_rate": 0.5,
+        "discount_factor": 0.9,
+        "random_seed": 42,
+        "pytest_coverage_timeout_seconds": 30.0,
+        "per_function_pipeline_timeout_seconds": 30.0,
+        "run_greedy_baseline": False,
+        "run_strategy_comparison": False,
+    }
+
+    def request(project_timeout_seconds: float) -> ExternalSourceAnalysisRequest:
+        return ExternalSourceAnalysisRequest(
+            LocalProjectDirectory(project),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            ExternalAnalysisConfiguration(
+                **common_configuration,
+                project_timeout_seconds=project_timeout_seconds,
+            ),
+        )
+
+    try:
+        controller.begin("short")
+        first_job = job_service.submit(request(10.0))
+        first = job_service.wait(first_job.job_id, timeout=90.0)
+        first_public_before = json.dumps(first.to_dict(), sort_keys=True)
+        first_summary = job_service.get(first_job.job_id)
+        first_result_summary = job_service.get_result(first_job.job_id)
+        first_artifacts = job_service.list_artifacts(first_job.job_id)
+
+        assert first.status is ExternalAnalysisStatus.PARTIAL
+        assert first.project_coverage is None
+        assert first.project_deadline_exceeded is True
+        assert first.completed_function_count == 1
+        assert first.timed_out_function_count == 1
+        assert first.deadline_skipped_function_count == 1
+        assert first_summary.status is AnalysisJobStatus.PARTIAL
+        assert first_summary.cancellation_requested is False
+        assert first_result_summary.status is AnalysisJobStatus.PARTIAL
+        first_function_results = first.module_results[0].project_result.function_results
+        assert [item.target.qualified_name for item in first_function_results] == list(
+            function_names
+        )
+        assert [item.status.value for item in first_function_results] == [
+            "COMPLETED",
+            "TIMED_OUT",
+            "SKIPPED_DEADLINE",
+        ]
+        assert [item["function_name"] for item in controller.calls["short"]] == [
+            first_name,
+            active_name,
+        ]
+        assert controller.calls["short"][1]["status"] == "TIMED_OUT"
+        assert controller.calls["short"][1][
+            "pipeline_timeout_seconds"
+        ] == pytest.approx(0.05)
+
+        controller.begin("wide")
+        second_job = job_service.submit(request(120.0))
+        second = job_service.wait(second_job.job_id, timeout=180.0)
+        second_summary = job_service.get(second_job.job_id)
+        second_result_summary = job_service.get_result(second_job.job_id)
+        second_artifacts = job_service.list_artifacts(second_job.job_id)
+
+        assert second.status is ExternalAnalysisStatus.COMPLETED
+        assert second.project_deadline_exceeded is False
+        assert second.deadline_stage is None
+        assert second.last_completed_stage == "PROJECT_COVERAGE"
+        assert second.completed_function_count == 3
+        assert second.timed_out_function_count == 0
+        assert second.deadline_skipped_function_count == 0
+        assert second_summary.status is AnalysisJobStatus.COMPLETED
+        assert second_summary.cancellation_requested is False
+        assert second_summary.deadline_stage is None
+        assert second_result_summary.status is AnalysisJobStatus.COMPLETED
+        second_function_results = second.module_results[0].project_result.function_results
+        assert [item.target.qualified_name for item in second_function_results] == list(
+            function_names
+        )
+        assert [item.status.value for item in second_function_results] == [
+            "COMPLETED",
+            "COMPLETED",
+            "COMPLETED",
+        ]
+        assert [item["function_name"] for item in controller.calls["wide"]] == list(
+            function_names
+        )
+        assert all(
+            item["result_type"] == "RealRLTrainingResult"
+            and item["status"] == "COMPLETED"
+            and item["pipeline_timeout_seconds"] == pytest.approx(30.0)
+            for item in controller.calls["wide"]
+        )
+
+        assert len(controller.deadlines["short"]) == 1
+        assert len(controller.deadlines["wide"]) == 1
+        short_deadline = controller.deadlines["short"][0]
+        wide_deadline = controller.deadlines["wide"][0]
+        assert wide_deadline is not short_deadline
+        assert wide_deadline.started_at > short_deadline.started_at
+        assert short_deadline.remaining_seconds() == 0.0
+        assert wide_deadline.remaining_seconds() == pytest.approx(119.7)
+
+        combined = second.project_coverage
+        assert combined is not None
+        assert combined.status.value == "COMPLETED"
+        assert combined.full_pytest_exit_code == 0
+        assert combined.minimized_pytest_exit_code == 0
+        assert combined.full_scenario_count > 0
+        assert combined.full_line_coverage_percent is not None
+        assert combined.full_branch_coverage_percent is not None
+
+        assert json.dumps(first.to_dict(), sort_keys=True) == first_public_before
+        assert first.report_path != second.report_path
+        assert first.report_path.is_relative_to(job_root / first_job.job_id)
+        assert second.report_path.is_relative_to(job_root / second_job.job_id)
+        assert {item.artifact_id for item in first_artifacts}.isdisjoint(
+            item.artifact_id for item in second_artifacts
+        )
+        for job_id, artifacts in (
+            (first_job.job_id, first_artifacts),
+            (second_job.job_id, second_artifacts),
+        ):
+            for artifact in artifacts:
+                _, artifact_path = job_service.artifact_path(
+                    job_id, artifact.artifact_id
+                )
+                assert artifact_path.is_relative_to(job_root / job_id)
+
+        public_payload = json.dumps(second_result_summary.to_dict(), sort_keys=True)
+        assert source_marker not in public_payload
+        assert source_marker not in second.report_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "keyword_arguments",
+            "expected_result",
+            "actual_result",
+            "object_state",
+        ):
+            assert forbidden not in public_payload
+    finally:
+        job_service.shutdown()

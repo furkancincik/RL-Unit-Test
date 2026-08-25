@@ -181,12 +181,17 @@ class ExternalSourceTerminalAdapter:
             "Maximum function count", defaults.maximum_functions_per_module
         )
         if policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
+            project_timeout = self._optional_positive_float(
+                "Total project timeout",
+                defaults.project_timeout_seconds,
+            )
             return ExternalAnalysisConfiguration(
                 output_root=output_root,
                 module_selection=module_selection,
                 target_selection=target_selection,
                 maximum_selected_modules=maximum_modules,
                 maximum_functions_per_module=maximum_functions,
+                project_timeout_seconds=project_timeout,
             )
 
         pipeline_timeout = self._positive_float(
@@ -199,6 +204,10 @@ class ExternalSourceTerminalAdapter:
         comparison = self._boolean(
             "RL-greedy comparison", defaults.run_strategy_comparison
         )
+        project_timeout = self._optional_positive_float(
+            "Total project timeout",
+            defaults.project_timeout_seconds,
+        )
         return ExternalAnalysisConfiguration(
             output_root=output_root,
             module_selection=module_selection,
@@ -210,6 +219,7 @@ class ExternalSourceTerminalAdapter:
             per_function_pipeline_timeout_seconds=pipeline_timeout,
             run_greedy_baseline=greedy or comparison,
             run_strategy_comparison=comparison,
+            project_timeout_seconds=project_timeout,
         )
 
     def _module_selection(self) -> ExternalModuleSelection:
@@ -336,6 +346,27 @@ class ExternalSourceTerminalAdapter:
                 f"{label} tam sayı olmalıdır."
             ) from error
 
+    def _optional_positive_float(
+        self,
+        label: str,
+        default: float | None,
+    ) -> float | None:
+        default_label = "unlimited" if default is None else str(default)
+        raw_value = self._input(f"{label} [{default_label}]: ").strip()
+        if not raw_value:
+            return default
+        try:
+            value = float(raw_value)
+        except ValueError as error:
+            raise ExternalSourceInteractiveValidationError(
+                f"{label} pozitif sayı olmalıdır."
+            ) from error
+        if not 0.0 < value < float("inf"):
+            raise ExternalSourceInteractiveValidationError(
+                f"{label} pozitif sayı olmalıdır."
+            )
+        return value
+
     def _boolean(self, label: str, default: bool) -> bool:
         default_label = "e" if default else "h"
         raw_value = self._input(f"{label} [e/h, {default_label}]: ").strip().lower()
@@ -362,6 +393,10 @@ class ExternalSourceTerminalAdapter:
             )
         unsupported_modules = module_counts.get("UNSUPPORTED", 0)
         eligible_modules = max(0, result.discovered_module_count - unsupported_modules)
+        function_counts: dict[str, int] = {}
+        for function in functions:
+            status = function.status.value
+            function_counts[status] = function_counts.get(status, 0) + 1
         lines = [
             "=" * 65,
             "DIŞ KAYNAK ANALİZ ÖZETİ",
@@ -380,6 +415,16 @@ class ExternalSourceTerminalAdapter:
             f"Çalıştırılan fonksiyon: {result.analyzed_function_count}",
             f"SKIPPED_LIMIT        : {result.limit_skipped_function_count}",
             f"SKIPPED_SELECTION    : {result.selection_skipped_function_count}",
+            f"SKIPPED_DEADLINE     : {result.deadline_skipped_function_count}",
+            f"Fonksiyon durumları  : {function_counts}",
+            f"Completed target     : {result.completed_function_count}",
+            f"Partial target       : {result.partial_function_count}",
+            f"Timed-out target     : {result.timed_out_function_count}",
+            f"Toplam proje timeout : {ExternalSourceTerminalAdapter._measured(result.project_timeout_seconds)}",
+            f"Geçen süre           : {result.duration_seconds:.2f} saniye",
+            f"Deadline'a ulaşıldı  : {result.project_deadline_exceeded}",
+            f"Son tamamlanan aşama : {ExternalSourceTerminalAdapter._measured(result.last_completed_stage)}",
+            f"Deadline aşaması     : {ExternalSourceTerminalAdapter._measured(result.deadline_stage)}",
         ]
         for function in functions:
             diagnostic = getattr(function, "diagnostic", None)

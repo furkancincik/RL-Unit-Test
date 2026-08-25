@@ -105,6 +105,7 @@ class ProjectCoverageScopeSummary:
     skipped_limit_function_count: int
     scope_complete: bool
     skipped_selection_function_count: int = 0
+    skipped_deadline_function_count: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -121,6 +122,7 @@ class ProjectCoverageScopeSummary:
             "unsupported_function_count",
             "skipped_limit_function_count",
             "skipped_selection_function_count",
+            "skipped_deadline_function_count",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:

@@ -36,6 +36,7 @@ from models.external_source_analysis_result import (
 from models.source_acquisition_result import (
     DiscoveredPythonModule,
     ResolvedSourceTarget,
+    SourceAcquisitionLimits,
     SourceAcquisitionStatus,
     SourceAcquisitionRequest,
     SourceIssueCategory,
@@ -54,6 +55,7 @@ from models.project_coverage_result import (
     ProjectTestCandidate,
 )
 from services.project_coverage_service import ProjectCoverageService
+from services.project_deadline import ProjectDeadline
 from services.source_acquisition_service import SourceAcquisitionService
 from services.source_analysis_orchestrator import SourceAnalysisOrchestrator
 
@@ -93,7 +95,9 @@ class ExternalSourceAnalysisService:
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._acquisition_service = acquisition_service or SourceAcquisitionService()
-        self._orchestrator_factory = orchestrator_factory or SourceAnalysisOrchestrator
+        self._orchestrator_factory = orchestrator_factory or (
+            lambda: SourceAnalysisOrchestrator(clock=self._clock)
+        )
         self._project_coverage_service = (
             project_coverage_service or ProjectCoverageService()
         )
@@ -103,6 +107,12 @@ class ExternalSourceAnalysisService:
         if not isinstance(request, ExternalSourceAnalysisRequest):
             raise TypeError("request ExternalSourceAnalysisRequest olmalıdır.")
         started = self._clock()
+        deadline = ProjectDeadline(
+            timeout_seconds=request.configuration.project_timeout_seconds,
+            started_at=started,
+            clock=self._clock,
+        )
+        last_completed_stage: str | None = None
         output_root = request.configuration.output_root.resolve()
         report_path = output_root / "external_source_analysis_report.json"
         if (
@@ -123,6 +133,22 @@ class ExternalSourceAnalysisService:
                     ),
                     acquired=None,
                     temporary_workspace=None,
+                    deadline=deadline,
+                )
+            last_completed_stage = "REQUEST_VALIDATION"
+            if deadline.exceeded():
+                return self._finalize(
+                    self._deadline_result(
+                        request,
+                        output_root,
+                        report_path,
+                        deadline,
+                        last_completed_stage=last_completed_stage,
+                        deadline_stage="SOURCE_PREPARATION",
+                    ),
+                    acquired=None,
+                    temporary_workspace=None,
+                    deadline=deadline,
                 )
 
             source_request: SourceAcquisitionRequest
@@ -168,8 +194,63 @@ class ExternalSourceAnalysisService:
                     limits=request.acquisition_limits,
                 )
 
-            acquired = self._acquisition_service.resolve(source_request)
+            last_completed_stage = "SOURCE_PREPARATION"
+            if deadline.exceeded():
+                return self._finalize(
+                    self._deadline_result(
+                        request,
+                        output_root,
+                        report_path,
+                        deadline,
+                        last_completed_stage=last_completed_stage,
+                        deadline_stage="SOURCE_ACQUISITION",
+                    ),
+                    acquired=None,
+                    temporary_workspace=temporary_workspace,
+                    deadline=deadline,
+                )
+            source_request = replace(
+                source_request,
+                limits=self._acquisition_limits_for_deadline(
+                    source_request,
+                    deadline,
+                ),
+            )
+            if deadline.exceeded():
+                return self._finalize(
+                    self._deadline_result(
+                        request,
+                        output_root,
+                        report_path,
+                        deadline,
+                        last_completed_stage=last_completed_stage,
+                        deadline_stage="SOURCE_ACQUISITION",
+                    ),
+                    acquired=None,
+                    temporary_workspace=temporary_workspace,
+                    deadline=deadline,
+                )
+            acquired = self._acquisition_service.resolve(
+                source_request,
+                project_deadline=deadline,
+            )
+            last_completed_stage = "SOURCE_ACQUISITION"
             if not acquired.is_available:
+                if deadline.exceeded():
+                    return self._finalize(
+                        self._deadline_result(
+                            request,
+                            output_root,
+                            report_path,
+                            deadline,
+                            acquired=acquired,
+                            last_completed_stage=last_completed_stage,
+                            deadline_stage="SOURCE_ACQUISITION",
+                        ),
+                        acquired=acquired,
+                        temporary_workspace=temporary_workspace,
+                        deadline=deadline,
+                    )
                 categories = tuple(issue.category.value for issue in acquired.issues)
                 issue = categories[0] if categories else "SOURCE_ACQUISITION_FAILED"
                 return self._finalize(
@@ -183,11 +264,65 @@ class ExternalSourceAnalysisService:
                     ),
                     acquired=acquired,
                     temporary_workspace=temporary_workspace,
+                    deadline=deadline,
                 )
 
             self._validate_output_separation(output_root, acquired.resolved_project_root)
 
-            target_inventories = self._target_inventories(request, acquired)
+            if deadline.exceeded():
+                inventories = self._discovery_inventories(acquired)
+                module_results = self._analyze_modules(
+                    request,
+                    acquired,
+                    output_root,
+                    inventories,
+                    deadline,
+                )
+                return self._finalize(
+                    self._deadline_result(
+                        request,
+                        output_root,
+                        report_path,
+                        deadline,
+                        acquired=acquired,
+                        module_results=module_results,
+                        last_completed_stage=last_completed_stage,
+                        deadline_stage="TARGET_DISCOVERY",
+                    ),
+                    acquired=acquired,
+                    temporary_workspace=temporary_workspace,
+                    deadline=deadline,
+                )
+
+            target_inventories = self._target_inventories(
+                request,
+                acquired,
+                deadline=deadline,
+            )
+            if deadline.exceeded():
+                module_results = self._analyze_modules(
+                    request,
+                    acquired,
+                    output_root,
+                    target_inventories,
+                    deadline,
+                )
+                return self._finalize(
+                    self._deadline_result(
+                        request,
+                        output_root,
+                        report_path,
+                        deadline,
+                        acquired=acquired,
+                        module_results=module_results,
+                        last_completed_stage=last_completed_stage,
+                        deadline_stage="TARGET_DISCOVERY",
+                    ),
+                    acquired=acquired,
+                    temporary_workspace=temporary_workspace,
+                    deadline=deadline,
+                )
+            last_completed_stage = "TARGET_DISCOVERY"
             selection_issue = self._target_selection_issue(
                 request,
                 acquired,
@@ -205,6 +340,7 @@ class ExternalSourceAnalysisService:
                     ),
                     acquired=acquired,
                     temporary_workspace=temporary_workspace,
+                    deadline=deadline,
                 )
 
             module_results = self._analyze_modules(
@@ -212,14 +348,34 @@ class ExternalSourceAnalysisService:
                 acquired,
                 output_root,
                 target_inventories,
+                deadline,
             )
+            last_completed_stage = "FUNCTION_ANALYSIS"
+            if deadline.exceeded():
+                return self._finalize(
+                    self._deadline_result(
+                        request,
+                        output_root,
+                        report_path,
+                        deadline,
+                        acquired=acquired,
+                        module_results=module_results,
+                        last_completed_stage=last_completed_stage,
+                        deadline_stage="PROJECT_COVERAGE",
+                    ),
+                    acquired=acquired,
+                    temporary_workspace=temporary_workspace,
+                    deadline=deadline,
+                )
             project_coverage = self._measure_project_coverage(
                 request=request,
                 acquired=acquired,
                 module_results=module_results,
                 output_root=output_root,
                 target_inventories=target_inventories,
+                deadline=deadline,
             )
+            last_completed_stage = "PROJECT_COVERAGE"
             status = self._derive_status(
                 request.execution_policy,
                 module_results,
@@ -253,11 +409,18 @@ class ExternalSourceAnalysisService:
                 cleanup_status=ExternalWorkspaceCleanupStatus.NOT_REQUIRED,
                 issues=tuple(dict.fromkeys(issue.category.value for issue in acquired.issues)),
                 project_coverage=project_coverage,
+                project_timeout_seconds=deadline.timeout_seconds,
+                project_deadline_exceeded=deadline.exceeded(),
+                last_completed_stage=last_completed_stage,
+                deadline_stage=(
+                    "PROJECT_COVERAGE" if deadline.exceeded() else None
+                ),
             )
             return self._finalize(
                 result,
                 acquired=acquired,
                 temporary_workspace=temporary_workspace,
+                deadline=deadline,
             )
         finally:
             self._cleanup(acquired, temporary_workspace)
@@ -268,6 +431,7 @@ class ExternalSourceAnalysisService:
         acquired: ResolvedSourceTarget,
         output_root: Path,
         target_inventories: dict[str, tuple[str, ...]],
+        deadline: ProjectDeadline,
     ) -> tuple[ExternalModuleAnalysisResult, ...]:
         ordered = tuple(
             sorted(acquired.discovered_modules, key=lambda item: item.relative_path.casefold())
@@ -298,6 +462,18 @@ class ExternalSourceAnalysisService:
                         ExternalModuleStatus.UNSUPPORTED,
                         issue_category=module_issue,
                         issue_message="Module static discovery sonrasında güvenle analiz edilemiyor.",
+                        discovered_function_count=len(discovered_names),
+                        discovered_function_names=discovered_names,
+                    )
+                )
+                continue
+            if deadline.exceeded():
+                results.append(
+                    self._module_result(
+                        module,
+                        ExternalModuleStatus.SKIPPED_DEADLINE,
+                        issue_category="PROJECT_DEADLINE_EXCEEDED",
+                        issue_message="Module project deadline nedeniyle başlatılmadı.",
                         discovered_function_count=len(discovered_names),
                         discovered_function_names=discovered_names,
                     )
@@ -355,6 +531,7 @@ class ExternalSourceAnalysisService:
                     run_strategy_comparison=request.configuration.run_strategy_comparison,
                     comparison_timeout_seconds=request.configuration.comparison_timeout_seconds,
                     relative_module_path=module.relative_path,
+                    project_deadline=deadline,
                 )
             except ModuleNotFoundError:
                 results.append(
@@ -437,8 +614,12 @@ class ExternalSourceAnalysisService:
         module_results: tuple[ExternalModuleAnalysisResult, ...],
         output_root: Path,
         target_inventories: dict[str, tuple[str, ...]],
+        deadline: ProjectDeadline,
     ) -> ProjectCoverageResult | None:
         if request.execution_policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
+            return None
+        remaining = deadline.remaining_seconds()
+        if remaining is not None and remaining <= 0.0:
             return None
         candidates: list[ProjectTestCandidate] = []
         for module in module_results:
@@ -466,11 +647,14 @@ class ExternalSourceAnalysisService:
             module_results=module_results,
             target_inventories=target_inventories,
         )
+        coverage_timeout = request.configuration.pytest_coverage_timeout_seconds
+        if remaining is not None:
+            coverage_timeout = min(float(coverage_timeout), remaining)
         return self._project_coverage_service.measure_and_minimize(
             candidates=tuple(candidates),
             scope=scope,
             output_root=output_root,
-            timeout_seconds=request.configuration.pytest_coverage_timeout_seconds,
+            timeout_seconds=coverage_timeout,
         )
 
     @staticmethod
@@ -509,6 +693,7 @@ class ExternalSourceAnalysisService:
                 FunctionRunStatus.SKIPPED,
                 FunctionRunStatus.SKIPPED_SELECTION,
                 FunctionRunStatus.SKIPPED_LIMIT,
+                FunctionRunStatus.SKIPPED_DEADLINE,
                 FunctionRunStatus.UNSUPPORTED,
             }
             for function in function_results
@@ -525,6 +710,15 @@ class ExternalSourceAnalysisService:
         skipped_selection = sum(
             function.status is FunctionRunStatus.SKIPPED_SELECTION
             for function in function_results
+        )
+        skipped_deadline = sum(
+            function.status is FunctionRunStatus.SKIPPED_DEADLINE
+            for function in function_results
+        ) + sum(
+            module.discovered_function_count
+            for module in module_results
+            if module.status is ExternalModuleStatus.SKIPPED_DEADLINE
+            and module.project_result is None
         )
         selected_modules = sum(
             module.status is not ExternalModuleStatus.SKIPPED_LIMIT
@@ -570,6 +764,7 @@ class ExternalSourceAnalysisService:
             and unsupported == 0
             and skipped_limit == 0
             and skipped_selection == 0
+            and skipped_deadline == 0
             and partial == 0
             and failed == 0
             and timed_out == 0
@@ -590,16 +785,22 @@ class ExternalSourceAnalysisService:
             skipped_limit_function_count=skipped_limit,
             scope_complete=scope_complete,
             skipped_selection_function_count=skipped_selection,
+            skipped_deadline_function_count=skipped_deadline,
         )
 
     @staticmethod
     def _target_inventories(
         request: ExternalSourceAnalysisRequest,
         acquired: ResolvedSourceTarget,
+        *,
+        deadline: ProjectDeadline | None = None,
     ) -> dict[str, tuple[str, ...]]:
         inventories: dict[str, tuple[str, ...]] = {}
         analyzer = PythonAnalyzer()
         for module in acquired.discovered_modules:
+            if deadline is not None and deadline.exceeded():
+                inventories[module.relative_path] = module.top_level_function_names
+                continue
             if not module.supported or module.module_path is None:
                 inventories[module.relative_path] = module.top_level_function_names
                 continue
@@ -851,6 +1052,107 @@ class ExternalSourceAnalysisService:
                 "output root source project içinde olamaz."
             )
 
+    @staticmethod
+    def _acquisition_limits_for_deadline(
+        source_request: SourceAcquisitionRequest,
+        deadline: ProjectDeadline,
+    ) -> SourceAcquisitionLimits:
+        limits = source_request.limits
+        if source_request.source_kind is not SourceTargetKind.PUBLIC_GITHUB_REPOSITORY:
+            return limits
+        remaining = deadline.remaining_seconds()
+        if remaining is None or remaining <= 0.0:
+            return limits
+        return replace(
+            limits,
+            clone_timeout_seconds=min(
+                float(limits.clone_timeout_seconds),
+                remaining,
+            ),
+        )
+
+    @staticmethod
+    def _discovery_inventories(
+        acquired: ResolvedSourceTarget,
+    ) -> dict[str, tuple[str, ...]]:
+        return {
+            module.relative_path: module.top_level_function_names
+            for module in acquired.discovered_modules
+        }
+
+    def _deadline_result(
+        self,
+        request: ExternalSourceAnalysisRequest,
+        output_root: Path,
+        report_path: Path,
+        deadline: ProjectDeadline,
+        *,
+        acquired: ResolvedSourceTarget | None = None,
+        module_results: tuple[ExternalModuleAnalysisResult, ...] = (),
+        last_completed_stage: str | None,
+        deadline_stage: str,
+    ) -> ExternalSourceAnalysisResult:
+        usable = any(
+            item.status
+            in {
+                ExternalModuleStatus.STATIC_ONLY,
+                ExternalModuleStatus.COMPLETED,
+                ExternalModuleStatus.PARTIAL,
+            }
+            for item in module_results
+        )
+        acquisition_issues = (
+            tuple(issue.category.value for issue in acquired.issues)
+            if acquired is not None
+            else ()
+        )
+        return ExternalSourceAnalysisResult(
+            source_kind=request.source.source_kind,
+            execution_policy=request.execution_policy,
+            status=(
+                ExternalAnalysisStatus.PARTIAL
+                if usable
+                else ExternalAnalysisStatus.TIMED_OUT
+            ),
+            acquisition_status=(
+                acquired.status.value if acquired is not None else "NOT_STARTED"
+            ),
+            repository_name=(
+                self._public_source_name(request, acquired)
+                if acquired is not None
+                else None
+            ),
+            github_owner=acquired.github_owner if acquired is not None else None,
+            github_repository=(
+                acquired.github_repository if acquired is not None else None
+            ),
+            resolved_commit_sha=(
+                acquired.resolved_commit_sha if acquired is not None else None
+            ),
+            discovered_module_count=(
+                len(acquired.discovered_modules) if acquired is not None else 0
+            ),
+            selected_module_count=sum(
+                item.status is not ExternalModuleStatus.SKIPPED_LIMIT
+                for item in module_results
+            ),
+            module_results=module_results,
+            output_root=output_root,
+            report_path=report_path,
+            duration_seconds=deadline.elapsed_seconds(),
+            cleanup_status=ExternalWorkspaceCleanupStatus.NOT_REQUIRED,
+            issues=tuple(
+                dict.fromkeys(
+                    (*acquisition_issues, "PROJECT_DEADLINE_EXCEEDED")
+                )
+            ),
+            project_coverage=None,
+            project_timeout_seconds=deadline.timeout_seconds,
+            project_deadline_exceeded=True,
+            last_completed_stage=last_completed_stage,
+            deadline_stage=deadline_stage,
+        )
+
     def _failed_result(
         self,
         request: ExternalSourceAnalysisRequest,
@@ -881,6 +1183,7 @@ class ExternalSourceAnalysisService:
             duration_seconds=max(0.0, self._clock() - started),
             cleanup_status=cleanup_status,
             issues=(issue,),
+            project_timeout_seconds=request.configuration.project_timeout_seconds,
         )
 
     def _finalize(
@@ -889,6 +1192,7 @@ class ExternalSourceAnalysisService:
         *,
         acquired: ResolvedSourceTarget | None,
         temporary_workspace: Path | None,
+        deadline: ProjectDeadline | None = None,
     ) -> ExternalSourceAnalysisResult:
         # Rapor önce persistent output'a atomik yazılır; cleanup sonucu aynı
         # dosyaya ikinci bir atomik metadata güncellemesiyle yansıtılır.
@@ -897,15 +1201,38 @@ class ExternalSourceAnalysisService:
         issues = result.issues
         if cleanup_status is ExternalWorkspaceCleanupStatus.FAILED:
             issues = tuple(dict.fromkeys((*issues, "CLEANUP_FAILED")))
+        deadline_exceeded = result.project_deadline_exceeded or (
+            deadline is not None and deadline.exceeded()
+        )
+        status = result.status
+        deadline_stage = result.deadline_stage
+        if deadline_exceeded and not result.project_deadline_exceeded:
+            deadline_stage = "REPORT_FINALIZATION_OR_CLEANUP"
+            if status in {
+                ExternalAnalysisStatus.COMPLETED,
+                ExternalAnalysisStatus.STATIC_COMPLETED,
+            }:
+                status = (
+                    ExternalAnalysisStatus.PARTIAL
+                    if result.module_results
+                    else ExternalAnalysisStatus.TIMED_OUT
+                )
+        if deadline_exceeded:
+            issues = tuple(dict.fromkeys((*issues, "PROJECT_DEADLINE_EXCEEDED")))
         finalized = replace(
             result,
             status=(
                 ExternalAnalysisStatus.FAILED
                 if cleanup_status is ExternalWorkspaceCleanupStatus.FAILED
-                else result.status
+                else status
             ),
             cleanup_status=cleanup_status,
             issues=issues,
+            duration_seconds=(
+                deadline.elapsed_seconds() if deadline is not None else result.duration_seconds
+            ),
+            project_deadline_exceeded=deadline_exceeded,
+            deadline_stage=deadline_stage,
         )
         return self._write_result(finalized)
 

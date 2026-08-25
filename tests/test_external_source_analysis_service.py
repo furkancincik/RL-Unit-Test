@@ -708,3 +708,281 @@ def test_external_report_is_written_atomically(tmp_path: Path) -> None:
     assert result.report_path.is_file()
     assert replace_call.call_count >= 1
     assert not tuple(result.output_root.glob("*.tmp"))
+
+
+class _ExternalDeadlineClock:
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
+@pytest.mark.parametrize(
+    "value",
+    (True, False, 0, -1, float("nan"), float("inf"), -float("inf")),
+)
+def test_external_configuration_rejects_invalid_project_timeout(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match="project_timeout_seconds"):
+        _configuration(tmp_path, project_timeout_seconds=value)
+
+
+def test_project_deadline_none_preserves_unlimited_external_behavior(
+    tmp_path: Path,
+) -> None:
+    orchestrator = Mock()
+    orchestrator.run.return_value = Mock(
+        status=ProjectRunStatus.COMPLETED,
+        function_results=(),
+        discovered_targets=(),
+        coverage_candidates=(),
+        report_path=tmp_path / "none.json",
+    )
+
+    result = ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def target(value: int) -> int:\n    return value\n"),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path, project_timeout_seconds=None),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.COMPLETED
+    assert result.project_timeout_seconds is None
+    assert result.project_deadline_exceeded is False
+    assert orchestrator.run.call_args.kwargs["project_deadline"].timeout_seconds is None
+
+
+def test_project_deadline_before_acquisition_returns_controlled_timeout(
+    tmp_path: Path,
+) -> None:
+    values = iter((0.0, 2.0, 2.0, 2.0, 2.0, 2.0))
+    acquisition = Mock()
+
+    result = ExternalSourceAnalysisService(
+        acquisition_service=acquisition,
+        clock=lambda: next(values, 2.0),
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def target() -> int:\n    return 1\n"),
+            configuration=_configuration(tmp_path, project_timeout_seconds=1.0),
+        )
+    )
+
+    acquisition.resolve.assert_not_called()
+    assert result.status is ExternalAnalysisStatus.TIMED_OUT
+    assert result.acquisition_status == "NOT_STARTED"
+    assert result.project_deadline_exceeded is True
+    assert result.deadline_stage == "SOURCE_PREPARATION"
+    assert result.project_coverage is None
+    assert result.cleanup_status is ExternalWorkspaceCleanupStatus.NOT_REQUIRED
+
+
+def test_project_deadline_after_discovery_preserves_inventory_and_cleans(
+    tmp_path: Path,
+) -> None:
+    clock = _ExternalDeadlineClock()
+    real_acquisition = SourceAcquisitionService()
+    acquisition = Mock()
+
+    def resolve(request, *, project_deadline=None):
+        acquired = real_acquisition.resolve(
+            request,
+            project_deadline=project_deadline,
+        )
+        clock.value = 2.0
+        return acquired
+
+    acquisition.resolve.side_effect = resolve
+    result = ExternalSourceAnalysisService(
+        acquisition_service=acquisition,
+        clock=clock,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource(
+                "def first() -> int:\n    return 1\n\n"
+                "def second() -> int:\n    return 2\n"
+            ),
+            configuration=_configuration(tmp_path, project_timeout_seconds=1.0),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.TIMED_OUT
+    assert result.discovered_module_count == 1
+    assert result.discovered_function_count == 2
+    assert result.deadline_skipped_function_count == 2
+    assert result.module_results[0].status is ExternalModuleStatus.SKIPPED_DEADLINE
+    assert result.cleanup_status is ExternalWorkspaceCleanupStatus.COMPLETED
+    assert result.to_dict()["aggregate_project_coverage"]["status"] == "UNMEASURED"
+
+
+def test_project_deadline_preserves_completed_module_and_skips_later_module(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("alpha.py", "beta.py"):
+        (project / name).write_text(
+            "def target(value: int) -> int:\n    return value\n",
+            encoding="utf-8",
+        )
+    clock = _ExternalDeadlineClock()
+    orchestrator = Mock()
+
+    def run(**kwargs):
+        clock.value = 3.0
+        return Mock(
+            status=ProjectRunStatus.COMPLETED,
+            function_results=(),
+            discovered_targets=(),
+            coverage_candidates=(),
+            report_path=tmp_path / "none.json",
+        )
+
+    orchestrator.run.side_effect = run
+    result = ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator,
+        clock=clock,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            LocalProjectDirectory(project),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path, project_timeout_seconds=2.0),
+        )
+    )
+
+    assert [item.status for item in result.module_results] == [
+        ExternalModuleStatus.COMPLETED,
+        ExternalModuleStatus.SKIPPED_DEADLINE,
+    ]
+    assert result.status is ExternalAnalysisStatus.PARTIAL
+    assert result.project_deadline_exceeded is True
+    assert orchestrator.run.call_count == 1
+    assert result.project_coverage is None
+
+
+def test_project_coverage_receives_remaining_project_budget(
+    tmp_path: Path,
+) -> None:
+    clock = _ExternalDeadlineClock()
+    orchestrator = Mock()
+    orchestrator.run.return_value = Mock(
+        status=ProjectRunStatus.COMPLETED,
+        function_results=(),
+        discovered_targets=(),
+        coverage_candidates=(),
+        report_path=tmp_path / "none.json",
+    )
+    coverage_service = Mock()
+    coverage_service.measure_and_minimize.return_value = None
+
+    result = ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator,
+        project_coverage_service=coverage_service,
+        clock=clock,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def target() -> int:\n    return 1\n"),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(
+                tmp_path,
+                project_timeout_seconds=5.0,
+                pytest_coverage_timeout_seconds=30.0,
+            ),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.COMPLETED
+    assert coverage_service.measure_and_minimize.call_args.kwargs[
+        "timeout_seconds"
+    ] == pytest.approx(5.0)
+
+
+def test_public_clone_timeout_is_clamped_by_remaining_project_budget(
+    tmp_path: Path,
+) -> None:
+    acquisition = Mock()
+    acquisition.resolve.side_effect = RuntimeError("stop after request capture")
+
+    with pytest.raises(RuntimeError, match="request capture"):
+        ExternalSourceAnalysisService(acquisition_service=acquisition).run(
+            ExternalSourceAnalysisRequest(
+                PublicGitHubRepository("https://github.com/owner/repository"),
+                configuration=_configuration(
+                    tmp_path,
+                    project_timeout_seconds=4.0,
+                ),
+            )
+        )
+
+    source_request = acquisition.resolve.call_args.args[0]
+    assert 0.0 < source_request.limits.clone_timeout_seconds <= 4.0
+    assert acquisition.resolve.call_args.kwargs["project_deadline"].timeout_seconds == 4.0
+
+
+def test_deadline_state_is_not_reused_by_later_external_run(tmp_path: Path) -> None:
+    clock = _ExternalDeadlineClock()
+    service = ExternalSourceAnalysisService(clock=clock)
+    first = service.run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def first() -> int:\n    return 1\n"),
+            configuration=_configuration(
+                tmp_path / "first",
+                project_timeout_seconds=0.5,
+            ),
+        )
+    )
+    clock.value = 100.0
+    second = service.run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def second() -> int:\n    return 2\n"),
+            configuration=_configuration(
+                tmp_path / "second",
+                project_timeout_seconds=5.0,
+            ),
+        )
+    )
+
+    assert first.status is ExternalAnalysisStatus.STATIC_COMPLETED
+    assert second.status is ExternalAnalysisStatus.STATIC_COMPLETED
+    assert first.project_deadline_exceeded is False
+    assert second.project_deadline_exceeded is False
+
+
+def test_deadline_crossed_during_cooperative_finalization_preserves_report_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    clock = _ExternalDeadlineClock()
+    service = ExternalSourceAnalysisService(clock=clock)
+    real_cleanup = service._cleanup
+
+    def cleanup(acquired, temporary_workspace):
+        status = real_cleanup(acquired, temporary_workspace)
+        clock.value = 2.0
+        return status
+
+    with patch.object(service, "_cleanup", side_effect=cleanup):
+        result = service.run(
+            ExternalSourceAnalysisRequest(
+                InlinePythonSource("def target() -> int:\n    return 1\n"),
+                configuration=_configuration(
+                    tmp_path,
+                    project_timeout_seconds=1.0,
+                ),
+            )
+        )
+
+    assert result.status is ExternalAnalysisStatus.PARTIAL
+    assert result.project_deadline_exceeded is True
+    assert result.deadline_stage == "REPORT_FINALIZATION_OR_CLEANUP"
+    assert result.cleanup_status is ExternalWorkspaceCleanupStatus.COMPLETED
+    assert result.report_path.is_file()
+    assert not tuple(result.output_root.glob("*.tmp"))
+    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert payload["project_deadline_exceeded"] is True
+    assert payload["aggregate_project_coverage"]["line_percent"] is None

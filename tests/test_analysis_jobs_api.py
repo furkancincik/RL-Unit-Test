@@ -83,6 +83,116 @@ def test_inline_submission_defaults_to_static_and_result_is_polled(tmp_path: Pat
     service.shutdown()
 
 
+@pytest.mark.parametrize(
+    "value",
+    (True, False, 0, -1, "NaN", "Infinity", 14_401),
+)
+def test_invalid_project_timeout_is_422_without_consuming_job_capacity(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    with client:
+        response = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "def target() -> int:\n    return 1\n",
+                "analysis": {"project_timeout_seconds": value},
+            },
+        )
+
+    assert response.status_code == 422
+    assert service.capacity()[:2] == (0, 0)
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_api_forwards_project_timeout_as_distinct_configuration_value(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    with client:
+        response = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "def target() -> int:\n    return 1\n",
+                "analysis": {
+                    "project_timeout_seconds": 45.5,
+                    "function_pipeline_timeout_seconds": 12.0,
+                },
+            },
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    configuration = runner.run.call_args.args[0].configuration
+    assert configuration.project_timeout_seconds == pytest.approx(45.5)
+    assert configuration.per_function_pipeline_timeout_seconds == pytest.approx(12.0)
+    service.shutdown()
+
+
+def test_project_deadline_terminal_result_is_safe_http_200_not_internal_error(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+
+    def deadline_result(request) -> ExternalSourceAnalysisResult:
+        output = request.configuration.output_root
+        output.mkdir(parents=True, exist_ok=True)
+        report = output / "external_source_analysis_report.json"
+        report.write_text("{}", encoding="utf-8")
+        return ExternalSourceAnalysisResult(
+            source_kind=request.source.source_kind,
+            execution_policy=request.execution_policy,
+            status=ExternalAnalysisStatus.TIMED_OUT,
+            acquisition_status="NOT_STARTED",
+            repository_name=None,
+            github_owner=None,
+            github_repository=None,
+            resolved_commit_sha=None,
+            discovered_module_count=0,
+            selected_module_count=0,
+            module_results=(),
+            output_root=output,
+            report_path=report,
+            duration_seconds=0.25,
+            cleanup_status=ExternalWorkspaceCleanupStatus.COMPLETED,
+            issues=("PROJECT_DEADLINE_EXCEEDED",),
+            project_timeout_seconds=0.25,
+            project_deadline_exceeded=True,
+            last_completed_stage="REQUEST_VALIDATION",
+            deadline_stage="SOURCE_ACQUISITION",
+        )
+
+    runner.run.side_effect = deadline_result
+    with client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "def target() -> int:\n    return 1\n",
+                "analysis": {"project_timeout_seconds": 0.25},
+            },
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=5)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}")
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "TIMED_OUT"
+    assert snapshot.json()["progress_stage"] == "SOURCE_ACQUISITION"
+    assert snapshot.json()["safe_error_category"] is None
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "TIMED_OUT"
+    assert payload["project_deadline_exceeded"] is True
+    assert payload["deadline_stage"] == "SOURCE_ACQUISITION"
+    assert payload["project_line_coverage_percent"] is None
+    assert "INTERNAL_WORKER_ERROR" not in json.dumps(payload)
+    service.shutdown()
+
+
 def test_inline_explicit_qualified_targets_are_bound_to_public_module_identity(
     tmp_path: Path,
 ) -> None:

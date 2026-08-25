@@ -27,6 +27,7 @@ from models.project_analysis_result import (
 )
 from models.project_coverage_result import ProjectTestCandidate
 from services.project_analysis_report_service import ProjectAnalysisReportWriter
+from services.project_deadline import ProjectDeadline
 from services.real_rl_training_service import (
     RealRLTrainingResult,
     RealRLTrainingService,
@@ -49,12 +50,14 @@ class SourceAnalysisOrchestrator:
         analyzer: PythonAnalyzer | None = None,
         training_service_factory: TrainingServiceFactory | None = None,
         report_writer: ProjectAnalysisReportWriter | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._analyzer = analyzer or PythonAnalyzer()
         self._training_service_factory = (
             training_service_factory or RealRLTrainingService
         )
         self._report_writer = report_writer or ProjectAnalysisReportWriter()
+        self._clock = clock
 
     def run(
         self,
@@ -80,8 +83,13 @@ class SourceAnalysisOrchestrator:
         comparison_timeout_seconds: float | None = None,
         relative_module_path: str | None = None,
         target_selection: TargetSelection | None = None,
+        project_deadline: ProjectDeadline | None = None,
     ) -> ProjectAnalysisResult:
-        started_at = time.perf_counter()
+        started_at = self._clock()
+        if project_deadline is not None and not isinstance(
+            project_deadline, ProjectDeadline
+        ):
+            raise TypeError("project_deadline ProjectDeadline olmalıdır.")
         normalized_source = self._normalize_source_file(source_file)
         normalized_module = self._normalize_module_path(module_path)
         normalized_output = self._normalize_output_root(output_root)
@@ -121,14 +129,10 @@ class SourceAnalysisOrchestrator:
             module_identity=normalized_module,
             target_selection=normalized_selection,
         )
-        limit_skipped_ordinals = self._limit_skipped_ordinals(
-            selected_targets,
-            maximum_functions,
-            selected_names,
-        )
         report_path = normalized_output / "project_analysis_report.json"
         function_results: list[FunctionAnalysisResult] = []
         coverage_candidates: list[ProjectTestCandidate] = []
+        started_eligible_count = 0
 
         for ordinal, target in enumerate(selected_targets, start=1):
             function_output = self._function_output_directory(
@@ -157,7 +161,22 @@ class SourceAnalysisOrchestrator:
                 )
                 continue
 
-            if ordinal in limit_skipped_ordinals:
+            if project_deadline is not None and project_deadline.exceeded():
+                function_results.append(
+                    FunctionAnalysisResult(
+                        target=target,
+                        status=FunctionRunStatus.SKIPPED_DEADLINE,
+                        diagnostic=None,
+                        output_directory=function_output,
+                        skip_reason="PROJECT_DEADLINE_EXCEEDED",
+                    )
+                )
+                continue
+
+            if (
+                maximum_functions is not None
+                and started_eligible_count >= maximum_functions
+            ):
                 function_results.append(
                     FunctionAnalysisResult(
                         target=target,
@@ -169,6 +188,24 @@ class SourceAnalysisOrchestrator:
                 )
                 continue
 
+            started_eligible_count += 1
+            function_timeout = per_function_timeout_seconds
+            pytest_timeout = timeout_seconds
+            comparison_timeout = comparison_timeout_seconds
+            if project_deadline is not None:
+                remaining = project_deadline.remaining_seconds()
+                if remaining is not None:
+                    pytest_timeout = min(float(timeout_seconds), remaining)
+                    function_timeout = (
+                        remaining
+                        if per_function_timeout_seconds is None
+                        else min(float(per_function_timeout_seconds), remaining)
+                    )
+                    comparison_timeout = (
+                        remaining
+                        if comparison_timeout_seconds is None
+                        else min(float(comparison_timeout_seconds), remaining)
+                    )
             service = self._training_service_factory()
             pipeline_result = service.run_with_diagnostics(
                 source_file=normalized_source,
@@ -184,12 +221,12 @@ class SourceAnalysisOrchestrator:
                 discount_factor=discount_factor,
                 random_seed=random_seed,
                 overwrite=overwrite,
-                timeout_seconds=timeout_seconds,
-                pipeline_timeout_seconds=per_function_timeout_seconds,
+                timeout_seconds=pytest_timeout,
+                pipeline_timeout_seconds=function_timeout,
                 import_root=normalized_import_root,
                 run_greedy_baseline=run_greedy_baseline,
                 run_strategy_comparison=run_strategy_comparison,
-                comparison_timeout_seconds=comparison_timeout_seconds,
+                comparison_timeout_seconds=comparison_timeout,
             )
             diagnostic = self._extract_diagnostic(pipeline_result)
             if isinstance(pipeline_result, RealRLTrainingResult):
@@ -246,7 +283,7 @@ class SourceAnalysisOrchestrator:
             selection_mode=selection_mode,
             discovered_targets=discovered_targets,
             function_results=tuple(function_results),
-            total_duration_seconds=max(0.0, time.perf_counter() - started_at),
+            total_duration_seconds=max(0.0, self._clock() - started_at),
             status=ProjectAnalysisResult.derive_status(statuses),
             output_root=normalized_output,
             report_path=report_path,

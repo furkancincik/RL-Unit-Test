@@ -132,6 +132,7 @@ class FunctionRunStatus(str, Enum):
     SKIPPED = "SKIPPED"
     SKIPPED_SELECTION = "SKIPPED_SELECTION"
     SKIPPED_LIMIT = "SKIPPED_LIMIT"
+    SKIPPED_DEADLINE = "SKIPPED_DEADLINE"
     UNSUPPORTED = "UNSUPPORTED"
 
 
@@ -228,6 +229,7 @@ class FunctionAnalysisResult:
             FunctionRunStatus.SKIPPED,
             FunctionRunStatus.SKIPPED_SELECTION,
             FunctionRunStatus.SKIPPED_LIMIT,
+            FunctionRunStatus.SKIPPED_DEADLINE,
             FunctionRunStatus.UNSUPPORTED,
         } and not self.skip_reason:
             raise ValueError("Skipped/unsupported function bir reason taşımalıdır.")
@@ -420,6 +422,8 @@ class ProjectAnalysisResult:
             return ProjectRunStatus.PARTIAL
         if any(status is FunctionRunStatus.TIMED_OUT for status in relevant):
             return ProjectRunStatus.TIMED_OUT
+        if any(status is FunctionRunStatus.SKIPPED_DEADLINE for status in relevant):
+            return ProjectRunStatus.TIMED_OUT
         return ProjectRunStatus.FAILED
 
     @property
@@ -437,6 +441,7 @@ class ProjectAnalysisResult:
                 FunctionRunStatus.SKIPPED,
                 FunctionRunStatus.SKIPPED_SELECTION,
                 FunctionRunStatus.SKIPPED_LIMIT,
+                FunctionRunStatus.SKIPPED_DEADLINE,
                 FunctionRunStatus.UNSUPPORTED,
             }
             for item in self.function_results
@@ -478,11 +483,16 @@ class ProjectAnalysisResult:
         return self._count(FunctionRunStatus.SKIPPED_SELECTION)
 
     @property
+    def deadline_skipped_function_count(self) -> int:
+        return self._count(FunctionRunStatus.SKIPPED_DEADLINE)
+
+    @property
     def skipped_function_count(self) -> int:
         return (
             self.skipped_count
             + self.selection_skipped_function_count
             + self.limit_skipped_function_count
+            + self.deadline_skipped_function_count
         )
 
     @property
@@ -517,6 +527,9 @@ class ProjectAnalysisResult:
                 ),
                 "skipped_function_count": self.skipped_function_count,
                 "limit_skipped_function_count": self.limit_skipped_function_count,
+                "deadline_skipped_function_count": (
+                    self.deadline_skipped_function_count
+                ),
                 "unsupported_count": self.unsupported_count,
             },
             "aggregate_project_coverage": {
