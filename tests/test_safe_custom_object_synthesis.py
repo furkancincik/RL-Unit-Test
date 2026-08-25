@@ -120,6 +120,393 @@ def test_simple_instance_method_accepts_annotated_custom_object_parameter(
     assert target.parameters == ["reading", "limit"]
 
 
+@pytest.mark.parametrize(
+    (
+        "module_name",
+        "class_name",
+        "function_name",
+        "parameter_name",
+        "attribute_name",
+        "literal",
+    ),
+    (
+        ("structural_alpha", "Gauge", "classify", "subject", "level", 7),
+        ("structural_beta", "Packet", "route", "payload", "weight", 19),
+        ("structural_gamma", "Marker", "choose", "candidate", "rank", 31),
+    ),
+)
+def test_untyped_parameter_infers_one_safe_structural_local_class(
+    tmp_path: Path,
+    module_name: str,
+    class_name: str,
+    function_name: str,
+    parameter_name: str,
+    attribute_name: str,
+    literal: int,
+) -> None:
+    source_file = _write_source(
+        tmp_path,
+        f"class {class_name}:\n"
+        f"    def __init__(self, seed: int = {literal}):\n"
+        f"        self.{attribute_name} = seed\n\n"
+        f"def {function_name}({parameter_name}, boundary: int) -> str:\n"
+        f"    if {parameter_name}.{attribute_name} >= boundary:\n"
+        "        return 'upper'\n"
+        "    return 'lower'\n",
+        f"{module_name}.py",
+    )
+    tree = ast.parse(source_file.read_text(encoding="utf-8"))
+
+    spec, reason = analyze_safe_custom_object_target(tree, function_name)
+    target = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.name == function_name
+    )
+
+    assert reason is None and spec is not None
+    assert spec.object_parameters[0].parameter_name == parameter_name
+    assert spec.object_parameters[0].class_name == class_name
+    assert spec.object_parameters[0].resolution_kind == "STRUCTURAL_UNIQUE"
+    assert target.is_supported is True
+    assert target.parameter_types[parameter_name] == class_name
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name", "attribute_name", "function_name"),
+    (
+        ("First", "Second", "signal", "inspect"),
+        ("Primary", "Alternate", "weight", "evaluate"),
+        ("North", "South", "level", "choose"),
+    ),
+)
+def test_untyped_structural_parameter_rejects_ambiguous_safe_classes(
+    first_name: str,
+    second_name: str,
+    attribute_name: str,
+    function_name: str,
+) -> None:
+    tree = ast.parse(
+        f"class {first_name}:\n"
+        "    def __init__(self, value: int = 1):\n"
+        f"        self.{attribute_name} = value\n\n"
+        f"class {second_name}:\n"
+        "    def __init__(self, value: int = 2):\n"
+        f"        self.{attribute_name} = value\n\n"
+        f"def {function_name}(subject) -> int:\n"
+        f"    return subject.{attribute_name}\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, function_name)
+
+    assert spec is None
+    assert reason == (
+        "Untyped structural object parameter has an ambiguous safe local "
+        "class match."
+    )
+
+
+@pytest.mark.parametrize(
+    ("class_name", "available_name", "missing_name", "function_name"),
+    (
+        ("Partial", "left", "right", "inspect"),
+        ("Fragment", "mass", "volume", "measure"),
+        ("Record", "rank", "score", "select"),
+    ),
+)
+def test_untyped_structural_parameter_requires_a_safe_complete_match(
+    class_name: str,
+    available_name: str,
+    missing_name: str,
+    function_name: str,
+) -> None:
+    tree = ast.parse(
+        f"class {class_name}:\n"
+        "    def __init__(self, value: int = 1):\n"
+        f"        self.{available_name} = value\n\n"
+        f"def {function_name}(subject) -> int:\n"
+        f"    return subject.{available_name} + subject.{missing_name}\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, function_name)
+
+    assert spec is None
+    assert reason is None
+
+
+def test_instance_method_accepts_unique_untyped_structural_object_parameter(
+    tmp_path: Path,
+) -> None:
+    source_file = _write_source(
+        tmp_path,
+        "class Reading:\n"
+        "    def __init__(self, score: int = 3):\n"
+        "        self.score = score\n\n"
+        "class Evaluator:\n"
+        "    def decide(self, candidate, limit: int) -> str:\n"
+        "        if candidate.score > limit:\n"
+        "            return 'above'\n"
+        "        return 'other'\n",
+        "structural_method.py",
+    )
+
+    target = next(
+        item
+        for item in PythonAnalyzer().analyze_file(source_file).functions
+        if item.qualified_name == "Evaluator.decide"
+    )
+
+    assert target.is_supported is True
+    assert target.parameters == ["candidate", "limit"]
+    assert target.parameter_types == {"candidate": "Reading", "limit": "int"}
+
+
+def test_untyped_structural_method_call_remains_controlled_unsupported() -> None:
+    tree = ast.parse(
+        "class Calculator:\n"
+        "    def __init__(self, value: int = 4):\n"
+        "        self.entries = value\n\n"
+        "    def calculate(self) -> int:\n"
+        "        return self.entries\n\n"
+        "def handle(subject):\n"
+        "    if not subject.entries:\n"
+        "        return 0\n"
+        "    return subject.calculate()\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "handle")
+
+    assert spec is None
+    assert "method call" in (reason or "").lower()
+
+
+def test_explicit_local_annotation_takes_precedence_over_structural_candidates() -> None:
+    tree = ast.parse(
+        "class Chosen:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n\n"
+        "class Other:\n"
+        "    def __init__(self, value: int = 2):\n"
+        "        self.signal = value\n\n"
+        "def inspect(subject: Chosen) -> int:\n"
+        "    return subject.signal\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    assert spec.object_parameters[0].class_name == "Chosen"
+    assert spec.object_parameters[0].resolution_kind == "ANNOTATED"
+
+
+def test_inferred_primitive_evidence_takes_precedence_over_structural_shape() -> None:
+    tree = ast.parse(
+        "class StringLike:\n"
+        "    def transform(self):\n"
+        "        return 'changed'\n\n"
+        "def inspect(value):\n"
+        "    if value == 'ready':\n"
+        "        return value.transform()\n"
+        "    return value\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert spec is None
+    assert reason is None
+
+
+def test_unsafe_structural_candidate_does_not_make_safe_match_ambiguous() -> None:
+    tree = ast.parse(
+        "class SafeCandidate:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n\n"
+        "class UnsafeCandidate:\n"
+        "    def __init__(self, value: int = 2):\n"
+        "        self.signal = transform(value)\n\n"
+        "def inspect(subject) -> int:\n"
+        "    return subject.signal\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    assert spec.object_parameters[0].class_name == "SafeCandidate"
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            "probe = subject.signal\n    return subject",
+            "direct instance interface",
+        ),
+        (
+            "probe = subject.signal\n    alias = subject\n    return alias",
+            "direct instance interface",
+        ),
+        (
+            "def nested():\n        return subject.signal\n    return nested()",
+            "nested scopes",
+        ),
+        (
+            "probe = subject.signal\n    return subject[0]",
+            "direct instance interface",
+        ),
+    ),
+)
+def test_untyped_structural_inference_rejects_non_direct_or_nested_use(
+    body: str,
+    reason: str,
+) -> None:
+    tree = ast.parse(
+        "class Candidate:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n\n"
+        "def inspect(subject):\n"
+        f"    {body}\n"
+    )
+
+    spec, rejection = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert spec is None
+    assert reason in (rejection or "").lower()
+
+
+@pytest.mark.parametrize("statement", ("subject.signal = 2", "del subject.signal"))
+def test_untyped_structural_inference_rejects_attribute_write_and_delete(
+    statement: str,
+) -> None:
+    tree = ast.parse(
+        "class Candidate:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n\n"
+        "def mutate(subject):\n"
+        f"    {statement}\n"
+        "    return 0\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "mutate")
+
+    assert spec is None
+    assert "write or delete" in (reason or "").lower()
+
+
+def test_structural_callable_signature_selects_only_compatible_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = ast.parse(
+        "class Compatible:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n"
+        "    def calculate(self, scale: int, *, enabled: bool = True):\n"
+        "        return self.signal * scale\n\n"
+        "class Incompatible:\n"
+        "    def __init__(self, value: int = 2):\n"
+        "        self.signal = value\n"
+        "    def calculate(self, scale: int, required: int):\n"
+        "        return self.signal * scale + required\n\n"
+        "def inspect(subject, factor: int):\n"
+        "    if subject.signal > 0:\n"
+        "        return subject.calculate(factor, enabled=False)\n"
+        "    return 0\n"
+    )
+    monkeypatch.setattr(
+        "analyzer.safe_custom_object._validate_target_usage",
+        lambda target, parameter: None,
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    assert spec.object_parameters[0].class_name == "Compatible"
+    assert spec.object_parameters[0].resolution_kind == "STRUCTURAL_UNIQUE"
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        (
+            "class StateOnly:\n"
+            "    def __init__(self, value: int = 1):\n"
+            "        self.action = value\n\n"
+            "def inspect(subject):\n"
+            "    return subject.action()\n"
+        ),
+        (
+            "class MethodOnly:\n"
+            "    def action(self):\n"
+            "        return 1\n\n"
+            "def inspect(subject):\n"
+            "    return subject.action\n"
+        ),
+    ),
+)
+def test_structural_attribute_and_callable_evidence_are_not_interchangeable(
+    source: str,
+) -> None:
+    spec, reason = analyze_safe_custom_object_target(ast.parse(source), "inspect")
+
+    assert spec is None
+    assert reason is None
+
+
+def test_untyped_parameter_without_attribute_evidence_is_not_object_inference() -> None:
+    tree = ast.parse(
+        "class Candidate:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n\n"
+        "def calculate(value):\n"
+        "    return value + 1\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "calculate")
+
+    assert spec is None
+    assert reason is None
+
+
+def test_unmatched_structural_parameter_does_not_hide_later_safe_object() -> None:
+    tree = ast.parse(
+        "class Known:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.signal = value\n\n"
+        "def inspect(unknown, known: Known) -> int:\n"
+        "    if unknown.missing:\n"
+        "        return 0\n"
+        "    return known.signal\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    assert tuple(
+        (parameter.parameter_name, parameter.class_name)
+        for parameter in spec.object_parameters
+    ) == (("known", "Known"),)
+
+
+def test_multiple_untyped_structural_parameters_are_inferred_independently() -> None:
+    tree = ast.parse(
+        "class LeftShape:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.left_signal = value\n\n"
+        "class RightShape:\n"
+        "    def __init__(self, value: int = 2):\n"
+        "        self.right_signal = value\n\n"
+        "def compare(first, second) -> bool:\n"
+        "    return first.left_signal > second.right_signal\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "compare")
+
+    assert reason is None and spec is not None
+    assert tuple(
+        (parameter.parameter_name, parameter.class_name)
+        for parameter in spec.object_parameters
+    ) == (("first", "LeftShape"), ("second", "RightShape"))
+
+
 def test_custom_object_constructor_supports_primitive_defaults_and_inference() -> None:
     tree = ast.parse(
         "class Measure:\n"
@@ -635,6 +1022,71 @@ def test_real_pipeline_runs_custom_object_pytest_coverage_greedy_and_rl(
     assert "classify(container=" in generated
 
 
+def test_real_pipeline_runs_unique_untyped_structural_object_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = _write_source(
+        tmp_path,
+        "class Register:\n"
+        "    def __init__(self, value: int = 5):\n"
+        "        self.value = value\n\n"
+        "def evaluate(subject, boundary: int) -> str:\n"
+        "    if subject.value >= boundary:\n"
+        "        return 'enough'\n"
+        "    return 'short'\n",
+        "structural_dynamic.py",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path="structural_dynamic",
+        function_name="evaluate",
+        all_functions=False,
+        output_root=tmp_path / "structural_output",
+        max_visits_per_node=2,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=43,
+        timeout_seconds=30.0,
+        per_function_timeout_seconds=60.0,
+        run_greedy_baseline=True,
+    )
+
+    function_result = result.function_results[0]
+    assert function_result.status.value == "COMPLETED"
+    assert function_result.scenario_pool_coverage is not None
+    assert function_result.scenario_pool_coverage.covered_lines
+    assert function_result.minimization_result is not None
+    assert function_result.minimization_result.coverage_preserved is True
+    assert function_result.diagnostic is not None
+    assert function_result.diagnostic.funnel.rl_executed_test_count
+    assert result.coverage_candidates
+    assert all(
+        isinstance(
+            candidate.scenario.keyword_argument_dict["subject"],
+            SafeObjectConstructionBlueprint,
+        )
+        for candidate in result.coverage_candidates
+    )
+    public_payload = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "constructor_arguments" not in public_payload
+    assert "keyword_arguments" not in public_payload
+    assert "__custom_object_" not in public_payload
+    assert "resolution_kind" not in public_payload
+    assert "STRUCTURAL_UNIQUE" not in public_payload
+    generated = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in function_result.output_directory.rglob("test_*.py")
+    )
+    assert "from structural_dynamic import Register, evaluate" in generated
+    assert "subject_object = Register(value=" in generated
+    assert "evaluate(subject=subject_object" in generated
+
+
 def test_real_pipeline_separates_same_named_local_classes_by_module(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -766,6 +1218,59 @@ def test_real_instance_method_pipeline_accepts_custom_object_method_parameter(
     assert "reading_object = Reading(score=" in generated
     assert "target = Evaluator()" in generated
     assert "target.decide(reading=reading_object" in generated
+
+
+def test_real_instance_method_pipeline_accepts_unique_untyped_object_parameter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = _write_source(
+        tmp_path,
+        "class Signal:\n"
+        "    def __init__(self, level: int = 2):\n"
+        "        self.level = level\n\n"
+        "class Judge:\n"
+        "    def choose(self, candidate, limit: int) -> str:\n"
+        "        if candidate.level > limit:\n"
+        "            return 'above'\n"
+        "        return 'other'\n",
+        "structural_method_dynamic.py",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path="structural_method_dynamic",
+        function_name="Judge.choose",
+        all_functions=False,
+        output_root=tmp_path / "structural_method_output",
+        max_visits_per_node=2,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=17,
+        timeout_seconds=30.0,
+        per_function_timeout_seconds=60.0,
+        run_greedy_baseline=True,
+    )
+
+    function_result = result.function_results[0]
+    assert function_result.status.value == "COMPLETED"
+    assert function_result.scenario_pool_coverage is not None
+    assert function_result.minimization_result is not None
+    assert function_result.minimization_result.coverage_preserved is True
+    assert function_result.diagnostic is not None
+    assert function_result.diagnostic.funnel.rl_executed_test_count
+    assert result.coverage_candidates
+    generated = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in function_result.output_directory.rglob("test_*.py")
+    )
+    assert "from structural_method_dynamic import Judge, Signal" in generated
+    assert "candidate_object = Signal(level=" in generated
+    assert "target = Judge()" in generated
+    assert "target.choose(candidate=candidate_object" in generated
 
 
 def test_static_analyzer_never_executes_constructor_or_target(

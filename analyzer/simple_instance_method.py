@@ -102,6 +102,8 @@ class _SelfStateTransformer(ast.NodeTransformer):
 def analyze_simple_instance_method(
     class_node: ast.ClassDef,
     method_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    object_parameter_types: dict[str, str] | None = None,
 ) -> tuple[SimpleInstanceMethodSpec | None, str | None]:
     if class_node.bases or class_node.keywords:
         return None, "Class inheritance and metaclass targets are unsupported."
@@ -120,6 +122,7 @@ def analyze_simple_instance_method(
         method_node,
         require_self=True,
         allow_local_object_annotation=True,
+        parameter_type_overrides=object_parameter_types,
     )
     if reason is not None:
         return None, reason
@@ -284,10 +287,6 @@ def find_analysis_target(
     )
     if method_node is None:
         raise ValueError(f"Method bulunamadı: {target_name}")
-    spec, reason = analyze_simple_instance_method(class_node, method_node)
-    if spec is None:
-        raise ValueError(reason or "Instance method desteklenmiyor.")
-    normalized = normalized_method_node(spec)
     from analyzer.safe_custom_object import (
         analyze_safe_custom_object_target,
         normalized_custom_object_target,
@@ -299,6 +298,22 @@ def find_analysis_target(
     )
     if custom_reason is not None:
         raise ValueError(custom_reason)
+    object_parameter_types = (
+        {
+            parameter.parameter_name: parameter.class_name
+            for parameter in custom_spec.object_parameters
+        }
+        if custom_spec is not None
+        else None
+    )
+    spec, reason = analyze_simple_instance_method(
+        class_node,
+        method_node,
+        object_parameter_types=object_parameter_types,
+    )
+    if spec is None:
+        raise ValueError(reason or "Instance method desteklenmiyor.")
+    normalized = normalized_method_node(spec)
     return (
         normalized_custom_object_target(custom_spec, normalized)
         if custom_spec is not None
@@ -336,7 +351,27 @@ def method_spec_for_target(
     )
     if method_node is None:
         raise ValueError(f"Method bulunamadı: {target_name}")
-    spec, reason = analyze_simple_instance_method(class_node, method_node)
+    from analyzer.safe_custom_object import analyze_safe_custom_object_target
+
+    custom_spec, custom_reason = analyze_safe_custom_object_target(
+        tree,
+        target_name,
+    )
+    if custom_reason is not None:
+        raise ValueError(custom_reason)
+    object_parameter_types = (
+        {
+            parameter.parameter_name: parameter.class_name
+            for parameter in custom_spec.object_parameters
+        }
+        if custom_spec is not None
+        else None
+    )
+    spec, reason = analyze_simple_instance_method(
+        class_node,
+        method_node,
+        object_parameter_types=object_parameter_types,
+    )
     if spec is None:
         raise ValueError(reason or "Instance method desteklenmiyor.")
     return spec
@@ -347,6 +382,7 @@ def _parameters(
     *,
     require_self: bool,
     allow_local_object_annotation: bool = False,
+    parameter_type_overrides: dict[str, str] | None = None,
 ) -> tuple[tuple[SimpleParameter, ...], str | None]:
     if node.args.posonlyargs or node.args.kwonlyargs:
         return (), "Positional-only and keyword-only parameters are unsupported."
@@ -362,16 +398,27 @@ def _parameters(
         {argument.arg for argument in arguments if argument.annotation is None},
     )
     parameters: list[SimpleParameter] = []
+    overrides = parameter_type_overrides or {}
     for argument in arguments:
+        override_type = (
+            overrides.get(argument.arg)
+            if argument.annotation is None
+            else None
+        )
         type_name = primitive_annotation_type(argument.annotation)
         if type_name is None:
             type_name = inference.type_for(argument.arg)
+        if type_name is None:
+            type_name = override_type
         if type_name is None and allow_local_object_annotation:
             type_name = _local_object_annotation_token(argument.annotation)
         is_local_object_annotation = (
             allow_local_object_annotation
             and type_name is not None
-            and type_name == _local_object_annotation_token(argument.annotation)
+            and (
+                type_name == override_type
+                or type_name == _local_object_annotation_token(argument.annotation)
+            )
         )
         if type_name not in _PRIMITIVE_TYPES and not is_local_object_annotation:
             rejection = inference.rejection_for(argument.arg)

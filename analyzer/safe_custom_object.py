@@ -64,6 +64,7 @@ class SafeObjectParameterSpec:
     constructor_parameters: tuple[SafeConstructorParameter, ...]
     state_initializers: tuple[SafeStateInitializer, ...]
     class_fingerprint: str
+    resolution_kind: str = field(default="ANNOTATED", repr=False)
     depth: int = 1
 
     @property
@@ -237,6 +238,37 @@ class SafeCustomObjectTargetSpec:
         return replace(scenario, keyword_arguments=tuple(bound))
 
 
+@dataclass(frozen=True, slots=True)
+class _StructuralMethodCall:
+    name: str
+    positional_argument_count: int
+    keyword_names: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuralObjectInterface:
+    attribute_names: frozenset[str]
+    method_calls: frozenset[_StructuralMethodCall]
+
+
+class _DirectInterfaceMasker(ast.NodeTransformer):
+    def __init__(self, parameter_names: frozenset[str]) -> None:
+        self._parameter_names = parameter_names
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        rewritten = self.generic_visit(node)
+        assert isinstance(rewritten, ast.Attribute)
+        if (
+            isinstance(rewritten.value, ast.Name)
+            and rewritten.value.id in self._parameter_names
+        ):
+            rewritten.value = ast.copy_location(
+                ast.Name(id="__structural_receiver", ctx=ast.Load()),
+                rewritten.value,
+            )
+        return rewritten
+
+
 def _validate_module_identity(module_identity: str) -> None:
     if not isinstance(module_identity, str):
         raise TypeError("module_identity string olmalıdır.")
@@ -290,11 +322,22 @@ def analyze_safe_custom_object_target(
         for statement in tree.body
         if isinstance(statement, ast.ClassDef)
     }
-    object_arguments: list[tuple[ast.arg, ast.ClassDef]] = []
+    untyped_parameter_names = frozenset(
+        argument.arg for argument in arguments if argument.annotation is None
+    )
+    primitive_target = _DirectInterfaceMasker(
+        untyped_parameter_names,
+    ).visit(copy.deepcopy(target))
+    assert isinstance(primitive_target, ast.FunctionDef)
+    primitive_inference = infer_primitive_parameter_types(
+        primitive_target,
+        set(untyped_parameter_names),
+    )
+    object_arguments: list[tuple[ast.arg, ast.ClassDef, str]] = []
     for argument in arguments:
         resolved = _resolved_local_class(argument.annotation, local_classes)
         if resolved is not None:
-            object_arguments.append((argument, resolved))
+            object_arguments.append((argument, resolved, "ANNOTATED"))
             continue
         annotation_reason = _unsupported_annotation_reason(
             argument.annotation,
@@ -302,6 +345,43 @@ def analyze_safe_custom_object_target(
         )
         if annotation_reason is not None:
             return None, annotation_reason
+        if argument.annotation is not None:
+            continue
+        if (
+            primitive_inference.type_for(argument.arg) is not None
+            or primitive_inference.rejection_for(argument.arg)
+            == "has conflicting primitive evidence."
+        ):
+            continue
+        interface, interface_reason = _structural_object_interface(
+            target,
+            argument.arg,
+        )
+        if interface_reason is not None:
+            return None, interface_reason
+        if interface is None:
+            continue
+        matches: list[ast.ClassDef] = []
+        object_index = len(object_arguments) + 1
+        for class_node in local_classes.values():
+            analyzed, _ = _analyze_safe_class(
+                class_node,
+                object_index=object_index,
+            )
+            if analyzed is not None and _matches_structural_interface(
+                class_node,
+                analyzed,
+                interface,
+            ):
+                matches.append(class_node)
+        if not matches:
+            continue
+        if len(matches) != 1:
+            return (
+                None,
+                "Untyped structural object parameter has an ambiguous safe local class match.",
+            )
+        object_arguments.append((argument, matches[0], "STRUCTURAL_UNIQUE"))
 
     if not object_arguments:
         return None, None
@@ -315,7 +395,7 @@ def analyze_safe_custom_object_target(
 
     object_parameters: list[SafeObjectParameterSpec] = []
     occupied_analysis_names = {argument.arg for argument in arguments}
-    for object_index, (argument, class_node) in enumerate(
+    for object_index, (argument, class_node, resolution_kind) in enumerate(
         object_arguments,
         start=1,
     ):
@@ -347,6 +427,7 @@ def analyze_safe_custom_object_target(
             analyzed,
             parameter_name=argument.arg,
             constructor_parameters=tuple(constructor_parameters),
+            resolution_kind=resolution_kind,
         )
         usage_reason = _validate_target_usage(
             target,
@@ -505,6 +586,155 @@ def _unsupported_annotation_reason(
     ):
         return "Union and generic custom object annotations are unsupported."
     return None
+
+
+def _structural_object_interface(
+    target: ast.FunctionDef,
+    parameter_name: str,
+) -> tuple[_StructuralObjectInterface | None, str | None]:
+    parents = {
+        child: parent
+        for parent in ast.walk(target)
+        for child in ast.iter_child_nodes(parent)
+    }
+    attributes: set[str] = set()
+    method_calls: set[_StructuralMethodCall] = set()
+    has_direct_attribute_use = False
+    has_non_interface_use = False
+    for node in ast.walk(target):
+        if not isinstance(node, ast.Name) or node.id != parameter_name:
+            continue
+        parent = parents.get(node)
+        if not isinstance(parent, ast.Attribute) or parent.value is not node:
+            has_non_interface_use = True
+            continue
+        has_direct_attribute_use = True
+        current: ast.AST | None = parent
+        while current is not None and current is not target:
+            current = parents.get(current)
+            if current is not None and current is not target and isinstance(
+                current,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                return (
+                    None,
+                    "Untyped structural object use inside nested scopes is unsupported.",
+                )
+        attribute_parent = parents.get(parent)
+        if isinstance(attribute_parent, ast.Call) and attribute_parent.func is parent:
+            if any(isinstance(argument, ast.Starred) for argument in attribute_parent.args):
+                return (
+                    None,
+                    "Untyped structural callable evidence may not use starred arguments.",
+                )
+            if any(keyword.arg is None for keyword in attribute_parent.keywords):
+                return (
+                    None,
+                    "Untyped structural callable evidence may not use dynamic keywords.",
+                )
+            method_calls.add(
+                _StructuralMethodCall(
+                    name=parent.attr,
+                    positional_argument_count=len(attribute_parent.args),
+                    keyword_names=frozenset(
+                        keyword.arg
+                        for keyword in attribute_parent.keywords
+                        if keyword.arg is not None
+                    ),
+                )
+            )
+        else:
+            if not isinstance(parent.ctx, ast.Load):
+                return (
+                    None,
+                    "Untyped structural attribute write or delete is unsupported.",
+                )
+            attributes.add(parent.attr)
+    if not has_direct_attribute_use:
+        return None, None
+    if has_non_interface_use:
+        return (
+            None,
+            "Untyped structural object parameter may only use a direct instance interface.",
+        )
+    return (
+        _StructuralObjectInterface(
+            attribute_names=frozenset(attributes),
+            method_calls=frozenset(method_calls),
+        ),
+        None,
+    )
+
+
+def _matches_structural_interface(
+    class_node: ast.ClassDef,
+    analyzed: SafeObjectParameterSpec,
+    interface: _StructuralObjectInterface,
+) -> bool:
+    state_names = frozenset(analyzed.state_by_name)
+    methods = {
+        statement.name: statement
+        for statement in class_node.body
+        if isinstance(statement, ast.FunctionDef)
+        and statement.args.args
+        and statement.args.args[0].arg == "self"
+        and not statement.decorator_list
+    }
+    return (
+        interface.attribute_names.issubset(state_names)
+        and all(
+            (method := methods.get(call.name)) is not None
+            and _method_signature_accepts(method, call)
+            for call in interface.method_calls
+        )
+    )
+
+
+def _method_signature_accepts(
+    method: ast.FunctionDef,
+    call: _StructuralMethodCall,
+) -> bool:
+    arguments = method.args
+    if (
+        arguments.posonlyargs
+        or arguments.vararg is not None
+        or arguments.kwarg is not None
+    ):
+        return False
+    positional = list(arguments.args[1:])
+    if call.positional_argument_count > len(positional):
+        return False
+    bound_names = {
+        argument.arg
+        for argument in positional[: call.positional_argument_count]
+    }
+    positional_by_name = {argument.arg for argument in positional}
+    keyword_only_by_name = {
+        argument.arg for argument in arguments.kwonlyargs
+    }
+    for keyword_name in call.keyword_names:
+        if keyword_name in bound_names:
+            return False
+        if (
+            keyword_name not in positional_by_name
+            and keyword_name not in keyword_only_by_name
+        ):
+            return False
+        bound_names.add(keyword_name)
+    required_positional_count = len(positional) - len(arguments.defaults)
+    if any(
+        argument.arg not in bound_names
+        for argument in positional[:required_positional_count]
+    ):
+        return False
+    return all(
+        default is not None or argument.arg in bound_names
+        for argument, default in zip(
+            arguments.kwonlyargs,
+            arguments.kw_defaults,
+            strict=True,
+        )
+    )
 
 
 def _analyze_safe_class(
@@ -666,13 +896,13 @@ def _validate_target_usage(
             and isinstance(node.value, ast.Name)
             and node.value.id == parameter.parameter_name
         ):
-            if node.attr not in state_names:
-                return "Custom object dynamic or unknown attributes are unsupported."
             parent = parents.get(node)
-            if isinstance(parent, ast.Attribute) and parent.value is node:
-                return "Nested custom object attributes are unsupported."
             if isinstance(parent, ast.Call) and parent.func is node:
                 return "Arbitrary custom object method calls are unsupported."
+            if node.attr not in state_names:
+                return "Custom object dynamic or unknown attributes are unsupported."
+            if isinstance(parent, ast.Attribute) and parent.value is node:
+                return "Nested custom object attributes are unsupported."
             if isinstance(parent, ast.Subscript) and parent.value is node:
                 return "Custom object state subscript access is unsupported."
             if (

@@ -113,9 +113,22 @@ class ControlFlowGraphBuilder:
                 graph_name = f"{direct_parent.name}.{node.name}"
                 spec = None
                 if isinstance(parents.get(direct_parent), ast.Module):
+                    custom_spec, custom_reason = analyze_safe_custom_object_target(
+                        tree,
+                        graph_name,
+                    )
                     spec, _ = analyze_simple_instance_method(
                         direct_parent,
                         node,
+                        object_parameter_types=(
+                            {
+                                parameter.parameter_name: parameter.class_name
+                                for parameter in custom_spec.object_parameters
+                            }
+                            if custom_spec is not None
+                            and custom_reason is None
+                            else None
+                        ),
                     )
                 if spec is not None:
                     analysis_node = normalized_method_node(spec)

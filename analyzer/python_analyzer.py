@@ -162,21 +162,7 @@ class PythonAnalyzer:
             method_spec = None
             method_reason = None
             direct_parent = parents.get(node)
-            if is_method and isinstance(direct_parent, ast.ClassDef):
-                if not isinstance(parents.get(direct_parent), ast.Module):
-                    method_reason = "Only top-level classes are supported."
-                else:
-                    method_spec, method_reason = analyze_simple_instance_method(
-                        direct_parent,
-                        node,
-                    )
-            unsupported_reason = self._unsupported_reason(
-                node=node,
-                direct_parent=direct_parent,
-                is_nested=is_nested,
-                is_method=is_method,
-                method_reason=method_reason,
-            )
+            custom_object_spec = None
             custom_object_reason = None
             if (
                 isinstance(node, ast.FunctionDef)
@@ -186,10 +172,42 @@ class PythonAnalyzer:
                     and isinstance(parents.get(direct_parent), ast.Module)
                 )
             ):
-                _, custom_object_reason = analyze_safe_custom_object_target(
-                    tree,
-                    self._qualified_name(node, ancestry),
+                custom_object_spec, custom_object_reason = (
+                    analyze_safe_custom_object_target(
+                        tree,
+                        self._qualified_name(node, ancestry),
+                    )
                 )
+                if custom_object_spec is not None:
+                    parameter_types.update(
+                        {
+                            parameter.parameter_name: parameter.class_name
+                            for parameter in custom_object_spec.object_parameters
+                        }
+                    )
+            if is_method and isinstance(direct_parent, ast.ClassDef):
+                if not isinstance(parents.get(direct_parent), ast.Module):
+                    method_reason = "Only top-level classes are supported."
+                else:
+                    method_spec, method_reason = analyze_simple_instance_method(
+                        direct_parent,
+                        node,
+                        object_parameter_types=(
+                            {
+                                parameter.parameter_name: parameter.class_name
+                                for parameter in custom_object_spec.object_parameters
+                            }
+                            if custom_object_spec is not None
+                            else None
+                        ),
+                    )
+            unsupported_reason = self._unsupported_reason(
+                node=node,
+                direct_parent=direct_parent,
+                is_nested=is_nested,
+                is_method=is_method,
+                method_reason=method_reason,
+            )
             if unsupported_reason is None:
                 unsupported_reason = custom_object_reason
             if method_spec is not None:
