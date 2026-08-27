@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from models.analysis_job_result import normalize_public_input_rejection_categories
 from models.external_source_analysis_result import (
     ExternalAnalysisConfiguration,
     ExternalExecutionPolicy,
@@ -428,12 +429,22 @@ class ExternalSourceTerminalAdapter:
         ]
         for function in functions:
             diagnostic = getattr(function, "diagnostic", None)
+            funnel = getattr(diagnostic, "funnel", None)
+            rejection_categories = normalize_public_input_rejection_categories(
+                getattr(diagnostic, "scenario_rejection_counts", ())
+                if diagnostic is not None
+                else ()
+            )
             comparison = getattr(function, "strategy_comparison", None)
             lines.extend(
                 (
                     f"Fonksiyon            : {function.target.qualified_name}",
                     f"  Durum              : {function.status.value}",
+                    f"  Sınırlandırılmış yol : {ExternalSourceTerminalAdapter._funnel_count(funnel, 'bounded_path_count')}",
+                    f"  Girdi üretimi        : {ExternalSourceTerminalAdapter._funnel_count(funnel, 'input_generation_accepted_count')} kabul / {ExternalSourceTerminalAdapter._funnel_count(funnel, 'input_generation_rejected_count')} red",
+                    f"  Red kategorileri     : {ExternalSourceTerminalAdapter._rejection_text(rejection_categories)}",
                     f"  Scenario           : {ExternalSourceTerminalAdapter._measured(getattr(function, 'scenario_count', None))}",
+                    f"  Concrete           : {ExternalSourceTerminalAdapter._measured(getattr(function, 'concrete_accepted_count', None))} kabul / {ExternalSourceTerminalAdapter._measured(getattr(function, 'concrete_rejected_count', None))} red",
                     f"  RL test            : {ExternalSourceTerminalAdapter._measured(getattr(function, 'rl_test_count', None))}",
                     f"  Greedy seçilen     : {ExternalSourceTerminalAdapter._measured(getattr(comparison, 'greedy_selected_count', None))}",
                     f"  RL seçilen         : {ExternalSourceTerminalAdapter._measured(getattr(comparison, 'best_rl_executed_test_count', None))}",
@@ -478,6 +489,19 @@ class ExternalSourceTerminalAdapter:
     @staticmethod
     def _measured(value: object | None) -> str:
         return "Ölçülmedi" if value is None else str(value)
+
+    @staticmethod
+    def _funnel_count(funnel: object, name: str) -> int:
+        value = getattr(funnel, name, None) if funnel is not None else None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
+    @staticmethod
+    def _rejection_text(values: tuple[tuple[str, int], ...]) -> str:
+        if not values:
+            return "Yok"
+        return ", ".join(f"{category}: {count}" for category, count in values)
 
     def _print_submenu(self) -> None:
         self._output("\nDIŞ KAYNAK ANALİZİ")

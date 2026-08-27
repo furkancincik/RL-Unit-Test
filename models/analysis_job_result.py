@@ -5,7 +5,30 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from generator.scenario_generator import ScenarioRejectionCategory
 from models.external_source_analysis_result import ExternalExecutionPolicy, ExternalSourceKind
+
+
+def normalize_public_input_rejection_categories(
+    values: object,
+) -> tuple[tuple[str, int], ...]:
+    """Internal rejection sayaçlarını güvenli public kategori özetine indirger."""
+    if not isinstance(values, tuple):
+        return ()
+    allowed = {item.value for item in ScenarioRejectionCategory}
+    counts: dict[str, int] = {}
+    for item in values:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or item[0] not in allowed
+            or isinstance(item[1], bool)
+            or not isinstance(item[1], int)
+            or item[1] < 0
+        ):
+            continue
+        counts[item[0]] = counts.get(item[0], 0) + item[1]
+    return tuple(sorted(counts.items()))
 
 
 class AnalysisJobStatus(str, Enum):
@@ -71,6 +94,10 @@ class AnalysisFunctionSummary:
     coverage_equality_verified: bool | None
     globally_minimal: bool | None
     rl_done_reason: str | None
+    bounded_path_count: int = 0
+    input_generation_accepted_count: int = 0
+    input_generation_rejected_count: int = 0
+    input_rejection_categories: tuple[tuple[str, int], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +132,15 @@ class AnalysisFunctionSummary:
             "coverage_equality_verified": self.coverage_equality_verified,
             "globally_minimal": self.globally_minimal,
             "rl_done_reason": self.rl_done_reason,
+            "bounded_path_count": self.bounded_path_count,
+            "input_generation_accepted_count": self.input_generation_accepted_count,
+            "input_generation_rejected_count": self.input_generation_rejected_count,
+            "input_rejection_categories": [
+                {"category": category, "count": count}
+                for category, count in normalize_public_input_rejection_categories(
+                    self.input_rejection_categories
+                )
+            ],
         }
 
 

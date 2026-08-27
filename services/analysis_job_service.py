@@ -316,6 +316,7 @@ class AnalysisJobService:
             project = module.project_result
             for function in getattr(project, "function_results", ()) if project is not None else ():
                 diagnostic = function.diagnostic
+                funnel = getattr(diagnostic, "funnel", None)
                 comparison = function.strategy_comparison
                 scenario_pool = function.scenario_pool_coverage
                 minimization = function.minimization_result
@@ -425,6 +426,24 @@ class AnalysisJobService:
                             getattr(minimization, "globally_minimal", None),
                         ),
                         rl_done_reason=getattr(best_trace, "done_reason", None),
+                        bounded_path_count=AnalysisJobService._public_funnel_count(
+                            funnel, "bounded_path_count"
+                        ),
+                        input_generation_accepted_count=(
+                            AnalysisJobService._public_funnel_count(
+                                funnel, "input_generation_accepted_count"
+                            )
+                        ),
+                        input_generation_rejected_count=(
+                            AnalysisJobService._public_funnel_count(
+                                funnel, "input_generation_rejected_count"
+                            )
+                        ),
+                        input_rejection_categories=(
+                            getattr(diagnostic, "scenario_rejection_counts", ())
+                            if diagnostic is not None
+                            else ()
+                        ),
                     )
                 )
             modules.append(
@@ -499,6 +518,13 @@ class AnalysisJobService:
             ExternalAnalysisStatus.FAILED: AnalysisJobStatus.FAILED,
             ExternalAnalysisStatus.TIMED_OUT: AnalysisJobStatus.TIMED_OUT,
         }[status]
+
+    @staticmethod
+    def _public_funnel_count(funnel: object, name: str) -> int:
+        value = getattr(funnel, name, None) if funnel is not None else None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
 
     def _entry(self, job_id: str) -> _JobEntry:
         try:

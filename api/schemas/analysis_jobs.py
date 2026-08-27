@@ -152,6 +152,12 @@ class JobStatusResponse(BaseModel):
     deadline_stage: str | None
 
 
+class InputRejectionCategoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    category: str
+    count: int = Field(ge=0)
+
+
 class FunctionResultResponse(BaseModel):
     qualified_name: str
     status: str
@@ -184,6 +190,12 @@ class FunctionResultResponse(BaseModel):
     coverage_equality_verified: bool | None
     globally_minimal: bool | None
     rl_done_reason: str | None
+    bounded_path_count: int = Field(default=0, ge=0)
+    input_generation_accepted_count: int = Field(default=0, ge=0)
+    input_generation_rejected_count: int = Field(default=0, ge=0)
+    input_rejection_categories: list[InputRejectionCategoryResponse] = Field(
+        default_factory=list
+    )
 
 
 class ModuleResultResponse(BaseModel):

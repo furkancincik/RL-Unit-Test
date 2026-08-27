@@ -5,6 +5,7 @@ import os
 import uuid
 from pathlib import Path
 
+from models.analysis_job_result import normalize_public_input_rejection_categories
 from models.project_analysis_result import ProjectAnalysisResult
 
 
@@ -66,6 +67,12 @@ class ProjectAnalysisReportFormatter:
         ]
         for item in result.function_results:
             diagnostic = item.diagnostic
+            funnel = getattr(diagnostic, "funnel", None)
+            rejection_categories = normalize_public_input_rejection_categories(
+                getattr(diagnostic, "scenario_rejection_counts", ())
+                if diagnostic is not None
+                else ()
+            )
             line_coverage = self._percentage(
                 diagnostic.line_coverage_percent
                 if diagnostic is not None
@@ -80,6 +87,16 @@ class ProjectAnalysisReportFormatter:
                 (
                     item.target.qualified_name,
                     f"  Durum             : {item.status.value}",
+                    (
+                        "  Sınırlandırılmış yol: "
+                        f"{self._funnel_count(funnel, 'bounded_path_count')}"
+                    ),
+                    (
+                        "  Girdi üretimi kabul/red: "
+                        f"{self._funnel_count(funnel, 'input_generation_accepted_count')} / "
+                        f"{self._funnel_count(funnel, 'input_generation_rejected_count')}"
+                    ),
+                    f"  Red kategorileri    : {self._rejection_text(rejection_categories)}",
                     f"  Scenario          : {self._value(item.scenario_count)}",
                     f"  Concrete kabul/red: {self._value(item.concrete_accepted_count)} / {self._value(item.concrete_rejected_count)}",
                     f"  RL test / Q-state : {self._value(item.rl_test_count)} / {self._value(item.q_table_state_count)}",
@@ -103,3 +120,16 @@ class ProjectAnalysisReportFormatter:
     @staticmethod
     def _value(value: int | None) -> str:
         return "Ölçülmedi" if value is None else str(value)
+
+    @staticmethod
+    def _funnel_count(funnel: object, name: str) -> int:
+        value = getattr(funnel, name, None) if funnel is not None else None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
+    @staticmethod
+    def _rejection_text(values: tuple[tuple[str, int], ...]) -> str:
+        if not values:
+            return "Yok"
+        return ", ".join(f"{category}: {count}" for category, count in values)

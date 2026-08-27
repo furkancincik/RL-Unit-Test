@@ -149,6 +149,24 @@ def test_dynamic_result_rendering_keeps_backend_numeric_metrics() -> None:
     assert 'measured(functionResult.strategy_winner)' in script
 
 
+def test_dynamic_result_renders_input_rejections_without_overstating_completion() -> None:
+    script = _script()
+
+    assert 'measured(functionResult.bounded_path_count)' in script
+    assert 'measured(functionResult.input_generation_accepted_count)' in script
+    assert 'measured(functionResult.input_generation_rejected_count)' in script
+    assert "function renderInputRejectionCategories" in script
+    assert "functionResult.input_rejection_categories" in script
+    assert '"Sınırlandırılmış yol"' in script
+    assert '"Girdi üretimi kabul"' in script
+    assert '"Girdi üretimi red"' in script
+    assert '"Red kategorileri"' in script
+    assert '"Final scenario"' in script
+    assert '"Analiz çalışması tamamlandı. Kapsam ve reddedilen yolları sonuç ayrıntılarından kontrol edin."' in script
+    assert 'COMPLETED: "Analiz eksiksiz tamamlandı."' not in script
+    assert ".innerHTML" not in script
+
+
 def test_project_coverage_has_a_distinct_exact_scope_section() -> None:
     script = _script()
     markup = Path("web/index.html").read_text(encoding="utf-8")

@@ -9,10 +9,26 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
+    ExternalExecutionPolicy,
+    ExternalModuleAnalysisResult,
+    ExternalModuleStatus,
     ExternalSourceAnalysisResult,
     ExternalWorkspaceCleanupStatus,
 )
-from models.project_analysis_result import TargetSelectionMode
+from models.pipeline_diagnostic_result import (
+    PipelineDiagnosticResult,
+    PipelineFunnelSnapshot,
+    PipelineRunStatus,
+)
+from models.project_analysis_result import (
+    FunctionAnalysisResult,
+    FunctionRunStatus,
+    FunctionSelectionMode,
+    FunctionTarget,
+    ProjectAnalysisResult,
+    ProjectRunStatus,
+    TargetSelectionMode,
+)
 from services.analysis_job_service import AnalysisJobService, AnalysisJobSettings
 from services.external_source_analysis_service import (
     portable_upload_module_identity,
@@ -54,6 +70,101 @@ def _client(tmp_path: Path) -> tuple[TestClient, AnalysisJobService, Mock]:
     return TestClient(create_app(job_service=service)), service, runner
 
 
+def _completed_rejection_result(request) -> ExternalSourceAnalysisResult:
+    output = request.configuration.output_root
+    module_output = output / "module"
+    function_output = module_output / "target"
+    function_output.mkdir(parents=True, exist_ok=True)
+    source_file = module_output / "target.py"
+    source_file.write_text("def target():\n    return 1\n", encoding="utf-8")
+    project_report = module_output / "project_analysis_report.json"
+    project_report.write_text("{}", encoding="utf-8")
+    external_report = output / "external_source_analysis_report.json"
+    external_report.write_text("{}", encoding="utf-8")
+    target = FunctionTarget(
+        name="target",
+        qualified_name="target",
+        start_line=1,
+        end_line=2,
+        parameters=(),
+        return_annotation=None,
+        is_async=False,
+        is_nested=False,
+        is_method=False,
+        is_supported=True,
+    )
+    diagnostic = PipelineDiagnosticResult(
+        status=PipelineRunStatus.COMPLETED,
+        source_file=source_file,
+        function_name="target",
+        last_completed_stage=None,
+        stopped_stage=None,
+        total_duration_seconds=1.0,
+        funnel=PipelineFunnelSnapshot(
+            bounded_path_count=19,
+            input_generation_accepted_count=1,
+            input_generation_rejected_count=18,
+            pre_concrete_scenario_count=1,
+            concrete_validation_accepted_count=1,
+            concrete_validation_rejected_count=0,
+            final_scenario_count=1,
+            rl_executed_test_count=1,
+            q_table_state_count=1,
+        ),
+        scenario_rejection_counts=(
+            ("UNSUPPORTED_INPUT_SYNTHESIS", 18),
+        ),
+        line_coverage_percent=18.75,
+        branch_coverage_percent=12.5,
+    )
+    function_result = FunctionAnalysisResult(
+        target=target,
+        status=FunctionRunStatus.COMPLETED,
+        diagnostic=diagnostic,
+        output_directory=function_output,
+    )
+    project = ProjectAnalysisResult(
+        source_file=source_file,
+        module_path="target",
+        selection_mode=FunctionSelectionMode.SINGLE,
+        discovered_targets=(target,),
+        function_results=(function_result,),
+        total_duration_seconds=1.0,
+        status=ProjectRunStatus.COMPLETED,
+        output_root=module_output,
+        report_path=project_report,
+    )
+    module = ExternalModuleAnalysisResult(
+        relative_path="target.py",
+        module_name="target",
+        status=ExternalModuleStatus.COMPLETED,
+        discovered_function_count=1,
+        project_result=project,
+        issue_category=None,
+        issue_message=None,
+        artifact_paths=(project_report,),
+        discovered_function_names=("target",),
+    )
+    return ExternalSourceAnalysisResult(
+        source_kind=request.source.source_kind,
+        execution_policy=ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+        status=ExternalAnalysisStatus.COMPLETED,
+        acquisition_status="READY",
+        repository_name=None,
+        github_owner=None,
+        github_repository=None,
+        resolved_commit_sha=None,
+        discovered_module_count=1,
+        selected_module_count=1,
+        module_results=(module,),
+        output_root=output,
+        report_path=external_report,
+        duration_seconds=1.0,
+        cleanup_status=ExternalWorkspaceCleanupStatus.COMPLETED,
+        issues=(),
+    )
+
+
 def test_create_app_is_import_safe_health_and_openapi(tmp_path: Path) -> None:
     client, service, runner = _client(tmp_path)
     with client:
@@ -80,6 +191,57 @@ def test_inline_submission_defaults_to_static_and_result_is_polled(tmp_path: Pat
     assert result.json()["project_line_coverage_percent"] is None
     request = runner.run.call_args.args[0]
     assert request.execution_policy.value == "STATIC_DISCOVERY_ONLY"
+    service.shutdown()
+
+
+def test_completed_job_result_exposes_input_rejections_without_status_promotion(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    runner.run.side_effect = _completed_rejection_result
+
+    with client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={
+                "source_code": "def target():\n    return 1\n",
+                "analysis": {
+                    "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+                    "trusted_execution_acknowledged": True,
+                    "function_pipeline_timeout_seconds": 30,
+                },
+            },
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=5)
+        response = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "COMPLETED"
+    function = payload["modules"][0]["functions"][0]
+    assert function["status"] == "COMPLETED"
+    assert function["bounded_path_count"] == 19
+    assert function["input_generation_accepted_count"] == 1
+    assert function["input_generation_rejected_count"] == 18
+    assert function["input_rejection_categories"] == [
+        {"category": "UNSUPPORTED_INPUT_SYNTHESIS", "count": 18}
+    ]
+    assert function["scenario_count"] == 1
+    assert function["concrete_accepted_count"] == 1
+    assert function["concrete_rejected_count"] == 0
+    assert function["line_coverage_percent"] == 18.75
+    assert function["branch_coverage_percent"] == 12.5
+    serialized = json.dumps(payload)
+    for forbidden in (
+        "rejection reason",
+        "constructor_arguments",
+        "keyword_arguments",
+        "expected_result",
+        "actual_result",
+    ):
+        assert forbidden not in serialized
     service.shutdown()
 
 

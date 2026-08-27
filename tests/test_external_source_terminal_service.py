@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -6,7 +7,9 @@ import pytest
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalExecutionPolicy,
+    ExternalModuleAnalysisResult,
     ExternalModuleSelectionMode,
+    ExternalModuleStatus,
     ExternalSourceAnalysisResult,
     ExternalSourceKind,
     ExternalWorkspaceCleanupStatus,
@@ -15,6 +18,12 @@ from models.external_source_analysis_result import (
     PublicGitHubRepository,
     UploadedPythonFile,
 )
+from models.pipeline_diagnostic_result import (
+    PipelineDiagnosticResult,
+    PipelineFunnelSnapshot,
+    PipelineRunStatus,
+)
+from models.project_analysis_result import FunctionRunStatus
 from models.project_analysis_result import TargetSelectionMode
 from services.external_source_terminal_service import (
     ExternalSourceInteractiveValidationError,
@@ -406,3 +415,79 @@ def test_real_terminal_local_multimodule_trusted_dynamic(tmp_path: Path) -> None
     text = "\n".join(output)
     assert "Keşfedilen modül     : 2" in text
     assert "Cleanup durumu        : NOT_REQUIRED" in text
+
+
+def test_terminal_result_exposes_normalized_input_rejections() -> None:
+    diagnostic = PipelineDiagnosticResult(
+        status=PipelineRunStatus.COMPLETED,
+        source_file=Path("target.py"),
+        function_name="target",
+        last_completed_stage=None,
+        stopped_stage=None,
+        total_duration_seconds=1.0,
+        funnel=PipelineFunnelSnapshot(
+            bounded_path_count=19,
+            input_generation_accepted_count=1,
+            input_generation_rejected_count=18,
+            pre_concrete_scenario_count=1,
+            concrete_validation_accepted_count=1,
+            concrete_validation_rejected_count=0,
+            final_scenario_count=1,
+        ),
+        scenario_rejection_counts=(
+            ("UNSUPPORTED_INPUT_SYNTHESIS", 18),
+        ),
+        line_coverage_percent=18.75,
+        branch_coverage_percent=12.5,
+    )
+    function = SimpleNamespace(
+        target=SimpleNamespace(qualified_name="target"),
+        status=FunctionRunStatus.COMPLETED,
+        diagnostic=diagnostic,
+        scenario_count=1,
+        concrete_accepted_count=1,
+        concrete_rejected_count=0,
+        rl_test_count=1,
+        strategy_comparison=None,
+    )
+    project = SimpleNamespace(function_results=(function,))
+    module = ExternalModuleAnalysisResult(
+        relative_path="target.py",
+        module_name="target",
+        status=ExternalModuleStatus.COMPLETED,
+        discovered_function_count=1,
+        project_result=project,
+        issue_category=None,
+        issue_message=None,
+        artifact_paths=(),
+        discovered_function_names=("target",),
+    )
+    result = ExternalSourceAnalysisResult(
+        source_kind=ExternalSourceKind.INLINE_PYTHON_SOURCE,
+        execution_policy=ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+        status=ExternalAnalysisStatus.COMPLETED,
+        acquisition_status="READY",
+        repository_name=None,
+        github_owner=None,
+        github_repository=None,
+        resolved_commit_sha=None,
+        discovered_module_count=1,
+        selected_module_count=1,
+        module_results=(module,),
+        output_root=Path("output"),
+        report_path=Path("output/report.json"),
+        duration_seconds=1.0,
+        cleanup_status=ExternalWorkspaceCleanupStatus.COMPLETED,
+        issues=(),
+    )
+
+    report = ExternalSourceTerminalAdapter.format_result(result)
+
+    assert "Genel durum          : COMPLETED" in report
+    assert "Sınırlandırılmış yol : 19" in report
+    assert "Girdi üretimi        : 1 kabul / 18 red" in report
+    assert "Red kategorileri     : UNSUPPORTED_INPUT_SYNTHESIS: 18" in report
+    assert "Scenario           : 1" in report
+    assert "Concrete           : 1 kabul / 0 red" in report
+    assert "Line coverage      : %18.75" in report
+    assert "Branch coverage    : %12.50" in report

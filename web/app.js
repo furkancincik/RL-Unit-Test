@@ -488,7 +488,7 @@ function statusDescription(status) {
   return {
     QUEUED: "İş bounded kuyruğa alındı; worker bekleniyor.",
     RUNNING: "Analiz pipeline’ı çalışıyor.",
-    COMPLETED: "Analiz eksiksiz tamamlandı.",
+    COMPLETED: "Analiz çalışması tamamlandı. Kapsam ve reddedilen yolları sonuç ayrıntılarından kontrol edin.",
     PARTIAL: "Kullanılabilir kısmi sonuç üretildi.",
     FAILED: "Analiz kontrollü bir hata ile durdu.",
     TIMED_OUT: "Pipeline zaman sınırına ulaştı.",
@@ -615,6 +615,18 @@ function appendMetric(container, label, value) {
   container.append(wrapper);
 }
 
+function renderInputRejectionCategories(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return "Yok";
+  }
+  return values
+    .filter((item) => item && typeof item.category === "string" && Number.isInteger(item.count) && item.count >= 0)
+    .slice()
+    .sort((left, right) => left.category.localeCompare(right.category))
+    .map((item) => `${item.category}: ${item.count}`)
+    .join(", ") || "Yok";
+}
+
 function renderCoverage(container, label, value) {
   const row = createNode("div", "coverage-row");
   row.append(createNode("span", "", label));
@@ -712,7 +724,11 @@ function renderFunction(functionResult) {
   card.append(title);
 
   const metrics = createNode("dl", "mini-metrics");
-  appendMetric(metrics, "Scenario pool", measured(functionResult.scenario_count));
+  appendMetric(metrics, "Sınırlandırılmış yol", measured(functionResult.bounded_path_count));
+  appendMetric(metrics, "Girdi üretimi kabul", measured(functionResult.input_generation_accepted_count));
+  appendMetric(metrics, "Girdi üretimi red", measured(functionResult.input_generation_rejected_count));
+  appendMetric(metrics, "Red kategorileri", renderInputRejectionCategories(functionResult.input_rejection_categories));
+  appendMetric(metrics, "Final scenario", measured(functionResult.scenario_count));
   appendMetric(metrics, "Concrete kabul", measured(functionResult.concrete_accepted_count));
   appendMetric(metrics, "Concrete red", measured(functionResult.concrete_rejected_count));
   appendMetric(metrics, "RL test", measured(functionResult.rl_test_count));
