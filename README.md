@@ -64,14 +64,14 @@ Open `http://127.0.0.1:8000/`. The browser supports separate inline-code, `.py` 
 - Top-Level Simple Instance Methods with Qualified `ClassName.method_name` Targets
 - Primitive Constructor and Method Parameters (`int`, `float`, `str`, and `bool`)
 - Simple `self.attr` State Initialization, Conditions, and Mutation
-- AST-Verified Literal-Empty `list` and `dict` Constructor State
+- AST-Verified Literal-Empty `list`, `dict`, and `tuple` Constructor State
 - Empty-State Truthiness, Membership, and Zero-Iteration Path Handling
 - Read-Only `.keys()`, `.values()`, and `.items()` Iteration for Verified Empty Dict State
 - Generated pytest Class Construction and Method Invocation
 - Function Coverage, Greedy Minimization, and RL Pipeline Integration
 - Implicit `self` Excluded from Public Parameters, Keyword Arguments, and Metadata
 
-Literal-empty collection support is deliberately limited to direct constructor assignments such as `self.attr = []` and `self.attr = {}`. Non-empty or nested collections, mutation, reassignment, aliasing, custom-object state, subscript element synthesis, and arbitrary method-call replay remain controlled unsupported targets. Generated coverage is always measured against the real class and reachable scenario pool; this support does not imply or manufacture 100% line or branch coverage.
+Constructor-proven empty collection support is deliberately limited to direct, unconditional assignments such as `self.attr = []`, `self.attr = {}`, and `self.attr = ()`. Every scenario creates a fresh instance through the real constructor; no runtime attribute or state injection is performed. An arbitrary method call rejects only the execution path that reaches it, so a safe earlier return can remain analyzable. Non-empty or nested collections, mutation, reassignment, aliasing, built-in constructor calls, subscript element synthesis, and arbitrary method-call replay remain controlled unsupported targets. Generated coverage is always measured against the real class and reachable scenario pool; this support does not imply or manufacture 100% line or branch coverage.
 
 Inheritance and metaclasses, `property`, `classmethod`, `staticmethod`, async and generator methods, custom-object state graphs, and dynamic or nested attributes remain controlled unsupported targets.
 
@@ -289,6 +289,8 @@ This allows the agent to optimize not only coverage growth but also the number o
 
 `timeout_seconds` remains the pytest/coverage subprocess timeout. `pipeline_timeout_seconds` independently bounds one function pipeline, while external analysis can additionally apply `project_timeout_seconds` to the complete acquisition, discovery, multi-function, and combined-coverage run. The project deadline uses a monotonic clock and every lower-level subprocess timeout is clamped to the remaining project budget. Checkpoints contain aggregate stage, funnel, rejection, and coverage metadata; they do not persist generated inputs, expected/actual values, source code, or tracebacks.
 
+Public function results expose the immutable diagnostic funnel as separate bounded-path, input-generation accepted/rejected, concrete-validation accepted/rejected, and final-scenario counts, together with a deterministic summary of normalized rejection categories. These stages are not inferred from coverage or from one another. `COMPLETED` is a pipeline lifecycle result: at least one concrete-valid scenario remained and coverage, RL, and reporting completed safely. It does not mean every bounded path was supported or full coverage was achieved.
+
 ```text
 Pipeline worker
       |
@@ -449,7 +451,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2265 passed, 1 skipped in 588.66s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2308 passed, 1 skipped in 527.30s`.
 
 ---
 
@@ -942,14 +944,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2265 passed, 1 skipped in 588.66s`
+`2308 passed, 1 skipped in 527.30s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,265 |
+| Passed | 2,308 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 588.66s |
+| Duration | 527.30s |
 
 ---
 
