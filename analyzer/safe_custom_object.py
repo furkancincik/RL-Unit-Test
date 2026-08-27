@@ -31,6 +31,13 @@ _KNOWN_NON_OBJECT_ANNOTATIONS = frozenset(
     }
 )
 _ANALYSIS_PREFIX = "__custom_object_"
+_EMPTY_COLLECTION_KINDS = frozenset(
+    {"EMPTY_LIST", "EMPTY_DICT", "EMPTY_TUPLE"}
+)
+_CONSTRUCTOR_EMPTY_PROOF = "CONSTRUCTOR_UNCONDITIONAL_ASSIGNMENT"
+UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER = (
+    "__rlut_unsupported_custom_object_method_call_7f4d3a"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +60,43 @@ class SafeStateInitializer:
         repr=False,
     )
     uses_literal: bool = False
+    empty_collection_kind: str | None = None
+    proof_origin: str | None = field(default=None, repr=False)
+    proof_fingerprint: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.attribute_name.isidentifier():
+            raise ValueError("State attribute adı geçerli identifier olmalıdır.")
+        if self.empty_collection_kind is None:
+            if self.proof_origin is not None:
+                raise ValueError("Primitive state empty collection proof taşıyamaz.")
+            object.__setattr__(self, "proof_fingerprint", "")
+            return
+        if self.empty_collection_kind not in _EMPTY_COLLECTION_KINDS:
+            raise ValueError("Empty collection state türü desteklenmiyor.")
+        if self.proof_origin != _CONSTRUCTOR_EMPTY_PROOF:
+            raise ValueError("Empty collection state proof origin geçersizdir.")
+        if (
+            self.constructor_parameter_name is not None
+            or self.uses_literal
+            or self.literal_value is not None
+        ):
+            raise ValueError("Empty collection proof runtime state değeri taşıyamaz.")
+        canonical = json.dumps(
+            {
+                "attribute": self.attribute_name,
+                "kind": self.empty_collection_kind,
+                "origin": self.proof_origin,
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        object.__setattr__(
+            self,
+            "proof_fingerprint",
+            hashlib.sha256(canonical).hexdigest(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,10 +332,29 @@ class _ObjectStateTransformer(ast.NodeTransformer):
             for parameter in spec.object_parameters
         }
 
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in self._bindings
+        ):
+            replacement = ast.Call(
+                func=ast.Name(
+                    id=UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
+                    ctx=ast.Load(),
+                ),
+                args=[],
+                keywords=[],
+            )
+            return ast.copy_location(replacement, node)
+        return self.generic_visit(node)
+
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
         if isinstance(node.value, ast.Name) and node.value.id in self._bindings:
             binding = self._bindings[node.value.id]
-            initializer = binding.state_by_name[node.attr]
+            initializer = binding.state_by_name.get(node.attr)
+            if initializer is None:
+                return self.generic_visit(node)
             if initializer.constructor_parameter_name is not None:
                 constructor_parameter = next(
                     parameter
@@ -302,6 +365,12 @@ class _ObjectStateTransformer(ast.NodeTransformer):
                     id=constructor_parameter.analysis_name,
                     ctx=copy.deepcopy(node.ctx),
                 )
+            elif initializer.empty_collection_kind is not None:
+                replacement = _empty_collection_expression(
+                    initializer.empty_collection_kind,
+                )
+                if isinstance(replacement, (ast.List, ast.Tuple)):
+                    replacement.ctx = copy.deepcopy(node.ctx)
             else:
                 replacement = ast.Constant(value=initializer.literal_value)
             return ast.copy_location(replacement, node)
@@ -756,6 +825,12 @@ def _analyze_safe_class(
             for decorator in statement.decorator_list
         ):
             return None, "Abstract custom object classes are unsupported."
+        if any(
+            _decorator_leaf_name(decorator)
+            in {"property", "classmethod", "staticmethod"}
+            for decorator in statement.decorator_list
+        ):
+            return None, "Descriptor and alternate-bound custom object methods are unsupported."
     constructor = next(
         (
             statement
@@ -842,14 +917,22 @@ def _analyze_safe_class(
                 constructor_parameter_name=statement.value.id,
             )
         else:
-            literal_type = primitive_literal_type(statement.value)
-            if literal_type is None:
-                return None, "Custom object constructor state must use primitive provenance."
-            initializer = SafeStateInitializer(
-                attribute_name=target.attr,
-                literal_value=_literal_value(statement.value),
-                uses_literal=True,
-            )
+            empty_collection_kind = _empty_collection_kind(statement.value)
+            if empty_collection_kind is not None:
+                initializer = SafeStateInitializer(
+                    attribute_name=target.attr,
+                    empty_collection_kind=empty_collection_kind,
+                    proof_origin=_CONSTRUCTOR_EMPTY_PROOF,
+                )
+            else:
+                literal_type = primitive_literal_type(statement.value)
+                if literal_type is None:
+                    return None, "Custom object constructor state must use primitive provenance."
+                initializer = SafeStateInitializer(
+                    attribute_name=target.attr,
+                    literal_value=_literal_value(statement.value),
+                    uses_literal=True,
+                )
         initializers.append(initializer)
         initialized.add(target.attr)
     fingerprint = _class_fingerprint(
@@ -882,11 +965,17 @@ def _validate_target_usage(
     for node in ast.walk(target):
         if isinstance(node, ast.Name) and node.id == parameter.parameter_name:
             parent = parents.get(node)
+            is_path_scoped_method_call = (
+                isinstance(parent, ast.Attribute)
+                and parent.value is node
+                and isinstance(parents.get(parent), ast.Call)
+                and parents[parent].func is parent
+            )
             if not (
                 isinstance(parent, ast.Attribute)
                 and parent.value is node
                 and parent.attr in state_names
-            ):
+            ) and not is_path_scoped_method_call:
                 return (
                     "Custom object parameter may only access validated direct "
                     "primitive state."
@@ -898,16 +987,28 @@ def _validate_target_usage(
         ):
             parent = parents.get(node)
             if isinstance(parent, ast.Call) and parent.func is node:
-                return "Arbitrary custom object method calls are unsupported."
+                continue
             if node.attr not in state_names:
                 return "Custom object dynamic or unknown attributes are unsupported."
             if isinstance(parent, ast.Attribute) and parent.value is node:
                 return "Nested custom object attributes are unsupported."
             if isinstance(parent, ast.Subscript) and parent.value is node:
                 return "Custom object state subscript access is unsupported."
+            initializer = parameter.state_by_name[node.attr]
+            if initializer.empty_collection_kind is not None:
+                if not (
+                    isinstance(node.ctx, ast.Load)
+                    and isinstance(parent, ast.UnaryOp)
+                    and isinstance(parent.op, ast.Not)
+                    and parent.operand is node
+                ):
+                    return "Unsupported constructor-proven empty collection state read."
             if (
                 isinstance(node.ctx, ast.Store)
-                and parameter.state_by_name[node.attr].uses_literal
+                and (
+                    initializer.uses_literal
+                    or initializer.empty_collection_kind is not None
+                )
             ):
                 return "Literal-backed custom object state mutation is unsupported."
     return None
@@ -951,6 +1052,26 @@ def _literal_value(value: ast.expr) -> int | float | str | bool:
     raise TypeError("Primitive literal bekleniyordu.")
 
 
+def _empty_collection_kind(value: ast.expr) -> str | None:
+    if isinstance(value, ast.List) and not value.elts:
+        return "EMPTY_LIST"
+    if isinstance(value, ast.Dict) and not value.keys and not value.values:
+        return "EMPTY_DICT"
+    if isinstance(value, ast.Tuple) and not value.elts:
+        return "EMPTY_TUPLE"
+    return None
+
+
+def _empty_collection_expression(kind: str) -> ast.expr:
+    if kind == "EMPTY_LIST":
+        return ast.List(elts=[], ctx=ast.Load())
+    if kind == "EMPTY_DICT":
+        return ast.Dict(keys=[], values=[])
+    if kind == "EMPTY_TUPLE":
+        return ast.Tuple(elts=[], ctx=ast.Load())
+    raise ValueError("Empty collection state türü desteklenmiyor.")
+
+
 def _is_docstring(statement: ast.stmt) -> bool:
     return (
         isinstance(statement, ast.Expr)
@@ -990,6 +1111,9 @@ def _class_fingerprint(
                 "literal": (
                     initializer.literal_value if initializer.uses_literal else None
                 ),
+                "empty_collection_kind": initializer.empty_collection_kind,
+                "proof_origin": initializer.proof_origin,
+                "proof_fingerprint": initializer.proof_fingerprint,
             }
             for initializer in initializers
         ],

@@ -10,6 +10,7 @@ import pytest
 from analyzer.python_analyzer import PythonAnalyzer
 from analyzer.safe_custom_object import (
     SafeObjectConstructionBlueprint,
+    UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
     analyze_safe_custom_object_target,
     normalized_custom_object_target,
 )
@@ -264,8 +265,8 @@ def test_instance_method_accepts_unique_untyped_structural_object_parameter(
 def test_untyped_structural_method_call_remains_controlled_unsupported() -> None:
     tree = ast.parse(
         "class Calculator:\n"
-        "    def __init__(self, value: int = 4):\n"
-        "        self.entries = value\n\n"
+        "    def __init__(self):\n"
+        "        self.entries = {}\n\n"
         "    def calculate(self) -> int:\n"
         "        return self.entries\n\n"
         "def handle(subject):\n"
@@ -276,8 +277,250 @@ def test_untyped_structural_method_call_remains_controlled_unsupported() -> None
 
     spec, reason = analyze_safe_custom_object_target(tree, "handle")
 
+    assert reason is None
+    assert spec is not None
+    assert spec.object_parameters[0].resolution_kind == "STRUCTURAL_UNIQUE"
+    normalized = ast.unparse(normalized_custom_object_target(spec))
+    assert "if not {}" in normalized
+    assert "subject.calculate()" not in normalized
+    assert UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER in normalized
+
+
+@pytest.mark.parametrize(
+    ("literal", "kind", "normalized_literal"),
+    (
+        ("{}", "EMPTY_DICT", "{}"),
+        ("[]", "EMPTY_LIST", "[]"),
+        ("()", "EMPTY_TUPLE", "()"),
+    ),
+)
+def test_constructor_proven_empty_collection_state_is_normalized(
+    literal: str,
+    kind: str,
+    normalized_literal: str,
+) -> None:
+    tree = ast.parse(
+        "class Vessel:\n"
+        "    def __init__(self):\n"
+        f"        self.contents = {literal}\n\n"
+        "def inspect(subject: Vessel) -> str:\n"
+        "    if not subject.contents:\n"
+        "        return 'empty'\n"
+        "    return 'other'\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    initializer = spec.object_parameters[0].state_initializers[0]
+    assert initializer.empty_collection_kind == kind
+    assert initializer.uses_literal is False
+    normalized = ast.unparse(normalized_custom_object_target(spec))
+    assert f"if not {normalized_literal}" in normalized
+
+
+def test_constructor_proven_empty_state_supports_unique_structural_object() -> None:
+    tree = ast.parse(
+        "class Archive:\n"
+        "    def __init__(self):\n"
+        "        self.records = {}\n\n"
+        "    def calculate(self) -> int:\n"
+        "        return len(self.records)\n\n"
+        "def inspect(candidate) -> str:\n"
+        "    if not candidate.records:\n"
+        "        return 'vacant'\n"
+        "    return candidate.calculate()\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    assert spec.object_parameters[0].class_name == "Archive"
+    assert spec.object_parameters[0].resolution_kind == "STRUCTURAL_UNIQUE"
+    assert (
+        spec.object_parameters[0].state_initializers[0].empty_collection_kind
+        == "EMPTY_DICT"
+    )
+
+
+def test_empty_collection_state_proof_fingerprint_is_stable_and_kind_sensitive() -> None:
+    def proof_for(literal: str) -> tuple[str, str]:
+        tree = ast.parse(
+            "class State:\n"
+            "    def __init__(self):\n"
+            f"        self.payload = {literal}\n\n"
+            "def inspect(subject: State) -> bool:\n"
+            "    return not subject.payload\n"
+        )
+        spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+        assert reason is None and spec is not None
+        initializer = spec.object_parameters[0].state_initializers[0]
+        return initializer.proof_fingerprint, spec.object_parameters[0].class_fingerprint
+
+    first_proof, first_class = proof_for("{}")
+    equivalent_proof, equivalent_class = proof_for("{}")
+    list_proof, list_class = proof_for("[]")
+
+    assert first_proof == equivalent_proof
+    assert first_class == equivalent_class
+    assert first_proof != list_proof
+    assert first_class != list_class
+
+
+@pytest.mark.parametrize(
+    "constructor_body",
+    (
+        "self.entries = {'seed': 1}",
+        "if enabled:\n            self.entries = {}",
+        "temporary = {}\n        self.entries = temporary",
+        "self.entries = {value for value in ()}",
+        "self.entries = factory()",
+        "self.entries = {}\n        self.entries = []",
+        "self.entries = {}\n        del self.entries",
+    ),
+)
+def test_unsafe_empty_collection_constructor_proof_is_rejected(
+    constructor_body: str,
+) -> None:
+    extra_parameter = "enabled: bool = True" if "enabled" in constructor_body else ""
+    tree = ast.parse(
+        "class UnsafeState:\n"
+        f"    def __init__(self, {extra_parameter}):\n"
+        f"        {constructor_body}\n\n"
+        "def inspect(subject: UnsafeState) -> bool:\n"
+        "    return not subject.entries\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
     assert spec is None
-    assert "method call" in (reason or "").lower()
+    assert reason is not None
+
+
+@pytest.mark.parametrize(
+    "constructor_signature",
+    (
+        "entries: list = []",
+        "entries: dict = {}",
+        "entries: tuple = ()",
+    ),
+)
+def test_constructor_parameter_or_mutable_default_is_not_empty_state_proof(
+    constructor_signature: str,
+) -> None:
+    tree = ast.parse(
+        "class UnsafeState:\n"
+        f"    def __init__(self, {constructor_signature}):\n"
+        "        self.entries = entries\n\n"
+        "def inspect(subject: UnsafeState) -> bool:\n"
+        "    return not subject.entries\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert spec is None
+    assert reason is not None
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        (
+            "class BuiltinCall:\n"
+            "    def __init__(self):\n"
+            "        self.entries = list()\n\n"
+            "def inspect(subject: BuiltinCall):\n"
+            "    return not subject.entries\n"
+        ),
+        (
+            "list = lambda: []\n\n"
+            "class ShadowedCall:\n"
+            "    def __init__(self):\n"
+            "        self.entries = list()\n\n"
+            "def inspect(subject: ShadowedCall):\n"
+            "    return not subject.entries\n"
+        ),
+    ),
+)
+def test_empty_collection_constructor_calls_remain_controlled_unsupported(
+    source: str,
+) -> None:
+    spec, reason = analyze_safe_custom_object_target(ast.parse(source), "inspect")
+
+    assert spec is None
+    assert "constructor" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "target_body",
+    (
+        "return subject.entries",
+        "return bool(subject.entries)",
+        "return len(subject.entries) == 0",
+        "return subject.entries == {}",
+        "subject.entries = {}\n    return True",
+        "del subject.entries\n    return True",
+        "subject.entries.append(1)\n    return True",
+        "subject.entries['key'] = 1\n    return True",
+    ),
+)
+def test_empty_collection_target_uses_outside_safe_not_are_rejected(
+    target_body: str,
+) -> None:
+    tree = ast.parse(
+        "class State:\n"
+        "    def __init__(self):\n"
+        "        self.entries = []\n\n"
+        "def inspect(subject: State):\n"
+        f"    {target_body}\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert spec is None
+    assert reason is not None
+
+
+@pytest.mark.parametrize(
+    "class_header",
+    (
+        "class State(Base):",
+        "class State(metaclass=Meta):",
+    ),
+)
+def test_empty_collection_candidate_rejects_inheritance_and_metaclass(
+    class_header: str,
+) -> None:
+    tree = ast.parse(
+        f"{class_header}\n"
+        "    def __init__(self):\n"
+        "        self.entries = {}\n\n"
+        "def inspect(subject: State):\n"
+        "    return not subject.entries\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert spec is None
+    assert "inheritance" in (reason or "").lower()
+
+
+def test_empty_collection_candidate_rejects_property_descriptors() -> None:
+    tree = ast.parse(
+        "class State:\n"
+        "    def __init__(self):\n"
+        "        self.entries = {}\n\n"
+        "    @property\n"
+        "    def visible(self):\n"
+        "        return self.entries\n\n"
+        "def inspect(subject: State):\n"
+        "    return not subject.entries\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert spec is None
+    assert "descriptor" in (reason or "").lower()
 
 
 def test_explicit_local_annotation_takes_precedence_over_structural_candidates() -> None:
@@ -1271,6 +1514,142 @@ def test_real_instance_method_pipeline_accepts_unique_untyped_object_parameter(
     assert "candidate_object = Signal(level=" in generated
     assert "target = Judge()" in generated
     assert "target.choose(candidate=candidate_object" in generated
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "function_name", "parameter_name", "attribute", "literal"),
+    (
+        ("empty_dict_case", "Ledger", "inspect", "subject", "records", "{}"),
+        ("empty_list_case", "QueueState", "examine", "candidate", "entries", "[]"),
+        ("empty_tuple_case", "Snapshot", "review", "payload", "tokens", "()"),
+    ),
+)
+def test_constructor_proven_empty_policy_is_identifier_and_kind_independent(
+    module_name: str,
+    class_name: str,
+    function_name: str,
+    parameter_name: str,
+    attribute: str,
+    literal: str,
+) -> None:
+    tree = ast.parse(
+        f"class {class_name}:\n"
+        "    def __init__(self):\n"
+        f"        self.{attribute} = {literal}\n\n"
+        "    def compute(self) -> int:\n"
+        f"        return len(self.{attribute})\n\n"
+        f"def {function_name}({parameter_name}) -> str:\n"
+        f"    if not {parameter_name}.{attribute}:\n"
+        f"        return {module_name!r}\n"
+        f"    return {parameter_name}.compute()\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, function_name)
+
+    assert reason is None and spec is not None
+    assert spec.object_parameters[0].resolution_kind == "STRUCTURAL_UNIQUE"
+    assert spec.object_parameters[0].state_initializers[0].proof_fingerprint
+
+
+def test_real_pipeline_keeps_empty_early_path_and_rejects_late_method_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = _write_source(
+        tmp_path,
+        "class Ledger:\n"
+        "    def __init__(self):\n"
+        "        self.records = {}\n\n"
+        "    def calculate(self) -> int:\n"
+        "        return len(self.records)\n\n"
+        "def inspect(subject, invoke: bool) -> str | int:\n"
+        "    if invoke:\n"
+        "        subject.calculate()\n"
+        "        return 'invoked'\n"
+        "    if not subject.records:\n"
+        "        return 'empty'\n"
+        "    return 'other'\n",
+        "path_scoped_empty.py",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = SourceAnalysisOrchestrator().run(
+        source_file=source_file,
+        module_path="path_scoped_empty",
+        function_name="inspect",
+        all_functions=False,
+        output_root=tmp_path / "path_scoped_output",
+        max_visits_per_node=2,
+        episode_count=1,
+        epsilon=0.0,
+        learning_rate=0.5,
+        discount_factor=0.9,
+        random_seed=29,
+        timeout_seconds=30.0,
+        per_function_timeout_seconds=60.0,
+        run_greedy_baseline=True,
+    )
+
+    function_result = result.function_results[0]
+    assert function_result.status.value in {"COMPLETED", "PARTIAL"}
+    assert function_result.scenario_count >= 1
+    assert function_result.scenario_pool_coverage is not None
+    assert function_result.scenario_pool_coverage.covered_lines
+    assert function_result.minimization_result is not None
+    assert function_result.minimization_result.coverage_preserved is True
+    assert function_result.diagnostic is not None
+    assert function_result.diagnostic.funnel.rl_executed_test_count >= 1
+    assert any(
+        count > 0
+        for category, count in function_result.diagnostic.scenario_rejection_counts
+        if category in {"UNSUPPORTED_EXPECTED_RESULT", "UNSUPPORTED_INPUT_SYNTHESIS"}
+    )
+    assert result.coverage_candidates
+    assert all(
+        isinstance(
+            candidate.scenario.keyword_argument_dict["subject"],
+            SafeObjectConstructionBlueprint,
+        )
+        for candidate in result.coverage_candidates
+    )
+    generated = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in function_result.output_directory.rglob("test_*.py")
+    )
+    assert "from path_scoped_empty import Ledger, inspect" in generated
+    assert "subject_object = Ledger()" in generated
+    assert "inspect(subject=subject_object, invoke=False)" in generated
+    assert "assert result == 'empty'" in generated
+    public_payload = json.dumps(result.to_dict(), ensure_ascii=False)
+    for secret in (
+        "records",
+        "EMPTY_DICT",
+        "proof_fingerprint",
+        "constructor_arguments",
+        "keyword_arguments",
+        "__custom_object_",
+    ):
+        assert secret not in public_payload
+
+
+def test_instance_method_target_accepts_constructor_proven_object_parameter() -> None:
+    tree = ast.parse(
+        "class Bucket:\n"
+        "    def __init__(self):\n"
+        "        self.values = []\n\n"
+        "class Inspector:\n"
+        "    def inspect(self, subject: Bucket) -> str:\n"
+        "        if not subject.values:\n"
+        "            return 'empty'\n"
+        "        return 'other'\n"
+    )
+
+    spec, reason = analyze_safe_custom_object_target(tree, "Inspector.inspect")
+
+    assert reason is None and spec is not None
+    normalized = normalized_custom_object_target(spec)
+    assert [argument.arg for argument in normalized.args.args] == ["self"]
+    assert "if not []" in ast.unparse(normalized)
 
 
 def test_static_analyzer_never_executes_constructor_or_target(

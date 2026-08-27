@@ -3,6 +3,10 @@ import ast
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from analyzer.safe_custom_object import (
+    UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
+)
+
 from cfg.path_analyzer import ExecutionPath, PathStep
 from generator.derived_value_input_synthesizer import (
     DerivedValueInputSynthesizer,
@@ -223,6 +227,8 @@ class PathInputGenerator:
                 parameter_names=parameter_names,
             )
         )
+
+        self._reject_unsupported_custom_object_method_path(path)
 
         self._validate_fixed_empty_collection_path(path)
 
@@ -546,6 +552,25 @@ class PathInputGenerator:
                 raise UnsupportedInputSynthesisError(
                     "Tuple except handler için güvenli input "
                     f"sentezlenemedi: {names}"
+                )
+
+    @staticmethod
+    def _reject_unsupported_custom_object_method_path(
+        path: ExecutionPath,
+    ) -> None:
+        for step in path.steps:
+            try:
+                statement = ast.parse(step.node_label)
+            except SyntaxError:
+                continue
+            if any(
+                isinstance(node, ast.Name)
+                and node.id == UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER
+                for node in ast.walk(statement)
+            ):
+                raise UnsupportedInputSynthesisError(
+                    "Selected path requires unsupported custom object "
+                    "method execution."
                 )
 
     @staticmethod
@@ -1543,6 +1568,14 @@ class PathInputGenerator:
         """
         Bir koşul AST ifadesini istenen Boolean sonuca göre uygular.
         """
+        if self._is_fixed_empty_collection_expression(expression, {}):
+            if desired_result:
+                raise UnreachablePathError(
+                    "Execution path doğrulanmış boş koleksiyon literalini "
+                    f"truthy gerektiriyor: {original_expression}"
+                )
+            return
+
         if isinstance(expression, ast.Name):
             self._apply_boolean_constraint(
                 variable_name=expression.id,

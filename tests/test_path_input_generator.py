@@ -3908,6 +3908,29 @@ def test_generate_replays_verified_empty_collection_local_state() -> None:
     assert isinstance(generated.keyword_argument_dict["key"], str)
 
 
+@pytest.mark.parametrize("literal", ("{}", "[]", "()"))
+def test_generate_replays_constructor_proven_empty_literal_condition(
+    literal: str,
+) -> None:
+    reachable = create_execution_path(
+        node_labels=["START", f"not {literal}", "return 'empty'", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+    contradictory = create_execution_path(
+        node_labels=["START", f"not {literal}", "return 'other'", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "False", None],
+    )
+
+    generated = PathInputGenerator().generate(reachable, ())
+
+    assert generated.keyword_arguments == ()
+    assert generated.expected_result == "empty"
+    with pytest.raises(UnreachablePathError, match="boş koleksiyon"):
+        PathInputGenerator().generate(contradictory, ())
+
+
 def test_generate_accepts_only_zero_iteration_for_fixed_empty_collection() -> None:
     complete_path = ExecutionPath(
         node_ids=[1, 2, 3, 4, 5],
