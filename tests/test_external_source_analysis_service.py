@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from analyzer import python_source_reader
 from models.external_source_analysis_result import (
     ExternalAnalysisConfiguration,
     ExternalAnalysisStatus,
@@ -55,6 +56,79 @@ def test_inline_static_discovery_writes_no_source_to_json_and_cleans(tmp_path: P
     report = result.report_path.read_text(encoding="utf-8")
     assert marker not in report
     assert "rl-unit-test-inline-" not in report
+
+
+def test_inline_source_canonicalization_is_idempotent_and_repeated_bom_safe() -> None:
+    canonicalize = python_source_reader.canonicalize_inline_python_source
+    source = "\ufeffdef hedef():\r\n    return 'Türkçe'\r\n"
+
+    canonical = canonicalize(source)
+
+    assert canonical == "def hedef():\r\n    return 'Türkçe'\r\n"
+    assert canonicalize(canonical) == canonical
+    for count in (2, 3):
+        with pytest.raises(ValueError, match="BOM"):
+            canonicalize("\ufeff" * count + "value = 1\n")
+    middle = "value = '\ufeff'\n"
+    assert canonicalize(middle) == middle
+    prefixed = " \ufeffvalue = 1\n"
+    assert canonicalize(prefixed) == prefixed
+
+
+@pytest.mark.parametrize("bom_count", (2, 3))
+def test_direct_inline_service_rejects_repeated_bom_as_syntax_error(
+    tmp_path: Path,
+    bom_count: int,
+) -> None:
+    marker = "never_publish_repeated_bom_source"
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource(
+                "\ufeff" * bom_count
+                + f"def target():\n    return {marker!r}\n"
+            ),
+            configuration=_configuration(tmp_path),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.FAILED
+    assert result.issues == ("SYNTAX_ERROR",)
+    assert marker not in result.report_path.read_text(encoding="utf-8")
+
+
+def test_inline_payload_limit_uses_raw_transport_size_before_bom_normalization(
+    tmp_path: Path,
+) -> None:
+    source = InlinePythonSource("\ufeffvalue = 1\n")
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            source,
+            configuration=_configuration(
+                tmp_path,
+                maximum_payload_bytes=len(source.source_text.encode("utf-8")),
+            ),
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.FAILED
+    assert result.issues == ("SOURCE_LIMIT_EXCEEDED",)
+
+
+def test_inline_service_does_not_decode_canonical_source_again(
+    tmp_path: Path,
+) -> None:
+    with patch(
+        "services.external_source_analysis_service.decode_python_source_bytes",
+        side_effect=AssertionError("inline source yeniden decode edildi"),
+    ):
+        result = ExternalSourceAnalysisService().run(
+            ExternalSourceAnalysisRequest(
+                InlinePythonSource("\ufeffdef target():\n    return 1\n"),
+                configuration=_configuration(tmp_path),
+            )
+        )
+
+    assert result.status is ExternalAnalysisStatus.STATIC_COMPLETED
 
 
 def test_static_discovery_preserves_qualified_method_inventory_with_selection(

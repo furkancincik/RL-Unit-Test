@@ -21,6 +21,7 @@ from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalSourceAnalysisRequest,
     ExternalSourceAnalysisResult,
+    validate_external_source_execution_policy,
 )
 from services.external_source_analysis_service import ExternalSourceAnalysisService
 
@@ -96,6 +97,10 @@ class AnalysisJobService:
     def submit(self, request: ExternalSourceAnalysisRequest) -> AnalysisJobSummary:
         if not isinstance(request, ExternalSourceAnalysisRequest):
             raise TypeError("request ExternalSourceAnalysisRequest olmalıdır.")
+        validate_external_source_execution_policy(
+            request.source,
+            request.execution_policy,
+        )
         if self._shutdown:
             raise AnalysisJobStateConflictError("Job service kapatıldı.")
         self.purge_expired()
@@ -470,6 +475,7 @@ class AnalysisJobService:
             analysis_policy=result.execution_policy,
             status=status,
             acquisition_status=result.acquisition_status,
+            resolved_commit_sha=result.resolved_commit_sha,
             discovered_module_count=result.discovered_module_count,
             selected_module_count=result.selected_module_count,
             discovered_function_count=result.discovered_function_count,

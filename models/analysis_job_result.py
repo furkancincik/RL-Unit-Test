@@ -200,6 +200,7 @@ class AnalysisJobResultSummary:
     completed_function_count: int = 0
     partial_function_count: int = 0
     timed_out_function_count: int = 0
+    resolved_commit_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -208,6 +209,7 @@ class AnalysisJobResultSummary:
             "analysis_policy": self.analysis_policy.value,
             "status": self.status.value,
             "acquisition_status": self.acquisition_status,
+            "resolved_commit_sha": self.resolved_commit_sha,
             "discovered_module_count": self.discovered_module_count,
             "selected_module_count": self.selected_module_count,
             "discovered_function_count": self.discovered_function_count,

@@ -1,3 +1,4 @@
+import codecs
 import json
 from pathlib import Path
 from threading import Event
@@ -48,7 +49,11 @@ def _runner_result(request) -> ExternalSourceAnalysisResult:
         repository_name=None,
         github_owner=None,
         github_repository=None,
-        resolved_commit_sha=None,
+        resolved_commit_sha=(
+            "a" * 40
+            if request.source.source_kind.value == "PUBLIC_GITHUB_REPOSITORY"
+            else None
+        ),
         discovered_module_count=1,
         selected_module_count=1,
         module_results=(),
@@ -458,6 +463,94 @@ def test_upload_and_github_explicit_target_schemas_are_unambiguous(
     service.shutdown()
 
 
+def test_github_ref_is_bound_before_queue_and_resolved_sha_is_public(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    commit = "b" * 40
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/github",
+            json={
+                "repository_url": "https://github.com/owner/repository.git",
+                "ref": commit,
+            },
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+        result = client.get(
+            f"/api/v1/jobs/{response.json()['job_id']}/result"
+        )
+
+    request = runner.run.call_args.args[0]
+    assert request.source.repository_url == "https://github.com/owner/repository"
+    assert request.source.ref == commit
+    assert result.status_code == 200
+    assert result.json()["resolved_commit_sha"] == "a" * 40
+    service.shutdown()
+
+
+def test_trusted_dynamic_github_is_rejected_before_job_creation(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/github",
+            json={
+                "repository_url": "https://github.com/owner/repository",
+                "analysis": {
+                    "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+                    "trusted_execution_acknowledged": True,
+                    "pytest_coverage_timeout_seconds": 30,
+                    "function_pipeline_timeout_seconds": 120,
+                    "project_timeout_seconds": 300,
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert "yalnız statik" in response.text.lower()
+    assert "owner/repository" not in response.text
+    assert "120" not in response.text
+    assert service.capacity() == before
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("repository_url", "ref"),
+    (
+        ("https://user@github.com/owner/repository", None),
+        ("https://github.com/owner/repository?token=secret", None),
+        ("https://github.com/owner/repository", "../main"),
+        ("https://github.com/owner/repository", "main@{1}"),
+    ),
+)
+def test_github_url_and_ref_are_rejected_before_job_creation(
+    tmp_path: Path,
+    repository_url: str,
+    ref: str | None,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+    payload: dict[str, object] = {"repository_url": repository_url}
+    if ref is not None:
+        payload["ref"] = ref
+
+    with client:
+        response = client.post("/api/v1/jobs/github", json=payload)
+
+    assert response.status_code == 422
+    assert service.capacity() == before
+    runner.run.assert_not_called()
+    assert "secret" not in response.text
+    service.shutdown()
+
+
 @pytest.mark.parametrize(
     ("filename", "expected_identity"),
     (
@@ -594,6 +687,81 @@ def test_blank_inline_source_is_rejected_before_job_creation(
     for detail in response.json()["detail"]:
         if "source_code" in detail.get("loc", []):
             assert "input" not in detail
+    service.shutdown()
+
+
+def test_inline_leading_bom_is_normalized_before_job_creation(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    source = "\ufeffdef target():\r\n    return 1\r\n"
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": source},
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    request = runner.run.call_args.args[0]
+    assert request.source.source_text == source.removeprefix("\ufeff")
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        b"",
+        b" \t\r\n\f",
+        codecs.BOM_UTF8,
+        codecs.BOM_UTF8 + b" \t\r\n",
+    ),
+)
+def test_blank_upload_is_rejected_before_job_creation(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("empty.py", content, "text/x-python")},
+            data={"analysis": "{}"},
+        )
+
+    assert response.status_code == 422
+    assert service.capacity() == before
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        b"# comment-only module\n",
+        b'"""module documentation only"""\n',
+        b"answer = 42\n",
+    ),
+)
+def test_nonblank_zero_function_uploads_remain_accepted(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    client, service, runner = _client(tmp_path)
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/upload",
+            files={"file": ("module.py", content, "text/x-python")},
+            data={"analysis": "{}"},
+        )
+        assert response.status_code == 202
+        service.wait(response.json()["job_id"], timeout=5)
+
+    assert runner.run.call_args.args[0].source.file_bytes == content
     service.shutdown()
 
 

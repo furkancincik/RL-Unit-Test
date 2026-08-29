@@ -8,6 +8,11 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, s
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
+from analyzer.python_source_reader import (
+    PythonSourceEncodingError,
+    decode_python_source_bytes,
+)
+
 from api.schemas.analysis_jobs import (
     AnalysisOptionsRequest,
     ArtifactListResponse,
@@ -22,6 +27,7 @@ from models.external_source_analysis_result import (
     ExternalAnalysisConfiguration,
     ExternalModuleSelection,
     ExternalModuleSelectionMode,
+    ExternalSourcePolicyValidationError,
     ExternalSourceAnalysisRequest,
     InlinePythonSource,
     PublicGitHubRepository,
@@ -41,6 +47,10 @@ from services.analysis_job_service import (
 )
 from services.external_source_analysis_service import (
     portable_upload_module_identity,
+)
+from services.source_acquisition_service import (
+    SourceAcquisitionService,
+    SourceAcquisitionValidationError,
 )
 
 
@@ -120,11 +130,16 @@ def _configuration(
 
 
 def _submit(service: AnalysisJobService, source: object, options: AnalysisOptionsRequest) -> JobStatusResponse:
-    request = ExternalSourceAnalysisRequest(
-        source=source,
-        execution_policy=options.policy,
-        configuration=_configuration(options, service.settings.output_root, source),
-    )
+    try:
+        request = ExternalSourceAnalysisRequest(
+            source=source,
+            execution_policy=options.policy,
+            configuration=_configuration(
+                options, service.settings.output_root, source
+            ),
+        )
+    except ExternalSourcePolicyValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     try:
         summary = service.submit(request)
     except AnalysisJobQueueFullError as error:
@@ -137,7 +152,11 @@ def submit_inline(payload: InlineJobRequest, request: Request) -> JobStatusRespo
     service = _service(request)
     if len(payload.source_code.encode("utf-8")) > service.settings.maximum_inline_source_bytes:
         raise HTTPException(status_code=413, detail="Inline source byte limiti aşıldı.")
-    return _submit(service, InlinePythonSource(payload.source_code), payload.analysis)
+    return _submit(
+        service,
+        InlinePythonSource(payload.source_code),
+        payload.analysis,
+    )
 
 
 @router.post("/jobs/upload", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -158,6 +177,15 @@ async def submit_upload(
     await file.close()
     if len(content) > service.settings.maximum_upload_bytes:
         raise HTTPException(status_code=413, detail="Upload byte limiti aşıldı.")
+    try:
+        decoded = decode_python_source_bytes(content).text
+    except PythonSourceEncodingError:
+        decoded = None
+    if decoded is not None and not decoded.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Upload Python source boş bırakılamaz.",
+        )
     raw_stem = Path(supplied_name).stem[:40]
     safe_stem = "".join(
         character if character.isalnum() or character in {"-", "_"} else "_"
@@ -169,9 +197,20 @@ async def submit_upload(
 
 @router.post("/jobs/github", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
 def submit_github(payload: GitHubJobRequest, request: Request) -> JobStatusResponse:
+    try:
+        normalized_url, _, _ = (
+            SourceAcquisitionService.validate_public_github_repository(
+                str(payload.repository_url), payload.ref
+            )
+        )
+    except SourceAcquisitionValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     return _submit(
         _service(request),
-        PublicGitHubRepository(repository_url=str(payload.repository_url)),
+        PublicGitHubRepository(
+            repository_url=normalized_url,
+            ref=payload.ref,
+        ),
         payload.analysis,
     )
 

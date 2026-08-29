@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
@@ -109,6 +110,122 @@ def test_real_upload_static_accepts_utf8_bom_without_public_source_leak(
     serialized = json.dumps(payload)
     assert "def api_bom_target" not in serialized
     assert source.hex() not in serialized
+    service.shutdown()
+
+
+def test_real_inline_static_accepts_utf8_bom_with_upload_parity(
+    tmp_path: Path,
+) -> None:
+    source = "\ufeffdef api_bom_target(value: int) -> int:\r\n    return value + 4\r\n"
+    service = _service(tmp_path)
+
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": source},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=30)
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["status"] == "COMPLETED"
+    assert payload["modules"][0]["discovered_function_names"] == [
+        "api_bom_target"
+    ]
+    assert "def api_bom_target" not in json.dumps(payload)
+    service.shutdown()
+
+
+def test_inline_and_upload_single_bom_preserve_crlf_and_unicode_parity(
+    tmp_path: Path,
+) -> None:
+    text = (
+        "def unicode_target(value: int) -> str:\r\n"
+        "    return 'Türkçe' if value else 'boş'\r\n"
+    )
+    service = _service(tmp_path)
+
+    with TestClient(create_app(job_service=service)) as client:
+        inline = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "\ufeff" + text},
+        )
+        upload = client.post(
+            "/api/v1/jobs/upload",
+            files={
+                "file": (
+                    "unicode.py",
+                    codecs.BOM_UTF8 + text.encode("utf-8"),
+                    "text/x-python",
+                )
+            },
+            data={"analysis": "{}"},
+        )
+        assert inline.status_code == 202
+        assert upload.status_code == 202
+        service.wait(inline.json()["job_id"], timeout=30)
+        service.wait(upload.json()["job_id"], timeout=30)
+        inline_result = client.get(
+            f"/api/v1/jobs/{inline.json()['job_id']}/result"
+        ).json()
+        upload_result = client.get(
+            f"/api/v1/jobs/{upload.json()['job_id']}/result"
+        ).json()
+
+    assert inline_result["status"] == upload_result["status"] == "COMPLETED"
+    assert inline_result["modules"][0]["discovered_function_names"] == [
+        "unicode_target"
+    ]
+    assert upload_result["modules"][0]["discovered_function_names"] == [
+        "unicode_target"
+    ]
+    service.shutdown()
+
+
+@pytest.mark.parametrize("bom_count", (2, 3))
+def test_inline_and_upload_repeated_bom_have_same_controlled_error(
+    tmp_path: Path,
+    bom_count: int,
+) -> None:
+    text = "def repeated_bom_target():\n    return 1\n"
+    service = _service(tmp_path)
+
+    with TestClient(create_app(job_service=service)) as client:
+        inline = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "\ufeff" * bom_count + text},
+        )
+        upload = client.post(
+            "/api/v1/jobs/upload",
+            files={
+                "file": (
+                    "repeated.py",
+                    codecs.BOM_UTF8 * bom_count + text.encode("utf-8"),
+                    "text/x-python",
+                )
+            },
+            data={"analysis": "{}"},
+        )
+        assert inline.status_code == 202
+        assert upload.status_code == 202
+        service.wait(inline.json()["job_id"], timeout=30)
+        service.wait(upload.json()["job_id"], timeout=30)
+        inline_result = client.get(
+            f"/api/v1/jobs/{inline.json()['job_id']}/result"
+        ).json()
+        upload_result = client.get(
+            f"/api/v1/jobs/{upload.json()['job_id']}/result"
+        ).json()
+
+    assert inline_result["status"] == upload_result["status"] == "FAILED"
+    assert inline_result["issues"] == upload_result["issues"] == [
+        "SYNTAX_ERROR"
+    ]
+    assert "repeated_bom_target" not in json.dumps(inline_result)
+    assert "repeated_bom_target" not in json.dumps(upload_result)
     service.shutdown()
 
 
@@ -714,18 +831,14 @@ def test_risky_github_url_is_rejected_by_real_acquisition_without_network(
     tmp_path: Path,
 ) -> None:
     service = _service(tmp_path)
+    before = service.capacity()
     with TestClient(create_app(job_service=service)) as client:
         submitted = client.post(
             "/api/v1/jobs/github",
             json={"repository_url": "http://github.com/owner/repository"},
         )
-        assert submitted.status_code == 202
-        job_id = submitted.json()["job_id"]
-        service.wait(job_id, timeout=30)
-        result = client.get(f"/api/v1/jobs/{job_id}/result")
-    assert result.status_code == 200
-    assert result.json()["status"] == "FAILED"
-    assert result.json()["issues"]
+    assert submitted.status_code == 422
+    assert service.capacity() == before
     service.shutdown()
 
 
@@ -777,6 +890,7 @@ def test_successful_github_without_python_is_partial_through_public_api(
     assert result["project_line_coverage_percent"] is None
     assert result["project_branch_coverage_percent"] is None
     assert result["cleanup_status"] == "COMPLETED"
+    assert result["resolved_commit_sha"] == "b" * 40
     assert result["issues"] == ["NO_PYTHON_FILES"]
     assert result["modules"] == []
     service.shutdown()

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from analyzer.python_source_reader import (
+    InlinePythonSourceNormalizationError,
+    canonicalize_inline_python_source,
+)
 from models.project_analysis_result import (
     FunctionRunStatus,
     ProjectAnalysisResult,
@@ -59,18 +63,42 @@ class ExternalWorkspaceCleanupStatus(str, Enum):
     FAILED = "FAILED"
 
 
+PUBLIC_GITHUB_STATIC_ONLY_MESSAGE = (
+    "Public GitHub kaynakları yalnız statik keşif destekler."
+)
+
+
+class ExternalSourcePolicyValidationError(ValueError):
+    """Kaynak türü ile execution policy arasındaki güvenlik invariant'ı."""
+
+
 @dataclass(frozen=True, slots=True)
 class InlinePythonSource:
     source_text: str
     display_name: str | None = None
+    transport_size_bytes: int = field(init=False, repr=False)
+    normalization_issue: str | None = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_text, str):
             raise TypeError("source_text string olmalıdır.")
-        if not self.source_text.strip():
+        transport_size = len(self.source_text.encode("utf-8"))
+        try:
+            canonical_source = canonicalize_inline_python_source(
+                self.source_text
+            )
+        except InlinePythonSourceNormalizationError:
+            canonical_source = self.source_text
+            normalization_issue = "SYNTAX_ERROR"
+        else:
+            normalization_issue = None
+        if not canonical_source.strip():
             raise ValueError("source_text boş olamaz.")
         if self.display_name is not None and not isinstance(self.display_name, str):
             raise TypeError("display_name string veya None olmalıdır.")
+        object.__setattr__(self, "source_text", canonical_source)
+        object.__setattr__(self, "transport_size_bytes", transport_size)
+        object.__setattr__(self, "normalization_issue", normalization_issue)
 
     @property
     def source_kind(self) -> ExternalSourceKind:
@@ -146,6 +174,20 @@ ExternalSourcePayload = (
     | LocalProjectDirectory
     | PublicGitHubRepository
 )
+
+
+def validate_external_source_execution_policy(
+    source: ExternalSourcePayload,
+    execution_policy: ExternalExecutionPolicy,
+) -> None:
+    if (
+        isinstance(source, PublicGitHubRepository)
+        and execution_policy
+        is not ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY
+    ):
+        raise ExternalSourcePolicyValidationError(
+            PUBLIC_GITHUB_STATIC_ONLY_MESSAGE
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +325,7 @@ class ExternalSourceAnalysisRequest:
             raise TypeError("configuration gereklidir.")
         if not isinstance(acquisition_limits, SourceAcquisitionLimits):
             raise TypeError("acquisition_limits geçersiz.")
+        validate_external_source_execution_policy(source, execution_policy)
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "execution_policy", execution_policy)
         object.__setattr__(self, "configuration", configuration)

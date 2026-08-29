@@ -10,6 +10,10 @@ class PythonSourceEncodingError(ValueError):
     """Python kaynağının PEP 263 encoding bilgisi güvenle çözümlenemedi."""
 
 
+class InlinePythonSourceNormalizationError(ValueError):
+    """Inline transport metni güvenli canonical source'a dönüştürülemedi."""
+
+
 @dataclass(frozen=True, slots=True)
 class DecodedPythonSource:
     text: str = field(repr=False)
@@ -45,3 +49,16 @@ def decode_python_source_bytes(file_bytes: bytes) -> DecodedPythonSource:
         raise PythonSourceEncodingError(
             "Python source encoding çözümlenemedi."
         ) from error
+
+
+def canonicalize_inline_python_source(source_text: str) -> str:
+    """Tek bir leading transport BOM'unu idempotent biçimde normalize eder."""
+    if not isinstance(source_text, str):
+        raise TypeError("source_text string olmalıdır.")
+    if source_text.startswith("\ufeff\ufeff"):
+        raise InlinePythonSourceNormalizationError(
+            "Inline Python source birden fazla leading BOM içeremez."
+        )
+    if source_text.startswith("\ufeff"):
+        return source_text[1:]
+    return source_text

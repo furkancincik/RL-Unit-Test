@@ -19,6 +19,31 @@ def test_source_kinds_use_distinct_api_endpoints() -> None:
     assert "local_path" not in script
 
 
+def test_github_ref_and_resolved_sha_have_distinct_web_contracts() -> None:
+    script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    assert 'id="github-ref"' in markup
+    assert 'for="github-ref"' in markup
+    assert "ref: repositoryRef" in script
+    assert "resolved_commit_sha" in script
+    assert '"Resolved commit SHA"' in script
+
+
+def test_github_mode_is_static_only_and_restores_local_source_policy() -> None:
+    script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    assert 'id="github-static-policy"' in markup
+    assert "Yalnız güvenli statik keşif" in markup
+    assert "sourcePolicies" in script
+    assert 'state.activeSource === "github"' in script
+    assert 'dynamicPolicy.disabled = githubMode' in script
+    assert 'staticPolicy.checked = true' in script
+    assert "rememberSourcePolicy" in script
+    assert "restoreSourcePolicy" in script
+
+
 def test_submission_guards_and_polling_lifecycle_are_explicit() -> None:
     script = _script()
     markup = Path("web/index.html").read_text(encoding="utf-8")
@@ -27,10 +52,13 @@ def test_submission_guards_and_polling_lifecycle_are_explicit() -> None:
     assert "if (state.submitInFlight)" in script
     assert "trustedAcknowledgement" in script
     assert "if (!trustedAcknowledgement.checked)" in script
-    assert "if (!sourceCode.trim())" in script
+    assert 'if (!sourceCode.replace(/^\\uFEFF/, "").trim())' in script
     assert 'id="inline-source"' in markup
     assert "required" in markup.split('id="inline-source"', 1)[1].split(">", 1)[0]
     assert '.endsWith(".py")' in script
+    assert "file.size === 0" in script
+    assert "fileIsBlankPythonSource" in script
+    assert "sourceCode.replace(/^\\uFEFF/, \"\").trim()" in script
     assert "if (!repositoryUrl)" in script
     assert "stopPolling" in script
     assert "function beginJob(snapshot)" in script
@@ -40,6 +68,17 @@ def test_submission_guards_and_polling_lifecycle_are_explicit() -> None:
     assert "retryAttempt" in script
     assert "state.retryAttempt <= MAX_RETRY_ATTEMPTS" in script
     assert "setTimeout" in script
+
+
+def test_source_mode_switch_resets_target_and_ref_state() -> None:
+    script = _script()
+
+    assert "function resetSourceSpecificControls" in script
+    assert 'byId("target-selection-mode").value = "ALL_ELIGIBLE_WITH_LIMIT"' in script
+    assert 'byId("explicit-target-names").value = ""' in script
+    assert 'byId("module-target-rows").replaceChildren()' in script
+    assert 'byId("github-ref").value = ""' in script
+    assert "resetSourceSpecificControls()" in script
 
 
 def test_project_deadline_has_distinct_input_and_backend_authoritative_metrics() -> None:
@@ -210,7 +249,10 @@ def test_explicit_qualified_target_controls_validate_without_ambiguous_csv() -> 
     assert "explicit_module_targets" in script
     assert "target_selection_mode" in script
     assert 'split("\\n")' in script
-    assert 'split(",")' not in script.split("explicit-target-names", 1)[-1]
+    target_selection_implementation = script.split(
+        "function targetSelectionOptions()", 1
+    )[1].split("function numericValue", 1)[0]
+    assert 'split(",")' not in target_selection_implementation
     assert "if (!selection.valid)" in script
 
 

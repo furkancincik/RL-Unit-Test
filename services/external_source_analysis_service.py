@@ -1002,10 +1002,13 @@ class ExternalSourceAnalysisService:
         source = request.source
         limit = request.configuration.maximum_payload_bytes
         if isinstance(source, InlinePythonSource):
-            encoded = source.source_text.encode("utf-8")
-            if len(encoded) > limit:
+            if source.transport_size_bytes > limit:
                 return "SOURCE_LIMIT_EXCEEDED"
-            if ExternalSourceAnalysisService._has_invalid_control(source.source_text):
+            if source.normalization_issue is not None:
+                return source.normalization_issue
+            if ExternalSourceAnalysisService._has_invalid_control(
+                source.source_text
+            ):
                 return "INVALID_CONTROL_CHARACTER"
             try:
                 ast.parse(source.source_text)

@@ -85,6 +85,10 @@
             <label for="github-url">Public GitHub repository URL</label>
             <input id="github-url" type="url" inputmode="url" autocomplete="off" placeholder="https://github.com/owner/repository" aria-describedby="github-help">
             <p id="github-help" class="field-help">Yalnız anonim erişilebilen public repository desteklenir. Token, kullanıcı adı veya parola alınmaz; son doğrulamayı backend yapar.</p>
+            <label for="github-ref">Branch, tag veya commit (opsiyonel)</label>
+            <input id="github-ref" type="text" autocomplete="off" maxlength="128" placeholder="main veya 40 karakter commit SHA" aria-describedby="github-ref-help">
+            <p id="github-ref-help" class="field-help">Tekrarlanabilir analiz için immutable 40 karakter commit SHA kullanın.</p>
+            <p id="github-static-policy" class="field-help">Yalnız güvenli statik keşif desteklenir; public GitHub repository kaynak kodu çalıştırılmaz.</p>
           </div>
 
           <div class="mode-layout">

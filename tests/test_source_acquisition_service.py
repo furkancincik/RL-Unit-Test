@@ -267,6 +267,24 @@ def test_invalid_refs_are_rejected(ref: str) -> None:
     assert SourceIssueCategory.INVALID_GITHUB_URL in _categories(result)
 
 
+def test_public_github_validation_is_reusable_before_acquisition() -> None:
+    normalized, owner, repository = (
+        SourceAcquisitionService.validate_public_github_repository(
+            "https://github.com/Owner/Repo.git",
+            "feature/safe-ref",
+        )
+    )
+
+    assert normalized == "https://github.com/Owner/Repo"
+    assert owner == "Owner"
+    assert repository == "Repo"
+    with pytest.raises(ValueError, match="Git ref"):
+        SourceAcquisitionService.validate_public_github_repository(
+            "https://github.com/owner/repo",
+            "../main",
+        )
+
+
 def test_git_missing_is_controlled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("services.source_acquisition_service.shutil.which", lambda _: None)
     result = SourceAcquisitionService().resolve(
@@ -308,6 +326,47 @@ def test_clone_policy_uses_safe_arguments_and_environment(tmp_path: Path) -> Non
     assert result.resolved_commit_sha == "a" * 40
     assert not (result.resolved_project_root / ".git" / "modules").exists()
     assert result.resolved_project_root.parent != tmp_path
+    service.cleanup(result)
+
+
+def test_exact_commit_ref_is_checked_out_without_branch_interpretation() -> None:
+    commit = "c" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def runner(
+        arguments: tuple[str, ...], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        call = tuple(arguments)
+        calls.append(call)
+        if "clone" in call:
+            destination = Path(call[-1])
+            destination.mkdir(parents=True)
+            (destination / "module.py").write_text("value=1\n", encoding="utf-8")
+            return subprocess.CompletedProcess(call, 0, "", "")
+        if "rev-parse" in call:
+            return subprocess.CompletedProcess(call, 0, commit + "\n", "")
+        return subprocess.CompletedProcess(call, 0, "", "")
+
+    service = SourceAcquisitionService(
+        subprocess_runner=runner,
+        git_executable="git",
+    )
+    result = service.resolve(
+        _request(
+            SourceTargetKind.PUBLIC_GITHUB_REPOSITORY,
+            "https://github.com/owner/repo",
+            ref=commit,
+        )
+    )
+
+    clone = next(call for call in calls if "clone" in call)
+    fetch = next(call for call in calls if "fetch" in call)
+    checkout = next(call for call in calls if "checkout" in call)
+    assert "--branch" not in clone
+    assert fetch[-1] == commit
+    assert checkout[-1] == commit
+    assert "--detach" in checkout
+    assert result.resolved_commit_sha == commit
     service.cleanup(result)
 
 

@@ -19,6 +19,10 @@ const POLL_INTERVAL_MS = 1000;
 
 const state = {
   activeSource: "inline",
+  sourcePolicies: {
+    inline: "STATIC_DISCOVERY_ONLY",
+    upload: "STATIC_DISCOVERY_ONLY",
+  },
   selectedFile: null,
   currentJobId: null,
   currentStatus: null,
@@ -111,7 +115,18 @@ function setSubmitting(submitting) {
   button.querySelector(".loading-label").hidden = !submitting;
 }
 
+function resetSourceSpecificControls() {
+  byId("target-selection-mode").value = "ALL_ELIGIBLE_WITH_LIMIT";
+  byId("explicit-target-names").value = "";
+  byId("module-target-rows").replaceChildren();
+  byId("github-ref").value = "";
+}
+
 function activateSource(source, focusPanel = false) {
+  if (state.activeSource !== source) {
+    rememberSourcePolicy();
+    resetSourceSpecificControls();
+  }
   state.activeSource = source;
   for (const tab of sourceTabs) {
     const active = tab.dataset.sourceTab === source;
@@ -129,6 +144,7 @@ function activateSource(source, focusPanel = false) {
       }
     }
   }
+  restoreSourcePolicy();
   updateTargetSelectionControls();
   setMessage("");
 }
@@ -155,6 +171,32 @@ function handleTabKeydown(event) {
 
 function selectedPolicy() {
   return document.querySelector('input[name="analysis-mode"]:checked').value;
+}
+
+function rememberSourcePolicy() {
+  if (state.activeSource !== "github") {
+    state.sourcePolicies[state.activeSource] = selectedPolicy();
+  }
+}
+
+function restoreSourcePolicy() {
+  const githubMode = state.activeSource === "github";
+  const staticPolicy = document.querySelector(
+    'input[name="analysis-mode"][value="STATIC_DISCOVERY_ONLY"]',
+  );
+  const dynamicPolicy = document.querySelector(
+    'input[name="analysis-mode"][value="TRUSTED_DYNAMIC_ANALYSIS"]',
+  );
+  dynamicPolicy.disabled = githubMode;
+  if (githubMode) {
+    staticPolicy.checked = true;
+  } else {
+    const restored = state.sourcePolicies[state.activeSource]
+      || "STATIC_DISCOVERY_ONLY";
+    staticPolicy.checked = restored === "STATIC_DISCOVERY_ONLY";
+    dynamicPolicy.checked = restored === "TRUSTED_DYNAMIC_ANALYSIS";
+  }
+  updateModeControls();
 }
 
 function updateModeControls() {
@@ -366,10 +408,28 @@ function validateFile(file) {
   if (!file.name.toLowerCase().endsWith(".py")) {
     throw new Error("Yalnız .py uzantılı dosya yüklenebilir.");
   }
+  if (file.size === 0) {
+    throw new Error("Python dosyası boş bırakılamaz.");
+  }
   if (file.size > MAX_SOURCE_BYTES) {
     throw new Error("Dosya 2.000.000 byte sınırını aşıyor.");
   }
   return file;
+}
+
+async function fileIsBlankPythonSource(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let start = 0;
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    start = 3;
+  }
+  const whitespace = new Set([0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20]);
+  for (let index = start; index < bytes.length; index += 1) {
+    if (!whitespace.has(bytes[index])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function selectFile(file) {
@@ -395,10 +455,10 @@ function clearSelectedFile() {
   byId("file-size").textContent = "";
 }
 
-function sourceRequest(options) {
+async function sourceRequest(options) {
   if (state.activeSource === "inline") {
     const sourceCode = byId("inline-source").value;
-    if (!sourceCode.trim()) {
+    if (!sourceCode.replace(/^\uFEFF/, "").trim()) {
       throw new Error("Python kaynak kodu boş bırakılamaz.");
     }
     if (new TextEncoder().encode(sourceCode).length > MAX_SOURCE_BYTES) {
@@ -416,6 +476,9 @@ function sourceRequest(options) {
 
   if (state.activeSource === "upload") {
     const file = validateFile(state.selectedFile);
+    if (await fileIsBlankPythonSource(file)) {
+      throw new Error("Python dosyası boş bırakılamaz.");
+    }
     const form = new FormData();
     form.append("file", file, file.name);
     form.append("analysis", JSON.stringify(options));
@@ -423,6 +486,7 @@ function sourceRequest(options) {
   }
 
   const repositoryUrl = byId("github-url").value.trim();
+  const repositoryRef = byId("github-ref").value.trim();
   if (!repositoryUrl) {
     throw new Error("Public GitHub URL boş bırakılamaz.");
   }
@@ -432,7 +496,13 @@ function sourceRequest(options) {
   } catch {
     throw new Error("GitHub URL biçimi geçerli değil.");
   }
-  if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "github.com") {
+  if (parsed.protocol !== "https:"
+      || parsed.hostname.toLowerCase() !== "github.com"
+      || parsed.username
+      || parsed.password
+      || parsed.port
+      || parsed.search
+      || parsed.hash) {
     throw new Error("Beklenen biçim: https://github.com/owner/repository");
   }
   return {
@@ -440,7 +510,11 @@ function sourceRequest(options) {
     init: {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repository_url: repositoryUrl, analysis: options }),
+      body: JSON.stringify({
+        repository_url: repositoryUrl,
+        ref: repositoryRef || null,
+        analysis: options,
+      }),
     },
   };
 }
@@ -586,7 +660,7 @@ async function submitAnalysis(event) {
   }
   setMessage("");
   try {
-    const request = sourceRequest(buildAnalysisOptions());
+    const request = await sourceRequest(buildAnalysisOptions());
     setSubmitting(true);
     const response = await fetch(request.url, request.init);
     if (!response.ok) {
@@ -600,6 +674,7 @@ async function submitAnalysis(event) {
       clearSelectedFile();
     } else {
       byId("github-url").value = "";
+      byId("github-ref").value = "";
     }
     beginJob(snapshot);
   } catch (error) {
@@ -951,6 +1026,7 @@ function renderResult(result) {
   const summary = byId("result-summary");
   summary.replaceChildren();
   appendMetric(summary, "Kaynak", sourceKindLabel(result.source_kind));
+  appendMetric(summary, "Resolved commit SHA", measured(result.resolved_commit_sha));
   appendMetric(summary, "Politika", policyLabel(result.analysis_policy));
   appendMetric(summary, "Keşfedilen modül", measured(result.discovered_module_count));
   appendMetric(summary, "Seçilen modül", measured(result.selected_module_count));
@@ -1123,7 +1199,10 @@ for (const tab of sourceTabs) {
 }
 
 for (const radio of document.querySelectorAll('input[name="analysis-mode"]')) {
-  radio.addEventListener("change", updateModeControls);
+  radio.addEventListener("change", () => {
+    rememberSourcePolicy();
+    updateModeControls();
+  });
 }
 
 byId("selection-mode").addEventListener("change", updateSelectionControls);

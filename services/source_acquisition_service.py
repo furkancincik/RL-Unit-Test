@@ -77,6 +77,10 @@ class SourceCleanupError(RuntimeError):
     category = SourceIssueCategory.CLEANUP_FAILED
 
 
+class SourceAcquisitionValidationError(ValueError):
+    """Public source acquisition isteği güvenli validation politikasını ihlal etti."""
+
+
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -116,12 +120,24 @@ class GitSubprocessClient:
             "--no-tags",
             "--no-recurse-submodules",
         ]
-        if ref is not None:
+        exact_commit = ref is not None and _COMMIT_SHA.fullmatch(ref) is not None
+        if ref is not None and not exact_commit:
             arguments.extend(("--branch", ref))
         arguments.extend(("--", url, str(destination)))
+        deadline = time.monotonic() + timeout_seconds
+
+        def remaining_timeout() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise _ControlledAcquisitionError(
+                    SourceIssueCategory.CLONE_TIMEOUT,
+                    "Public repository clone süre sınırını aştı.",
+                )
+            return remaining
+
         try:
             completed = self._run(
-                tuple(arguments), timeout_seconds, capture_output=False
+                tuple(arguments), remaining_timeout(), capture_output=False
             )
         except subprocess.TimeoutExpired as error:
             raise _ControlledAcquisitionError(
@@ -133,6 +149,51 @@ class GitSubprocessClient:
                 SourceIssueCategory.CLONE_FAILED,
                 "Public repository güvenli biçimde clone edilemedi.",
             )
+        if exact_commit:
+            fetch = (
+                self._executable,
+                "-c",
+                "credential.helper=",
+                "-c",
+                "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
+                "-c",
+                "protocol.file.allow=never",
+                "-C",
+                str(destination),
+                "fetch",
+                "--depth",
+                "1",
+                "--no-tags",
+                "origin",
+                ref,
+            )
+            checkout = (
+                self._executable,
+                "-c",
+                "credential.helper=",
+                "-c",
+                "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
+                "-C",
+                str(destination),
+                "checkout",
+                "--detach",
+                ref,
+            )
+            for command in (fetch, checkout):
+                try:
+                    completed = self._run(
+                        command, remaining_timeout(), capture_output=False
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise _ControlledAcquisitionError(
+                        SourceIssueCategory.CLONE_TIMEOUT,
+                        "Public repository clone süre sınırını aştı.",
+                    ) from error
+                if completed.returncode != 0:
+                    raise _ControlledAcquisitionError(
+                        SourceIssueCategory.CLONE_FAILED,
+                        "Public repository commit'i güvenli biçimde checkout edilemedi.",
+                    )
 
     def resolve_commit_sha(self, repository: Path, timeout_seconds: float) -> str:
         arguments = (
@@ -400,9 +461,17 @@ class SourceAcquisitionService:
         project_deadline: ProjectDeadline | None,
     ) -> ResolvedSourceTarget:
         try:
-            normalized, owner, repository = self._validate_github(
-                request.origin, request.ref
-            )
+            try:
+                normalized, owner, repository = (
+                    self.validate_public_github_repository(
+                        request.origin, request.ref
+                    )
+                )
+            except SourceAcquisitionValidationError as error:
+                raise _ControlledAcquisitionError(
+                    SourceIssueCategory.INVALID_GITHUB_URL,
+                    str(error),
+                ) from error
         except _ControlledAcquisitionError as error:
             return self._result(
                 request=request,
@@ -456,6 +525,15 @@ class SourceAcquisitionService:
             commit_sha = client.resolve_commit_sha(
                 repository_root, commit_timeout
             )
+            if (
+                request.ref is not None
+                and _COMMIT_SHA.fullmatch(request.ref) is not None
+                and commit_sha != request.ref.lower()
+            ):
+                raise _ControlledAcquisitionError(
+                    SourceIssueCategory.CLONE_FAILED,
+                    "Repository beklenen commit kimliğinde checkout edilmedi.",
+                )
             limit_issue = self._repository_limit_issue(repository_root, request.limits)
             if limit_issue is not None:
                 return self._failed_temporary_result(
@@ -554,9 +632,11 @@ class SourceAcquisitionService:
             self._cleaned_workspaces.add(workspace)
 
     @staticmethod
-    def _validate_github(origin: str, ref: str | None) -> tuple[str, str, str]:
+    def validate_public_github_repository(
+        origin: str, ref: str | None
+    ) -> tuple[str, str, str]:
         if not origin or any(ord(character) < 32 for character in origin):
-            raise _ControlledAcquisitionError(SourceIssueCategory.INVALID_GITHUB_URL, "GitHub URL geçersiz.")
+            raise SourceAcquisitionValidationError("GitHub URL geçersiz.")
         parsed = urlsplit(origin.strip())
         if (
             parsed.scheme.lower() != "https"
@@ -570,10 +650,14 @@ class SourceAcquisitionService:
             or "%" in parsed.path
             or unquote(parsed.path) != parsed.path
         ):
-            raise _ControlledAcquisitionError(SourceIssueCategory.INVALID_GITHUB_URL, "Yalnız exact github.com HTTPS repository URL kabul edilir.")
+            raise SourceAcquisitionValidationError(
+                "Yalnız exact github.com HTTPS repository URL kabul edilir."
+            )
         parts = parsed.path.strip("/").split("/")
         if len(parts) != 2:
-            raise _ControlledAcquisitionError(SourceIssueCategory.INVALID_GITHUB_URL, "GitHub URL owner/repository içermelidir.")
+            raise SourceAcquisitionValidationError(
+                "GitHub URL owner/repository içermelidir."
+            )
         owner, repository = parts
         if repository.lower().endswith(".git"):
             repository = repository[:-4]
@@ -585,9 +669,13 @@ class SourceAcquisitionService:
             or _GITHUB_COMPONENT.fullmatch(owner) is None
             or _GITHUB_COMPONENT.fullmatch(repository) is None
         ):
-            raise _ControlledAcquisitionError(SourceIssueCategory.INVALID_GITHUB_URL, "GitHub owner/repository geçersiz.")
+            raise SourceAcquisitionValidationError(
+                "GitHub owner/repository geçersiz."
+            )
         if ref is not None and not SourceAcquisitionService._valid_ref(ref):
-            raise _ControlledAcquisitionError(SourceIssueCategory.INVALID_GITHUB_URL, "Git ref güvenli allowlist politikasına uymuyor.")
+            raise SourceAcquisitionValidationError(
+                "Git ref güvenli allowlist politikasına uymuyor."
+            )
         return f"https://github.com/{owner}/{repository}", owner, repository
 
     @staticmethod

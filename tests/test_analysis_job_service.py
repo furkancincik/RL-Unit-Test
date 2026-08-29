@@ -76,6 +76,42 @@ def test_job_runs_once_and_reaches_terminal_state(tmp_path: Path) -> None:
     service.shutdown()
 
 
+def test_public_github_dynamic_policy_is_rejected_at_domain_and_service_boundaries(
+    tmp_path: Path,
+) -> None:
+    configuration = ExternalAnalysisConfiguration(output_root=tmp_path)
+    with pytest.raises(ValueError, match="yalnız statik"):
+        ExternalSourceAnalysisRequest(
+            PublicGitHubRepository("https://github.com/owner/repository"),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            configuration,
+        )
+
+    request = ExternalSourceAnalysisRequest(
+        PublicGitHubRepository("https://github.com/owner/repository"),
+        ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
+        configuration,
+    )
+    object.__setattr__(
+        request,
+        "execution_policy",
+        ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+    )
+    runner = Mock()
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+    before = service.capacity()
+
+    with pytest.raises(ValueError, match="yalnız statik"):
+        service.submit(request)
+
+    assert service.capacity() == before
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
 def test_queue_is_bounded_and_queued_job_can_be_cancelled(tmp_path: Path) -> None:
     started = Event()
     release = Event()

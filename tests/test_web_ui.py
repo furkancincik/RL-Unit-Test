@@ -42,6 +42,7 @@ def test_static_assets_are_available_and_contained(tmp_path: Path) -> None:
         javascript = client.get("/static/app.js")
         missing = client.get("/static/missing.js")
         traversal = client.get("/static/%2e%2e/README.md")
+        favicon = client.get("/favicon.ico")
 
     assert css.status_code == 200
     assert css.headers["content-type"].startswith("text/css")
@@ -49,6 +50,7 @@ def test_static_assets_are_available_and_contained(tmp_path: Path) -> None:
     assert "javascript" in javascript.headers["content-type"]
     assert missing.status_code == 404
     assert traversal.status_code == 404
+    assert favicon.status_code == 204
 
 
 def test_docs_openapi_and_security_headers_are_preserved(tmp_path: Path) -> None:
@@ -93,6 +95,7 @@ def test_web_ui_contains_separate_sources_and_accessible_controls(tmp_path: Path
     assert 'id="inline-source"' in html
     assert 'id="python-file"' in html
     assert 'id="github-url"' in html
+    assert 'id="github-ref"' in html
     assert 'id="trusted-acknowledgement"' in html
     assert 'id="artifact-list"' in html
     assert 'id="result-description"' in html

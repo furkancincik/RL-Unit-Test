@@ -109,5 +109,9 @@ def create_app(
     def web_interface() -> FileResponse:
         return FileResponse(index_file, media_type="text/html")
 
+    @app.get("/favicon.ico", include_in_schema=False, status_code=204)
+    def favicon() -> Response:
+        return Response(status_code=204)
+
     app.mount("/static", StaticFiles(directory=web_root), name="static")
     return app

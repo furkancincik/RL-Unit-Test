@@ -122,7 +122,7 @@ class InlineJobRequest(BaseModel):
     @field_validator("source_code")
     @classmethod
     def validate_nonblank_source(cls, value: str) -> str:
-        if not value.strip():
+        if not value.removeprefix("\ufeff").strip():
             raise ValueError("Inline Python source boş bırakılamaz.")
         return value
 
@@ -130,6 +130,10 @@ class InlineJobRequest(BaseModel):
 class GitHubJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     repository_url: HttpUrl = Field(description="Yalnız mevcut public GitHub acquisition politikası kabul edilir.")
+    ref: str | None = Field(
+        default=None,
+        description="Opsiyonel güvenli branch, tag veya 40 karakter commit kimliği.",
+    )
     analysis: AnalysisOptionsRequest = Field(default_factory=AnalysisOptionsRequest)
 
 
@@ -217,6 +221,7 @@ class JobResultResponse(BaseModel):
     analysis_policy: ExternalExecutionPolicy
     status: AnalysisJobStatus
     acquisition_status: str | None
+    resolved_commit_sha: str | None
     discovered_module_count: int
     selected_module_count: int
     discovered_function_count: int
