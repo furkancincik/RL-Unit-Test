@@ -16,6 +16,8 @@ from generator.derived_value_input_synthesizer import (
 
 
 _SHADOWED_SAFE_CALL = object()
+_MISSING_COLLECTION_VALUE = object()
+_COLLECTION_WITNESS_SEARCH_LIMIT = 256
 
 _RUNTIME_TYPE_ALLOWLIST: dict[str, type[Any]] = {
     "int": int,
@@ -105,6 +107,8 @@ class _VariableConstraint:
 
     forbidden_values: tuple[Any, ...] = ()
     allowed_values: tuple[Any, ...] | None = None
+    required_collection_members: tuple[Any, ...] = ()
+    forbidden_collection_members: tuple[Any, ...] = ()
     required_runtime_type_groups: tuple[tuple[str, ...], ...] = ()
     forbidden_runtime_types: tuple[str, ...] = ()
 
@@ -236,6 +240,7 @@ class PathInputGenerator:
             candidate_values=candidate_values,
             parameter_names=parameter_names,
         )
+        candidate_seed_values = dict(direct_values)
 
         handled_loop_node_ids = self._apply_loop_inputs(
             path=path,
@@ -254,6 +259,22 @@ class PathInputGenerator:
                 path=path,
                 parameter_names=parameter_names,
                 handled_loop_node_ids=handled_loop_node_ids,
+            )
+        )
+
+        loop_iterable_names = self._collect_for_loop_iterable_names(
+            path=path,
+            parameter_names=parameter_names,
+        )
+
+        restored_membership_loop_candidates = (
+            self._restore_membership_loop_candidate_values(
+                parameter_types=normalized_parameter_types,
+                constraints=constraints,
+                loop_activations=loop_activations,
+                loop_iterable_names=loop_iterable_names,
+                candidate_seed_values=candidate_seed_values,
+                direct_values=direct_values,
             )
         )
 
@@ -280,6 +301,9 @@ class PathInputGenerator:
             parameter_types=normalized_parameter_types,
             loop_activations=loop_activations,
             direct_values=direct_values,
+            restored_membership_loop_candidates=(
+                restored_membership_loop_candidates
+            ),
         )
 
         self._apply_dictionary_lookup_constraints(
@@ -308,6 +332,15 @@ class PathInputGenerator:
             raise UnsupportedInputSynthesisError(str(error)) from error
         except DerivedValueSynthesisError as error:
             raise UnreachablePathError(str(error)) from error
+
+        self._apply_collection_membership_constraints(
+            parameter_names=parameter_names,
+            parameter_types=normalized_parameter_types,
+            constraints=constraints,
+            direct_values=direct_values,
+            loop_activations=loop_activations,
+            loop_iterable_names=loop_iterable_names,
+        )
 
         self._validate_collection_alias_constraints(
             path=path,
@@ -1839,6 +1872,25 @@ class PathInputGenerator:
             return
 
         if (
+            isinstance(operator, (ast.In, ast.NotIn))
+            and not isinstance(right, ast.Name)
+        ):
+            unsupported_membership_detail = (
+                "Koleksiyon üyelik kısıtının sağ operandı doğrudan "
+                "güvenli bir koleksiyon referansı veya literal olmalıdır."
+            )
+            if not isinstance(left, ast.Name):
+                raise UnsupportedInputSynthesisError(
+                    unsupported_membership_detail
+                )
+            try:
+                self._extract_literal(right)
+            except ValueError as error:
+                raise UnsupportedInputSynthesisError(
+                    unsupported_membership_detail
+                ) from error
+
+        if (
             isinstance(left, ast.Name)
             and isinstance(right, ast.Name)
         ):
@@ -1861,11 +1913,31 @@ class PathInputGenerator:
 
         elif isinstance(right, ast.Name):
             if isinstance(operator, (ast.In, ast.NotIn)):
-                raise ValueError(
-                    "Üyelik karşılaştırmasında değişken sol tarafta "
-                    "olmalıdır: "
-                    f"{original_expression}"
+                try:
+                    member = self._extract_literal(left)
+                except ValueError as error:
+                    raise UnsupportedInputSynthesisError(
+                        "Koleksiyon üyelik kısıtının sol operandı "
+                        "güvenli bir literal olmalıdır."
+                    ) from error
+
+                effective_operator = (
+                    operator
+                    if desired_result
+                    else self._negate_operator(operator)
                 )
+                variable_name = right.id
+                constraints[variable_name] = (
+                    self._merge_collection_membership_constraint(
+                        current=constraints.get(
+                            variable_name,
+                            _VariableConstraint(),
+                        ),
+                        operator=effective_operator,
+                        member=member,
+                    )
+                )
+                return
 
             variable_name = right.id
             try:
@@ -1912,6 +1984,67 @@ class PathInputGenerator:
             operator=effective_operator,
             value=value,
         )
+
+    def _merge_collection_membership_constraint(
+        self,
+        *,
+        current: _VariableConstraint,
+        operator: ast.cmpop,
+        member: Any,
+    ) -> _VariableConstraint:
+        """Literal-sol koleksiyon üyeliğini güvenli kısıta dönüştürür."""
+        if isinstance(operator, ast.In):
+            if self._contains_equal_value(
+                current.forbidden_collection_members,
+                member,
+            ):
+                raise UnreachablePathError(
+                    "Aynı koleksiyon üyelik kısıtları çelişiyor."
+                )
+            result = replace(
+                current,
+                required_collection_members=self._append_unique_value(
+                    current.required_collection_members,
+                    member,
+                ),
+            )
+        elif isinstance(operator, ast.NotIn):
+            if self._contains_equal_value(
+                current.required_collection_members,
+                member,
+            ):
+                raise UnreachablePathError(
+                    "Aynı koleksiyon üyelik kısıtları çelişiyor."
+                )
+            result = replace(
+                current,
+                forbidden_collection_members=self._append_unique_value(
+                    current.forbidden_collection_members,
+                    member,
+                ),
+            )
+        else:
+            raise UnsupportedInputSynthesisError(
+                "Koleksiyon üyelik kısıtı yalnız in/not in ile desteklenir."
+            )
+
+        self._validate_constraint_consistency(result)
+        return result
+
+    @staticmethod
+    def _contains_equal_value(values: tuple[Any, ...], candidate: Any) -> bool:
+        """Literal değerlerde hash gerektirmeden deterministik eşitlik arar."""
+        return any(value == candidate for value in values)
+
+    @classmethod
+    def _append_unique_value(
+        cls,
+        values: tuple[Any, ...],
+        candidate: Any,
+    ) -> tuple[Any, ...]:
+        if cls._contains_equal_value(values, candidate):
+            return values
+        return (*values, candidate)
 
     def _apply_none_identity_comparison(
         self,
@@ -2227,6 +2360,51 @@ class PathInputGenerator:
         PathInputGenerator._validate_range(
             constraint
         )
+
+        if any(
+            PathInputGenerator._contains_equal_value(
+                constraint.forbidden_collection_members,
+                member,
+            )
+            for member in constraint.required_collection_members
+        ):
+            raise UnreachablePathError(
+                "Aynı koleksiyon üyelik kısıtları çelişiyor."
+            )
+
+        if (
+            constraint.has_equal_value
+            and constraint.equal_value is False
+            and constraint.required_collection_members
+        ):
+            raise UnreachablePathError(
+                "Falsy koleksiyon kısıtı gerekli üyelikle çelişiyor."
+            )
+
+        if (
+            constraint.has_equal_value
+            and not isinstance(constraint.equal_value, bool)
+            and (
+                constraint.required_collection_members
+                or constraint.forbidden_collection_members
+            )
+        ):
+            for member in constraint.required_collection_members:
+                if not PathInputGenerator._collection_contains_member(
+                    constraint.equal_value,
+                    member,
+                ):
+                    raise UnreachablePathError(
+                        "Kesin koleksiyon değeri gerekli üyeliği sağlamıyor."
+                    )
+            for member in constraint.forbidden_collection_members:
+                if PathInputGenerator._collection_contains_member(
+                    constraint.equal_value,
+                    member,
+                ):
+                    raise UnreachablePathError(
+                        "Kesin koleksiyon değeri yasak üyelikle çelişiyor."
+                    )
 
         if constraint.has_equal_value:
             equal_value = constraint.equal_value
@@ -2648,12 +2826,84 @@ class PathInputGenerator:
                     :required_length
                 ]
 
+    def _restore_membership_loop_candidate_values(
+        self,
+        *,
+        parameter_types: dict[str, str],
+        constraints: dict[str, _VariableConstraint],
+        loop_activations: list[_ForLoopActivation],
+        loop_iterable_names: set[str],
+        candidate_seed_values: dict[str, Any],
+        direct_values: dict[str, Any],
+    ) -> set[str]:
+        """Üyelik seed'ini doğrulayıp bounded loop cardinality'siyle korur."""
+        required_lengths: dict[str, int] = {}
+        for activation in loop_activations:
+            required_lengths[activation.iterable_name] = max(
+                required_lengths.get(activation.iterable_name, 0),
+                activation.iteration_index + 1,
+            )
+
+        restored: set[str] = set()
+        for parameter_name in loop_iterable_names:
+            required_length = required_lengths.get(parameter_name, 0)
+            constraint = constraints.get(parameter_name)
+            if (
+                parameter_name not in candidate_seed_values
+                or constraint is None
+                or not (
+                    constraint.required_collection_members
+                    or constraint.forbidden_collection_members
+                )
+            ):
+                continue
+
+            kind, member_type, value_type = (
+                self._collection_membership_schema(
+                    parameter_types.get(parameter_name)
+                )
+            )
+            candidate = self._copy_typed_collection(
+                value=candidate_seed_values[parameter_name],
+                kind=kind,
+                member_type=member_type,
+                value_type=value_type,
+            )
+            if len(candidate) != required_length:
+                raise UnsupportedInputSynthesisError(
+                    "Typed membership seed'i bounded loop iterasyon "
+                    "sayısıyla aynı cardinality'ye sahip olmalıdır."
+                )
+            direct_values[parameter_name] = candidate
+            restored.add(parameter_name)
+        return restored
+
+    @classmethod
+    def _collect_for_loop_iterable_names(
+        cls,
+        *,
+        path: ExecutionPath,
+        parameter_names: tuple[str, ...],
+    ) -> set[str]:
+        iterable_names: set[str] = set()
+        for step in path.loop_steps:
+            if step.node_type != "for":
+                continue
+            binding = cls._extract_for_loop_binding(
+                step=step,
+                parameter_names=parameter_names,
+            )
+            if binding is not None:
+                iterable_names.add(binding[1])
+        return iterable_names
+
     def _apply_loop_variable_constraints(
         self,
         *,
         parameter_types: dict[str, str],
         loop_activations: list[_ForLoopActivation],
         direct_values: dict[str, Any],
+        restored_membership_loop_candidates: set[str],
     ) -> None:
         """
         ``for item in items`` yapısındaki yerel döngü değişkeni
@@ -2687,6 +2937,12 @@ class PathInputGenerator:
             iterable_name,
             iteration_index,
         ), loop_constraint in element_constraints.items():
+            if (
+                loop_constraint == _VariableConstraint()
+                and iterable_name in restored_membership_loop_candidates
+            ):
+                continue
+
             existing_value = direct_values.get(iterable_name)
 
             if existing_value is None:
@@ -2699,22 +2955,13 @@ class PathInputGenerator:
                 iterable_values = list(existing_value)
                 restore_as_tuple = True
             else:
-                raise UnreachablePathError(
-                    "For döngüsü iterable değeri indekslenebilir "
-                    "bir koleksiyon olmalıdır: "
-                    f"{iterable_name}={existing_value!r}"
+                raise UnsupportedInputSynthesisError(
+                    "Sırasız loop iterable eleman kısıtı güvenli bir "
+                    "pozisyona geri yansıtılamıyor."
                 )
 
             element_type = self._extract_element_type(
                 parameter_types.get(iterable_name)
-            )
-
-            element_value = self._create_parameter_value(
-                parameter_name=(
-                    f"{iterable_name}[{iteration_index}]"
-                ),
-                constraint=loop_constraint,
-                parameter_type=element_type,
             )
 
             if iteration_index >= len(iterable_values):
@@ -2723,6 +2970,23 @@ class PathInputGenerator:
                     "koleksiyonda bulunmuyor: "
                     f"{iterable_name}[{iteration_index}]"
                 )
+
+            if (
+                iterable_name in restored_membership_loop_candidates
+                and self._value_satisfies_constraint(
+                    value=iterable_values[iteration_index],
+                    constraint=loop_constraint,
+                )
+            ):
+                continue
+
+            element_value = self._create_parameter_value(
+                parameter_name=(
+                    f"{iterable_name}[{iteration_index}]"
+                ),
+                constraint=loop_constraint,
+                parameter_type=element_type,
+            )
 
             iterable_values[iteration_index] = element_value
 
@@ -2760,6 +3024,20 @@ class PathInputGenerator:
                 current=result,
                 operator=ast.In(),
                 value=additional.allowed_values,
+            )
+
+        for member in additional.required_collection_members:
+            result = self._merge_collection_membership_constraint(
+                current=result,
+                operator=ast.In(),
+                member=member,
+            )
+
+        for member in additional.forbidden_collection_members:
+            result = self._merge_collection_membership_constraint(
+                current=result,
+                operator=ast.NotIn(),
+                member=member,
             )
 
         if additional.minimum is not None:
@@ -2806,7 +3084,12 @@ class PathInputGenerator:
                 ),
             )
 
-        if not self._runtime_type_constraint_has_candidate(result):
+        if (
+            self._has_runtime_type_constraint(result)
+            and not result.required_collection_members
+            and not result.forbidden_collection_members
+            and not self._runtime_type_constraint_has_candidate(result)
+        ):
             raise UnreachablePathError(
                 "Aynı değer için çıkarılan runtime type kısıtları çelişiyor."
             )
@@ -3868,6 +4151,14 @@ class PathInputGenerator:
         ):
             return False
 
+        for member in constraint.required_collection_members:
+            if not cls._collection_contains_member(value, member):
+                return False
+
+        for member in constraint.forbidden_collection_members:
+            if cls._collection_contains_member(value, member):
+                return False
+
         if (
             constraint.minimum is not None
             or constraint.maximum is not None
@@ -3897,6 +4188,88 @@ class PathInputGenerator:
             return False
 
         return True
+
+    @staticmethod
+    def _collection_contains_member(collection: Any, member: Any) -> bool:
+        if not isinstance(
+            collection,
+            (dict, list, tuple, set, frozenset),
+        ):
+            return False
+        if isinstance(collection, (dict, set, frozenset)):
+            try:
+                hash(member)
+            except TypeError as error:
+                raise UnsupportedInputSynthesisError(
+                    "Hash tabanlı koleksiyon için üyelik literal'i "
+                    "hashable olmalıdır."
+                ) from error
+        try:
+            return member in collection
+        except TypeError:
+            return False
+
+    def _apply_collection_membership_constraints(
+        self,
+        *,
+        parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str],
+        constraints: dict[str, _VariableConstraint],
+        direct_values: dict[str, Any],
+        loop_activations: tuple[_ForLoopActivation, ...],
+        loop_iterable_names: set[str],
+    ) -> None:
+        """Seed edilmiş koleksiyonları üyelik kısıtlarına copy-on-write uyarlar."""
+        for parameter_name in parameter_names:
+            constraint = constraints.get(parameter_name)
+            if (
+                parameter_name not in direct_values
+                or constraint is None
+                or not (
+                    constraint.required_collection_members
+                    or constraint.forbidden_collection_members
+                )
+            ):
+                continue
+            direct_values[parameter_name] = (
+                self._materialize_collection_membership_value(
+                    parameter_name=parameter_name,
+                    parameter_type=parameter_types.get(parameter_name),
+                    constraint=constraint,
+                    seed=direct_values[parameter_name],
+                    is_loop_iterable=(parameter_name in loop_iterable_names),
+                    loop_iteration_constraints=(
+                        self._loop_iteration_constraints_for_iterable(
+                            iterable_name=parameter_name,
+                            loop_activations=loop_activations,
+                        )
+                    ),
+                )
+            )
+
+    def _loop_iteration_constraints_for_iterable(
+        self,
+        *,
+        iterable_name: str,
+        loop_activations: tuple[_ForLoopActivation, ...],
+    ) -> dict[int, _VariableConstraint]:
+        constraints: dict[int, _VariableConstraint] = {}
+        for activation in loop_activations:
+            if activation.iterable_name != iterable_name:
+                continue
+            for iteration_index, constraint in (
+                activation.iteration_constraints.items()
+            ):
+                constraints[iteration_index] = (
+                    self._combine_variable_constraints(
+                        current=constraints.get(
+                            iteration_index,
+                            _VariableConstraint(),
+                        ),
+                        additional=constraint,
+                    )
+                )
+        return constraints
 
     @staticmethod
     def _has_runtime_type_constraint(
@@ -4037,6 +4410,28 @@ class PathInputGenerator:
                     f"{variable_name}={direct_value!r}"
                 )
 
+            for member in constraint.required_collection_members:
+                if not self._collection_contains_member(
+                    direct_value,
+                    member,
+                ):
+                    raise UnreachablePathError(
+                        "Doğrudan üretilen koleksiyon gerekli üyelik "
+                        "kısıtını sağlamıyor: "
+                        f"{variable_name}"
+                    )
+
+            for member in constraint.forbidden_collection_members:
+                if self._collection_contains_member(
+                    direct_value,
+                    member,
+                ):
+                    raise UnreachablePathError(
+                        "Doğrudan üretilen koleksiyon yasak üyelik "
+                        "kısıtıyla çelişiyor: "
+                        f"{variable_name}"
+                    )
+
     def _create_parameter_value(
         self,
         parameter_name: str,
@@ -4049,6 +4444,16 @@ class PathInputGenerator:
         if constraint is None:
             return self._create_default_typed_value(
                 parameter_type
+            )
+
+        if (
+            constraint.required_collection_members
+            or constraint.forbidden_collection_members
+        ):
+            return self._create_collection_membership_value(
+                parameter_name=parameter_name,
+                parameter_type=parameter_type,
+                constraint=constraint,
             )
 
         if self._has_runtime_type_constraint(constraint):
@@ -4153,6 +4558,496 @@ class PathInputGenerator:
                 )
 
         return value
+
+    def _create_collection_membership_value(
+        self,
+        *,
+        parameter_name: str,
+        parameter_type: str | None,
+        constraint: _VariableConstraint,
+    ) -> Any:
+        """Typed koleksiyon için literal-sol üyelik witness'ı üretir."""
+        return self._materialize_collection_membership_value(
+            parameter_name=parameter_name,
+            parameter_type=parameter_type,
+            constraint=constraint,
+        )
+
+    def _materialize_collection_membership_value(
+        self,
+        *,
+        parameter_name: str,
+        parameter_type: str | None,
+        constraint: _VariableConstraint,
+        seed: Any = _MISSING_COLLECTION_VALUE,
+        is_loop_iterable: bool = False,
+        loop_iteration_constraints: dict[
+            int, _VariableConstraint
+        ] | None = None,
+    ) -> Any:
+        """Typed koleksiyon witness'ını caller değerini mutate etmeden üretir."""
+        kind, member_type, value_type = self._collection_membership_schema(
+            parameter_type
+        )
+        constrained_members = (
+            *constraint.required_collection_members,
+            *constraint.forbidden_collection_members,
+        )
+        if kind in {"dict", "set", "frozenset"}:
+            for member in constrained_members:
+                try:
+                    hash(member)
+                except TypeError as error:
+                    raise UnsupportedInputSynthesisError(
+                        "Hash tabanlı koleksiyon için üyelik literal'i "
+                        "hashable olmalıdır."
+                    ) from error
+
+        for member in constrained_members:
+            if not self._literal_matches_primitive_type(
+                member,
+                member_type,
+            ):
+                raise UnsupportedInputSynthesisError(
+                    "Koleksiyon üyelik literal'i eleman türüyle uyumlu değil."
+                )
+
+        if (
+            constraint.has_equal_value
+            and not isinstance(constraint.equal_value, bool)
+        ):
+            candidate = self._copy_typed_collection(
+                value=constraint.equal_value,
+                kind=kind,
+                member_type=member_type,
+                value_type=value_type,
+            )
+            if not self._value_satisfies_constraint(
+                value=candidate,
+                constraint=constraint,
+            ):
+                raise UnreachablePathError(
+                    "Kesin koleksiyon değeri üyelik kısıtlarını sağlamıyor."
+                )
+            if is_loop_iterable:
+                original_candidate = (
+                    self._empty_collection(kind)
+                    if seed is _MISSING_COLLECTION_VALUE
+                    else self._copy_typed_collection(
+                        value=seed,
+                        kind=kind,
+                        member_type=member_type,
+                        value_type=value_type,
+                    )
+                )
+                self._validate_loop_collection_candidate(
+                    original_candidate=original_candidate,
+                    candidate=candidate,
+                    iteration_constraints=(
+                        loop_iteration_constraints or {}
+                    ),
+                )
+            return candidate
+
+        candidate = (
+            self._empty_collection(kind)
+            if seed is _MISSING_COLLECTION_VALUE
+            else self._copy_typed_collection(
+                value=seed,
+                kind=kind,
+                member_type=member_type,
+                value_type=value_type,
+            )
+        )
+        original_candidate = self._copy_typed_collection(
+            value=candidate,
+            kind=kind,
+            member_type=member_type,
+            value_type=value_type,
+        )
+
+        if self._value_satisfies_constraint(
+            value=candidate,
+            constraint=constraint,
+        ):
+            if is_loop_iterable:
+                self._validate_loop_collection_candidate(
+                    original_candidate=original_candidate,
+                    candidate=candidate,
+                    iteration_constraints=(
+                        loop_iteration_constraints or {}
+                    ),
+                )
+            return candidate
+
+        candidate = self._remove_collection_members(
+            collection=candidate,
+            kind=kind,
+            members=constraint.forbidden_collection_members,
+        )
+        for member in constraint.required_collection_members:
+            candidate = self._add_collection_member(
+                collection=candidate,
+                kind=kind,
+                member=member,
+                value_type=value_type,
+            )
+
+        desired_truthiness = (
+            constraint.equal_value
+            if constraint.has_equal_value
+            and isinstance(constraint.equal_value, bool)
+            else None
+        )
+        if desired_truthiness is False:
+            if constraint.required_collection_members:
+                raise UnreachablePathError(
+                    "Falsy koleksiyon kısıtı gerekli üyelikle çelişiyor."
+                )
+            candidate = self._empty_collection(kind)
+        elif desired_truthiness is True and not candidate:
+            sentinel = self._select_collection_membership_sentinel(
+                member_type=member_type,
+                forbidden_members=constraint.forbidden_collection_members,
+            )
+            candidate = self._add_collection_member(
+                collection=candidate,
+                kind=kind,
+                member=sentinel,
+                value_type=value_type,
+            )
+
+        if is_loop_iterable:
+            self._validate_loop_collection_candidate(
+                original_candidate=original_candidate,
+                candidate=candidate,
+                iteration_constraints=loop_iteration_constraints or {},
+            )
+
+        if not self._value_satisfies_constraint(
+            value=candidate,
+            constraint=constraint,
+        ):
+            raise UnreachablePathError(
+                "Typed koleksiyon üyelik kısıtlarını birlikte sağlayan "
+                f"input üretilemedi: {parameter_name}"
+            )
+        return candidate
+
+    @classmethod
+    def _validate_loop_collection_candidate(
+        cls,
+        *,
+        original_candidate: Any,
+        candidate: Any,
+        iteration_constraints: dict[int, _VariableConstraint],
+    ) -> None:
+        if len(candidate) != len(original_candidate):
+            raise UnsupportedInputSynthesisError(
+                "Bounded loop iterable üyelik kısıtı mevcut iterasyon "
+                "sayısını değiştirmeden sentezlenemedi."
+            )
+
+        constrained_iterations = {
+            index: constraint
+            for index, constraint in iteration_constraints.items()
+            if constraint != _VariableConstraint()
+        }
+        if not constrained_iterations:
+            return
+        if not isinstance(candidate, (list, tuple)):
+            raise UnsupportedInputSynthesisError(
+                "Sırasız loop iterable üyelik mutation'ı iterasyon "
+                "kısıtlarıyla güvenli biçimde doğrulanamıyor."
+            )
+        for index, constraint in constrained_iterations.items():
+            if (
+                index >= len(candidate)
+                or not cls._value_satisfies_constraint(
+                    value=candidate[index],
+                    constraint=constraint,
+                )
+            ):
+                raise UnsupportedInputSynthesisError(
+                    "Loop membership mutation'ı daha önce sağlanan "
+                    "iterasyon kısıtını bozuyor."
+                )
+
+    @staticmethod
+    def _collection_membership_kind(
+        parameter_type: str | None,
+    ) -> str | None:
+        normalized = (parameter_type or "").replace(" ", "")
+        prefixes = {
+            "dict": ("dict[", "typing.Dict["),
+            "list": ("list[", "typing.List["),
+            "tuple": ("tuple[", "typing.Tuple["),
+            "set": ("set[", "typing.Set["),
+            "frozenset": ("frozenset[", "typing.FrozenSet["),
+        }
+        for kind, typed_prefixes in prefixes.items():
+            if normalized == kind or normalized.startswith(typed_prefixes):
+                return kind
+        return None
+
+    @classmethod
+    def _collection_membership_schema(
+        cls,
+        parameter_type: str | None,
+    ) -> tuple[str, str, str | None]:
+        kind = cls._collection_membership_kind(parameter_type)
+        if kind is None:
+            raise UnsupportedInputSynthesisError(
+                "Literal-sol üyelik yalnız açıkça typed güvenli "
+                "koleksiyon parametrelerinde sentezlenebilir."
+            )
+        arguments = cls._generic_type_arguments(parameter_type)
+        if kind == "dict":
+            if len(arguments) != 2:
+                raise UnsupportedInputSynthesisError(
+                    "Dict üyelik sentezi key/value türü gerektirir."
+                )
+            member_type, value_type = arguments
+            if not cls._is_supported_primitive_type(member_type):
+                raise UnsupportedInputSynthesisError(
+                    "Dict üyelik sentezi primitive key türü gerektirir."
+                )
+            if not cls._is_supported_primitive_type(value_type):
+                raise UnsupportedInputSynthesisError(
+                    "Dict üyelik sentezi primitive value türü gerektirir."
+                )
+            return kind, member_type, value_type
+        if kind == "tuple":
+            if len(arguments) != 2 or arguments[1] != "...":
+                raise UnsupportedInputSynthesisError(
+                    "Üyelik sentezi yalnız homojen tuple[T, ...] için desteklenir."
+                )
+            member_type = arguments[0]
+            if not cls._is_supported_primitive_type(member_type):
+                raise UnsupportedInputSynthesisError(
+                    "Tuple üyelik sentezi primitive eleman türü gerektirir."
+                )
+            return kind, member_type, None
+        if len(arguments) != 1:
+            raise UnsupportedInputSynthesisError(
+                "Koleksiyon üyelik sentezi tek bir eleman türü gerektirir."
+            )
+        member_type = arguments[0]
+        if not cls._is_supported_primitive_type(member_type):
+            raise UnsupportedInputSynthesisError(
+                "Koleksiyon üyelik sentezi primitive eleman türü gerektirir."
+            )
+        return kind, member_type, None
+
+    @staticmethod
+    def _generic_type_arguments(parameter_type: str | None) -> tuple[str, ...]:
+        normalized = (parameter_type or "").replace(" ", "")
+        if "[" not in normalized or not normalized.endswith("]"):
+            return ()
+        inner = normalized.split("[", maxsplit=1)[1][:-1]
+        arguments: list[str] = []
+        start = 0
+        depth = 0
+        for index, character in enumerate(inner):
+            if character in "[({":
+                depth += 1
+            elif character in "])}":
+                depth -= 1
+            elif character == "," and depth == 0:
+                arguments.append(inner[start:index])
+                start = index + 1
+        arguments.append(inner[start:])
+        return tuple(arguments)
+
+    @staticmethod
+    def _is_supported_primitive_type(type_name: str | None) -> bool:
+        return type_name in {
+            "int", "builtins.int",
+            "float", "builtins.float",
+            "str", "builtins.str",
+            "bool", "builtins.bool",
+        }
+
+    @classmethod
+    def _literal_matches_primitive_type(
+        cls,
+        value: Any,
+        type_name: str,
+    ) -> bool:
+        if not cls._is_supported_primitive_type(type_name):
+            return False
+        normalized = type_name.removeprefix("builtins.")
+        if normalized == "bool":
+            return type(value) is bool
+        if normalized == "int":
+            return type(value) is int
+        if normalized == "float":
+            return type(value) in {int, float}
+        return type(value) is str
+
+    @staticmethod
+    def _empty_collection(kind: str) -> Any:
+        if kind == "dict":
+            return {}
+        if kind == "list":
+            return []
+        if kind == "tuple":
+            return ()
+        if kind == "set":
+            return set()
+        return frozenset()
+
+    @classmethod
+    def _copy_typed_collection(
+        cls,
+        *,
+        value: Any,
+        kind: str,
+        member_type: str,
+        value_type: str | None,
+    ) -> Any:
+        expected_types = {
+            "dict": dict,
+            "list": list,
+            "tuple": tuple,
+            "set": set,
+            "frozenset": frozenset,
+        }
+        expected_type = expected_types[kind]
+        if type(value) is not expected_type:
+            raise UnsupportedInputSynthesisError(
+                "Seed edilen üyelik değeri typed koleksiyon türüyle uyumlu değil."
+            )
+
+        members = value.keys() if kind == "dict" else value
+        if any(
+            not cls._literal_matches_primitive_type(member, member_type)
+            for member in members
+        ):
+            raise UnsupportedInputSynthesisError(
+                "Seed edilen typed koleksiyon eleman şemasıyla uyumlu değil."
+            )
+
+        if kind == "dict" and (
+            value_type is None
+            or any(
+                not cls._literal_matches_primitive_type(item, value_type)
+                for item in value.values()
+            )
+        ):
+            raise UnsupportedInputSynthesisError(
+                "Seed edilen typed dict value şemasıyla uyumlu değil."
+            )
+        if kind == "dict":
+            return dict(value)
+        if kind == "list":
+            return list(value)
+        if kind == "tuple":
+            return tuple(value)
+        if kind == "set":
+            return set(value)
+        return frozenset(value)
+
+    @classmethod
+    def _remove_collection_members(
+        cls,
+        *,
+        collection: Any,
+        kind: str,
+        members: tuple[Any, ...],
+    ) -> Any:
+        if kind == "dict":
+            result = dict(collection)
+            for member in members:
+                result.pop(member, None)
+            return result
+        if kind in {"list", "tuple"}:
+            retained = [
+                value
+                for value in collection
+                if not cls._contains_equal_value(members, value)
+            ]
+            return retained if kind == "list" else tuple(retained)
+        result = set(collection)
+        for member in members:
+            result.discard(member)
+        return result if kind == "set" else frozenset(result)
+
+    @classmethod
+    def _add_collection_member(
+        cls,
+        *,
+        collection: Any,
+        kind: str,
+        member: Any,
+        value_type: str | None,
+    ) -> Any:
+        if cls._collection_contains_member(collection, member):
+            return collection
+        if kind == "dict":
+            result = dict(collection)
+            result[member] = cls._create_default_typed_value(value_type)
+            return result
+        if kind == "list":
+            return [*collection, member]
+        if kind == "tuple":
+            return (*collection, member)
+        result = set(collection)
+        result.add(member)
+        return result if kind == "set" else frozenset(result)
+
+    @classmethod
+    def _select_collection_membership_sentinel(
+        cls,
+        *,
+        member_type: str,
+        forbidden_members: tuple[Any, ...],
+    ) -> Any:
+        normalized = member_type.removeprefix("builtins.")
+        if normalized == "bool":
+            for candidate in (False, True):
+                if not cls._contains_equal_value(forbidden_members, candidate):
+                    return candidate
+            raise UnreachablePathError(
+                "Kapalı bool üye domain'inde izin verilen değer kalmadı."
+            )
+
+        if normalized not in {"str", "float", "int"}:
+            raise UnsupportedInputSynthesisError(
+                "Koleksiyon truthiness witness'ı primitive eleman türü gerektirir."
+            )
+
+        attempt_count = min(
+            len(forbidden_members) + 1,
+            _COLLECTION_WITNESS_SEARCH_LIMIT,
+        )
+        for index in range(attempt_count):
+            if normalized == "str":
+                candidate = (
+                    "__generated_member__"
+                    if index == 0
+                    else f"__generated_member_{index + 1}__"
+                )
+            else:
+                if index == 0:
+                    integer_candidate = 0
+                else:
+                    magnitude = (index + 1) // 2
+                    integer_candidate = (
+                        magnitude if index % 2 else -magnitude
+                    )
+                candidate = (
+                    float(integer_candidate)
+                    if normalized == "float"
+                    else integer_candidate
+                )
+            if not cls._contains_equal_value(forbidden_members, candidate):
+                return candidate
+
+        raise UnsupportedInputSynthesisError(
+            "Geniş primitive domain için güvenli üyelik witness'ı "
+            "bounded arama bütçesi içinde üretilemedi."
+        )
 
     def _create_runtime_type_value(
         self,

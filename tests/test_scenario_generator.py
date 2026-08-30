@@ -581,6 +581,49 @@ def test_generate_isolates_unsupported_input_synthesis_rejection() -> None:
     assert "iki parametre" in rejection.message
 
 
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "'x' in options.keys()",
+        "'x' not in options.keys()",
+        "'x' in options.view",
+        "'x' in options[0]",
+        "'x' in make_options()",
+        "member in options.keys()",
+    ),
+)
+def test_generate_isolates_unsupported_membership_rhs(
+    expression: str,
+) -> None:
+    path = ExecutionPath(
+        node_ids=[1, 2, 3, 4],
+        edge_labels=[None, "True", None],
+        node_labels=["START", expression, "return True", "END"],
+        node_types=["start", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4],
+    )
+    generator = ScenarioGenerator()
+
+    scenarios = generator.generate(
+        function_name="inspect",
+        paths=[path],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("options",),
+        parameter_types={"options": "list[str]"},
+    )
+
+    assert scenarios == []
+    assert generator.skipped_path_indices == (1,)
+    rejection = generator.rejections[0]
+    assert (
+        rejection.category
+        is ScenarioRejectionCategory.UNSUPPORTED_INPUT_SYNTHESIS
+    )
+    assert rejection.stage is ScenarioRejectionStage.PATH_INPUT_GENERATION
+    assert rejection.exception_type == "UnsupportedInputSynthesisError"
+    assert expression not in rejection.message
+
+
 def test_real_cfg_tuple_handler_alias_generates_concrete_exception_scenario(
     tmp_path: Path,
 ) -> None:

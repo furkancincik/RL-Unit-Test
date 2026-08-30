@@ -2059,6 +2059,501 @@ def test_generate_combines_string_equality_and_membership() -> None:
     assert result.keyword_argument_dict["coupon"] == "SAVE5"
 
 
+@pytest.mark.parametrize(
+    (
+        "parameter_type",
+        "expected_type",
+        "member",
+        "parameter_name",
+    ),
+    (
+        ("dict[str, bool]", dict, "flag", "settings"),
+        ("list[int]", list, 7, "codes"),
+        ("tuple[str, ...]", tuple, "token", "labels"),
+        ("set[float]", set, 2.5, "measurements"),
+    ),
+)
+def test_generate_supports_literal_membership_in_typed_parameter_collection(
+    parameter_type: str,
+    expected_type: type[object],
+    member: object,
+    parameter_name: str,
+) -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            f"{member!r} in {parameter_name}",
+            "return True",
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=(parameter_name,),
+        parameter_types={parameter_name: parameter_type},
+    )
+
+    collection = result.keyword_argument_dict[parameter_name]
+    assert type(collection) is expected_type
+    assert member in collection
+
+
+def test_generate_supports_false_literal_membership_in_dict_parameter() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "'feature' in options",
+            "return False",
+            "END",
+        ],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "False", None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("options",),
+        parameter_types={"options": "dict[str, bool]"},
+    )
+
+    assert "feature" not in result.keyword_argument_dict["options"]
+
+
+def test_generate_rejects_conflicting_literal_collection_membership() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "'feature' in options",
+            "'feature' not in options",
+            "return True",
+            "END",
+        ],
+        node_types=["start", "if", "if", "return", "end"],
+        edge_labels=[None, "True", "True", None],
+    )
+
+    with pytest.raises(UnreachablePathError, match="koleksiyon üyelik"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("options",),
+            parameter_types={"options": "dict[str, bool]"},
+        )
+
+
+def test_generate_materializes_membership_without_mutating_candidate_seed() -> None:
+    candidate_seed: dict[str, bool] = {}
+    path = create_execution_path(
+        node_labels=["START", "'enabled' in flags", "return True", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("flags",),
+        parameter_types={"flags": "dict[str, bool]"},
+        candidate_values={"flags": candidate_seed},
+    )
+
+    assert result.keyword_argument_dict["flags"] == {"enabled": False}
+    assert candidate_seed == {}
+
+
+def test_generate_combines_collection_truthiness_and_membership() -> None:
+    path = create_execution_path(
+        node_labels=[
+            "START",
+            "labels",
+            "'ready' in labels",
+            "return True",
+            "END",
+        ],
+        node_types=["start", "if", "if", "return", "end"],
+        edge_labels=[None, "True", "True", None],
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("labels",),
+        parameter_types={"labels": "list[str]"},
+    )
+
+    assert result.keyword_argument_dict["labels"] == ["ready"]
+
+
+def test_generate_rejects_membership_literal_incompatible_with_element_type() -> None:
+    path = create_execution_path(
+        node_labels=["START", "42 in names", "return True", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="eleman türü"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("names",),
+            parameter_types={"names": "list[str]"},
+        )
+
+
+def test_generate_rejects_unhashable_dict_membership_literal() -> None:
+    path = create_execution_path(
+        node_labels=["START", "[1] not in mapping", "return True", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="hashable"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("mapping",),
+            parameter_types={"mapping": "dict[int, str]"},
+        )
+
+
+def test_generate_rejects_membership_for_fixed_heterogeneous_tuple() -> None:
+    path = create_execution_path(
+        node_labels=["START", "1 in pair", "return True", "END"],
+        node_types=["start", "if", "return", "end"],
+        edge_labels=[None, "True", None],
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="tuple"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("pair",),
+            parameter_types={"pair": "tuple[int, str]"},
+        )
+
+
+def _create_typed_collection_constraint_path(
+    *expressions: str,
+) -> ExecutionPath:
+    return create_execution_path(
+        node_labels=["START", *expressions, "return True", "END"],
+        node_types=["start", *("if" for _ in expressions), "return", "end"],
+        edge_labels=[None, *("True" for _ in expressions), None],
+    )
+
+
+@pytest.mark.parametrize(
+    ("parameter_type", "seed", "condition"),
+    (
+        ("list[str]", [1], "'ok' in values"),
+        ("list[int]", [True], "2 in values"),
+        ("tuple[str, ...]", ("ok", 1), "'ok' in values"),
+        ("set[int]", {True}, "2 in values"),
+        ("frozenset[int]", frozenset({True}), "2 in values"),
+        ("dict[str, int]", {1: 2}, "'required' in values"),
+        ("dict[str, int]", {"required": "invalid"}, "'required' in values"),
+    ),
+)
+def test_generate_rejects_typed_collection_seed_with_incompatible_contents(
+    parameter_type: str,
+    seed: object,
+    condition: str,
+) -> None:
+    path = _create_typed_collection_constraint_path(condition)
+    original_seed = (
+        seed.copy()
+        if isinstance(seed, (dict, list, set))
+        else seed
+    )
+
+    with pytest.raises(
+        UnsupportedInputSynthesisError,
+        match="seed|Seed|typed|schema|şema|tür",
+    ):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("values",),
+            parameter_types={"values": parameter_type},
+            candidate_values={"values": seed},
+        )
+
+    assert seed == original_seed
+
+
+def test_generate_preserves_valid_typed_collection_seed_by_copy() -> None:
+    seed = ["present"]
+    path = _create_typed_collection_constraint_path("'present' in values")
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[str]"},
+        candidate_values={"values": seed},
+    ).keyword_argument_dict["values"]
+
+    assert result == seed
+    assert result is not seed
+
+
+def test_generate_derives_string_witness_after_legacy_sentinels_are_forbidden() -> None:
+    forbidden = ("__generated_member__", "__generated_member_2__")
+    path = _create_typed_collection_constraint_path(
+        "values",
+        *(f"{member!r} not in values" for member in forbidden),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[str]"},
+    ).keyword_argument_dict["values"]
+
+    assert result
+    assert all(member not in result for member in forbidden)
+
+
+def test_generate_derives_integer_witness_after_initial_candidates_are_forbidden() -> None:
+    forbidden = (0, 1, -1, 2, -2)
+    path = _create_typed_collection_constraint_path(
+        "values",
+        *(f"{member!r} not in values" for member in forbidden),
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[int]"},
+    ).keyword_argument_dict["values"]
+
+    assert result
+    assert all(member not in result for member in forbidden)
+
+
+@pytest.mark.parametrize("parameter_type", ("list[bool]", "set[bool]"))
+def test_generate_proves_exhaustion_only_for_closed_bool_domain(
+    parameter_type: str,
+) -> None:
+    path = _create_typed_collection_constraint_path(
+        "values",
+        "False not in values",
+        "True not in values",
+    )
+
+    with pytest.raises(UnreachablePathError, match="sentinel|domain|üye"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("values",),
+            parameter_types={"values": parameter_type},
+        )
+
+
+def test_generate_classifies_unknown_membership_domain_as_unsupported() -> None:
+    path = _create_typed_collection_constraint_path(
+        "values",
+        "b'forbidden' not in values",
+    )
+
+    with pytest.raises(UnsupportedInputSynthesisError):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("values",),
+            parameter_types={"values": "list[bytes]"},
+        )
+
+
+def test_generate_membership_witness_is_deterministic_with_bounded_search() -> None:
+    forbidden = tuple(f"blocked-{index}" for index in range(32))
+    path = _create_typed_collection_constraint_path(
+        "values",
+        *(f"{member!r} not in values" for member in forbidden),
+    )
+    arguments = {
+        "path": path,
+        "parameter_names": ("values",),
+        "parameter_types": {"values": "list[str]"},
+    }
+
+    first = PathInputGenerator().generate(**arguments).keyword_argument_dict["values"]
+    second = PathInputGenerator().generate(**arguments).keyword_argument_dict["values"]
+
+    assert first == second
+    assert first
+    assert all(member not in first for member in forbidden)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "'x' in options.keys()",
+        "'x' not in options.keys()",
+        "'x' in options.view",
+        "'x' in options[0]",
+        "'x' in make_options()",
+        "'x' in (options + [])",
+        "'x' in [item for item in options]",
+        "member in options.keys()",
+    ),
+)
+def test_generate_normalizes_unsupported_membership_rhs(
+    expression: str,
+) -> None:
+    path = _create_typed_collection_constraint_path(expression)
+
+    with pytest.raises(UnsupportedInputSynthesisError) as error_info:
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("options",),
+            parameter_types={"options": "list[str]"},
+        )
+
+    assert expression not in str(error_info.value)
+
+
+def _create_single_iteration_membership_path(expression: str) -> ExecutionPath:
+    return ExecutionPath(
+        node_ids=[1, 2, 3, 2, 4, 5],
+        edge_labels=[None, "Iterate", "True", "Complete", None],
+        node_labels=[
+            "START",
+            "entry in values",
+            expression,
+            "entry in values",
+            "return True",
+            "END",
+        ],
+        node_types=["start", "for", "if", "for", "return", "end"],
+        line_numbers=[1, 2, 3, 2, 4, 5],
+    )
+
+
+@pytest.mark.parametrize(
+    ("parameter_type", "seed"),
+    (
+        ("list[str]", ["present"]),
+        ("tuple[str, ...]", ("present",)),
+        ("set[str]", {"present"}),
+        ("frozenset[str]", frozenset({"present"})),
+        ("dict[str, int]", {"present": 1}),
+    ),
+)
+def test_generate_preserves_single_iteration_seed_that_already_has_member(
+    parameter_type: str,
+    seed: object,
+) -> None:
+    path = _create_single_iteration_membership_path("'present' in values")
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": parameter_type},
+        candidate_values={"values": seed},
+    ).keyword_argument_dict["values"]
+
+    assert result == seed
+    assert len(result) == 1
+    if isinstance(seed, (dict, list, set)):
+        assert result is not seed
+
+
+def test_generate_preserves_single_iteration_seed_that_already_excludes_member() -> None:
+    seed = ["other"]
+    path = _create_single_iteration_membership_path("'absent' not in values")
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[str]"},
+        candidate_values={"values": seed},
+    ).keyword_argument_dict["values"]
+
+    assert result == seed
+    assert len(result) == 1
+    assert result is not seed
+
+
+def test_generate_removes_forbidden_member_copy_on_write_when_cardinality_is_free() -> None:
+    seed = ["forbidden", "retained"]
+    path = _create_typed_collection_constraint_path("'forbidden' not in values")
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[str]"},
+        candidate_values={"values": seed},
+    ).keyword_argument_dict["values"]
+
+    assert result == ["retained"]
+    assert seed == ["forbidden", "retained"]
+
+
+def test_generate_rejects_loop_membership_mutation_that_changes_cardinality() -> None:
+    seed = ["other"]
+    path = _create_single_iteration_membership_path("'required' in values")
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="loop|döngü"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("values",),
+            parameter_types={"values": "list[str]"},
+            candidate_values={"values": seed},
+        )
+
+    assert seed == ["other"]
+
+
+def test_generate_allows_loop_membership_replacement_at_same_cardinality() -> None:
+    seed = ["forbidden"]
+    path = _create_single_iteration_membership_path(
+        "'forbidden' not in values and 'required' in values"
+    )
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[str]"},
+        candidate_values={"values": seed},
+    ).keyword_argument_dict["values"]
+
+    assert result == ["required"]
+    assert seed == ["forbidden"]
+
+
+def _create_zero_iteration_membership_path(expression: str) -> ExecutionPath:
+    return ExecutionPath(
+        node_ids=[1, 2, 3, 4, 5],
+        edge_labels=[None, "Complete", "True", None],
+        node_labels=[
+            "START",
+            "entry in values",
+            expression,
+            "return True",
+            "END",
+        ],
+        node_types=["start", "for", "if", "return", "end"],
+        line_numbers=[1, 2, 3, 4, 5],
+    )
+
+
+def test_generate_rejects_membership_that_would_change_zero_iteration_loop() -> None:
+    path = _create_zero_iteration_membership_path("'required' in values")
+
+    with pytest.raises(UnsupportedInputSynthesisError, match="loop|döngü"):
+        PathInputGenerator().generate(
+            path=path,
+            parameter_names=("values",),
+            parameter_types={"values": "list[str]"},
+        )
+
+
+def test_generate_preserves_zero_iteration_for_satisfied_not_in_constraint() -> None:
+    path = _create_zero_iteration_membership_path("'absent' not in values")
+
+    result = PathInputGenerator().generate(
+        path=path,
+        parameter_names=("values",),
+        parameter_types={"values": "list[str]"},
+    ).keyword_argument_dict["values"]
+
+    assert result == []
+
+
 def test_generate_skips_zero_division_path_with_local_denominator() -> None:
     generator = PathInputGenerator()
 
