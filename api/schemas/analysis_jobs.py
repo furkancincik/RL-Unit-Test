@@ -134,6 +134,13 @@ class GitHubJobRequest(BaseModel):
         default=None,
         description="Opsiyonel güvenli branch, tag veya 40 karakter commit kimliği.",
     )
+    discovery_job_id: str | None = Field(
+        default=None,
+        min_length=32,
+        max_length=32,
+        pattern=r"^[0-9a-f]{32}$",
+        description="Pinned trusted dynamic için authoritative static job referansı.",
+    )
     analysis: AnalysisOptionsRequest = Field(default_factory=AnalysisOptionsRequest)
 
 

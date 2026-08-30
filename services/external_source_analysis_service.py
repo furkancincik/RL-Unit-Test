@@ -32,6 +32,7 @@ from models.external_source_analysis_result import (
     LocalProjectDirectory,
     PublicGitHubRepository,
     UploadedPythonFile,
+    validate_external_source_execution_policy,
 )
 from models.source_acquisition_result import (
     DiscoveredPythonModule,
@@ -106,6 +107,12 @@ class ExternalSourceAnalysisService:
     def run(self, request: ExternalSourceAnalysisRequest) -> ExternalSourceAnalysisResult:
         if not isinstance(request, ExternalSourceAnalysisRequest):
             raise TypeError("request ExternalSourceAnalysisRequest olmalıdır.")
+        validate_external_source_execution_policy(
+            request.source,
+            request.execution_policy,
+            request.configuration,
+            request.pinned_github_authorization,
+        )
         started = self._clock()
         deadline = ProjectDeadline(
             timeout_seconds=request.configuration.project_timeout_seconds,
@@ -124,10 +131,39 @@ class ExternalSourceAnalysisService:
             )
         temporary_workspace: Path | None = None
         acquired: ResolvedSourceTarget | None = None
+        cleanup_attempted = False
+        cleanup_status = ExternalWorkspaceCleanupStatus.NOT_REQUIRED
+
+        def cleanup_once(
+            current_acquired: ResolvedSourceTarget | None,
+            current_workspace: Path | None,
+        ) -> ExternalWorkspaceCleanupStatus:
+            nonlocal cleanup_attempted, cleanup_status
+            if cleanup_attempted:
+                return cleanup_status
+            cleanup_attempted = True
+            cleanup_status = self._cleanup(current_acquired, current_workspace)
+            return cleanup_status
+
+        def finalize(
+            result: ExternalSourceAnalysisResult,
+            *,
+            acquired: ResolvedSourceTarget | None,
+            temporary_workspace: Path | None,
+            deadline: ProjectDeadline | None = None,
+        ) -> ExternalSourceAnalysisResult:
+            return self._finalize(
+                result,
+                acquired=acquired,
+                temporary_workspace=temporary_workspace,
+                deadline=deadline,
+                cleanup=cleanup_once,
+            )
+
         try:
             validation_issue = self._validate_payload(request)
             if validation_issue is not None:
-                return self._finalize(
+                return finalize(
                     self._failed_result(
                         request, output_root, report_path, started, validation_issue
                     ),
@@ -137,7 +173,7 @@ class ExternalSourceAnalysisService:
                 )
             last_completed_stage = "REQUEST_VALIDATION"
             if deadline.exceeded():
-                return self._finalize(
+                return finalize(
                     self._deadline_result(
                         request,
                         output_root,
@@ -196,7 +232,7 @@ class ExternalSourceAnalysisService:
 
             last_completed_stage = "SOURCE_PREPARATION"
             if deadline.exceeded():
-                return self._finalize(
+                return finalize(
                     self._deadline_result(
                         request,
                         output_root,
@@ -217,7 +253,7 @@ class ExternalSourceAnalysisService:
                 ),
             )
             if deadline.exceeded():
-                return self._finalize(
+                return finalize(
                     self._deadline_result(
                         request,
                         output_root,
@@ -237,7 +273,7 @@ class ExternalSourceAnalysisService:
             last_completed_stage = "SOURCE_ACQUISITION"
             if not acquired.is_available:
                 if deadline.exceeded():
-                    return self._finalize(
+                    return finalize(
                         self._deadline_result(
                             request,
                             output_root,
@@ -253,7 +289,7 @@ class ExternalSourceAnalysisService:
                     )
                 categories = tuple(issue.category.value for issue in acquired.issues)
                 issue = categories[0] if categories else "SOURCE_ACQUISITION_FAILED"
-                return self._finalize(
+                return finalize(
                     self._failed_result(
                         request,
                         output_root,
@@ -278,7 +314,7 @@ class ExternalSourceAnalysisService:
                     inventories,
                     deadline,
                 )
-                return self._finalize(
+                return finalize(
                     self._deadline_result(
                         request,
                         output_root,
@@ -307,7 +343,7 @@ class ExternalSourceAnalysisService:
                     target_inventories,
                     deadline,
                 )
-                return self._finalize(
+                return finalize(
                     self._deadline_result(
                         request,
                         output_root,
@@ -329,7 +365,7 @@ class ExternalSourceAnalysisService:
                 target_inventories,
             )
             if selection_issue is not None:
-                return self._finalize(
+                return finalize(
                     self._failed_result(
                         request,
                         output_root,
@@ -352,7 +388,7 @@ class ExternalSourceAnalysisService:
             )
             last_completed_stage = "FUNCTION_ANALYSIS"
             if deadline.exceeded():
-                return self._finalize(
+                return finalize(
                     self._deadline_result(
                         request,
                         output_root,
@@ -416,14 +452,14 @@ class ExternalSourceAnalysisService:
                     "PROJECT_COVERAGE" if deadline.exceeded() else None
                 ),
             )
-            return self._finalize(
+            return finalize(
                 result,
                 acquired=acquired,
                 temporary_workspace=temporary_workspace,
                 deadline=deadline,
             )
         finally:
-            self._cleanup(acquired, temporary_workspace)
+            cleanup_once(acquired, temporary_workspace)
 
     def _analyze_modules(
         self,
@@ -1196,11 +1232,15 @@ class ExternalSourceAnalysisService:
         acquired: ResolvedSourceTarget | None,
         temporary_workspace: Path | None,
         deadline: ProjectDeadline | None = None,
+        cleanup: Callable[
+            [ResolvedSourceTarget | None, Path | None],
+            ExternalWorkspaceCleanupStatus,
+        ] | None = None,
     ) -> ExternalSourceAnalysisResult:
         # Rapor önce persistent output'a atomik yazılır; cleanup sonucu aynı
         # dosyaya ikinci bir atomik metadata güncellemesiyle yansıtılır.
         self._write_result(result)
-        cleanup_status = self._cleanup(acquired, temporary_workspace)
+        cleanup_status = (cleanup or self._cleanup)(acquired, temporary_workspace)
         issues = result.issues
         if cleanup_status is ExternalWorkspaceCleanupStatus.FAILED:
             issues = tuple(dict.fromkeys((*issues, "CLEANUP_FAILED")))

@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -115,4 +116,58 @@ def test_artifact_id_cannot_cross_job_boundary(tmp_path: Path) -> None:
     with TestClient(create_app(job_service=service)) as client:
         response = client.get(f"/api/v1/jobs/{second.job_id}/artifacts/{artifact_id}")
     assert response.status_code == 404
+    service.shutdown()
+
+
+def test_active_artifact_download_lease_prevents_retention_purge(
+    tmp_path: Path,
+) -> None:
+    now = [datetime(2026, 1, 1, tzinfo=UTC)]
+    runner = Mock()
+    runner.run.side_effect = _artifact_result
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(
+            output_root=tmp_path,
+            retention_seconds=10,
+        ),
+        runner_factory=Mock(return_value=runner),
+        clock=lambda: now[0],
+    )
+    job = service.submit(_request(tmp_path))
+    service.wait(job.job_id, timeout=5)
+    artifact = service.list_artifacts(job.job_id)[0]
+    metadata, path = service.acquire_artifact(job.job_id, artifact.artifact_id)
+    now[0] += timedelta(seconds=11)
+
+    assert metadata.artifact_id == artifact.artifact_id
+    assert path.is_file()
+    assert service.purge_expired() == 0
+    assert path.is_file()
+
+    service.release_artifact(job.job_id)
+    assert service.purge_expired() == 1
+    assert not path.exists()
+    service.shutdown()
+
+
+def test_artifact_response_releases_download_lease_after_send(
+    tmp_path: Path,
+) -> None:
+    runner = Mock()
+    runner.run.side_effect = _artifact_result
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+    job = service.submit(_request(tmp_path))
+    service.wait(job.job_id, timeout=5)
+    artifact = service.list_artifacts(job.job_id)[0]
+
+    with TestClient(create_app(job_service=service)) as client:
+        response = client.get(
+            f"/api/v1/jobs/{job.job_id}/artifacts/{artifact.artifact_id}"
+        )
+
+    assert response.status_code == 200
+    assert service._entry(job.job_id).artifact_leases == 0
     service.shutdown()

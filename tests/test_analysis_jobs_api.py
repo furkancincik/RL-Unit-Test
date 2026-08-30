@@ -1,13 +1,19 @@
+import asyncio
 import codecs
+import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from threading import Event
 from unittest.mock import Mock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.datastructures import FormData, UploadFile as StarletteUploadFile
 
 from api.app import create_app
+from api.routes.analysis_jobs import submit_upload
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalExecutionPolicy,
@@ -45,7 +51,7 @@ def _runner_result(request) -> ExternalSourceAnalysisResult:
         source_kind=request.source.source_kind,
         execution_policy=request.execution_policy,
         status=ExternalAnalysisStatus.STATIC_COMPLETED,
-        acquisition_status="READY",
+        acquisition_status="COMPLETED",
         repository_name=None,
         github_owner=None,
         github_repository=None,
@@ -57,6 +63,47 @@ def _runner_result(request) -> ExternalSourceAnalysisResult:
         discovered_module_count=1,
         selected_module_count=1,
         module_results=(),
+        output_root=output,
+        report_path=report,
+        duration_seconds=0.1,
+        cleanup_status=ExternalWorkspaceCleanupStatus.COMPLETED,
+        issues=(),
+    )
+
+
+def _github_static_inventory_result(
+    request,
+    *,
+    status: ExternalAnalysisStatus = ExternalAnalysisStatus.STATIC_COMPLETED,
+    resolved_sha: str = "b" * 40,
+) -> ExternalSourceAnalysisResult:
+    output = request.configuration.output_root
+    output.mkdir(parents=True, exist_ok=True)
+    report = output / "external_source_analysis_report.json"
+    report.write_text("{}", encoding="utf-8")
+    module = ExternalModuleAnalysisResult(
+        relative_path="package/worker.py",
+        module_name="package.worker",
+        status=ExternalModuleStatus.STATIC_ONLY,
+        discovered_function_count=2,
+        project_result=None,
+        issue_category=None,
+        issue_message=None,
+        artifact_paths=(),
+        discovered_function_names=("target", "Helper.run"),
+    )
+    return ExternalSourceAnalysisResult(
+        source_kind=request.source.source_kind,
+        execution_policy=request.execution_policy,
+        status=status,
+        acquisition_status="COMPLETED",
+        repository_name="repository",
+        github_owner="owner",
+        github_repository="repository",
+        resolved_commit_sha=resolved_sha,
+        discovered_module_count=1,
+        selected_module_count=1,
+        module_results=(module,),
         output_root=output,
         report_path=report,
         duration_seconds=0.1,
@@ -513,11 +560,163 @@ def test_trusted_dynamic_github_is_rejected_before_job_creation(
         )
 
     assert response.status_code == 422
-    assert "yalnız statik" in response.text.lower()
+    assert "static discovery" in response.text.lower()
     assert "owner/repository" not in response.text
     assert "120" not in response.text
     assert service.capacity() == before
     runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_pinned_github_dynamic_requires_successful_discovery_job(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/github",
+            json={
+                "repository_url": "https://github.com/owner/repository",
+                "discovery_job_id": "0" * 32,
+                "analysis": {
+                    "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+                    "trusted_execution_acknowledged": True,
+                    "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                    "explicit_module_targets": [
+                        {
+                            "module_identity": "package.worker",
+                            "qualified_name": "target",
+                        }
+                    ],
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert service.capacity() == before
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_successful_github_discovery_authorizes_exact_pinned_dynamic_request(
+    tmp_path: Path,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    runner.run.side_effect = lambda request: (
+        _github_static_inventory_result(request)
+        if request.execution_policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY
+        else _runner_result(request)
+    )
+
+    with client:
+        discovery = client.post(
+            "/api/v1/jobs/github",
+            json={
+                "repository_url": "https://github.com/owner/repository",
+                "ref": "main",
+            },
+        )
+        assert discovery.status_code == 202
+        service.wait(discovery.json()["job_id"], timeout=5)
+        dynamic_payload = {
+            "repository_url": "https://github.com/owner/repository",
+            "discovery_job_id": discovery.json()["job_id"],
+            "analysis": {
+                "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+                "trusted_execution_acknowledged": True,
+                "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                "explicit_module_targets": [
+                    {
+                        "module_identity": "package.worker",
+                        "qualified_name": "target",
+                    }
+                ],
+                "greedy_minimization": True,
+            },
+        }
+        dynamic = client.post(
+            "/api/v1/jobs/github",
+            json=dynamic_payload,
+        )
+        assert dynamic.status_code == 202
+        service.wait(dynamic.json()["job_id"], timeout=5)
+        second_dynamic = client.post(
+            "/api/v1/jobs/github",
+            json=dynamic_payload,
+        )
+        assert second_dynamic.status_code == 202
+        service.wait(second_dynamic.json()["job_id"], timeout=5)
+
+    first_dynamic_request = runner.run.call_args_list[-2].args[0]
+    dynamic_request = runner.run.call_args_list[-1].args[0]
+    assert dynamic_request.execution_policy is ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS
+    assert dynamic_request.source.repository_url == "https://github.com/owner/repository"
+    assert dynamic_request.source.ref == "b" * 40
+    assert dynamic_request.configuration.target_selection.selectors[0].to_dict() == {
+        "module_identity": "package.worker",
+        "qualified_name": "target",
+    }
+    assert first_dynamic_request.source == dynamic_request.source
+    assert (
+        first_dynamic_request.configuration.target_selection
+        == dynamic_request.configuration.target_selection
+    )
+    assert (
+        first_dynamic_request.configuration.output_root
+        != dynamic_request.configuration.output_root
+    )
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("repository_url", "ref", "qualified_name"),
+    (
+        ("https://github.com/other/repository", None, "target"),
+        ("https://github.com/owner/repository", "c" * 40, "target"),
+        ("https://github.com/owner/repository", None, "unknown"),
+    ),
+)
+def test_pinned_github_dynamic_rejects_repository_sha_and_target_tampering(
+    tmp_path: Path,
+    repository_url: str,
+    ref: str | None,
+    qualified_name: str,
+) -> None:
+    client, service, runner = _client(tmp_path)
+    runner.run.side_effect = _github_static_inventory_result
+
+    with client:
+        discovery = client.post(
+            "/api/v1/jobs/github",
+            json={"repository_url": "https://github.com/owner/repository"},
+        )
+        assert discovery.status_code == 202
+        service.wait(discovery.json()["job_id"], timeout=5)
+        before = service.capacity()
+        payload: dict[str, object] = {
+            "repository_url": repository_url,
+            "discovery_job_id": discovery.json()["job_id"],
+            "analysis": {
+                "policy": "TRUSTED_DYNAMIC_ANALYSIS",
+                "trusted_execution_acknowledged": True,
+                "target_selection_mode": "EXPLICIT_QUALIFIED_TARGETS",
+                "explicit_module_targets": [
+                    {
+                        "module_identity": "package.worker",
+                        "qualified_name": qualified_name,
+                    }
+                ],
+            },
+        }
+        if ref is not None:
+            payload["ref"] = ref
+        response = client.post("/api/v1/jobs/github", json=payload)
+
+    assert response.status_code == 422
+    assert service.capacity() == before
+    assert runner.run.call_count == 1
     service.shutdown()
 
 
@@ -893,3 +1092,248 @@ def test_unexpected_submission_errors_are_not_sanitized_as_domain_errors(tmp_pat
     with TestClient(create_app(job_service=service), raise_server_exceptions=True) as client:
         with pytest.raises(ValueError, match="internal bug"):
             client.post("/api/v1/jobs/inline", json={"source_code": "x=1"})
+
+
+class _TrackedUpload(StarletteUploadFile):
+    def __init__(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        read_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(file=io.BytesIO(content), filename=filename)
+        self._content = content
+        self._read_error = read_error
+        self.closed = False
+
+    async def read(self, _: int) -> bytes:
+        if self._read_error is not None:
+            raise self._read_error
+        return self._content
+
+    async def close(self) -> None:
+        self.closed = True
+        await super().close()
+
+
+class _TrackedUploadRequest:
+    def __init__(
+        self,
+        *,
+        service: AnalysisJobService,
+        upload: _TrackedUpload,
+        analysis: str,
+    ) -> None:
+        self.app = SimpleNamespace(
+            state=SimpleNamespace(analysis_job_service=service),
+        )
+        self._form = FormData(
+            (("file", upload), ("analysis", analysis))
+        )
+
+    async def form(self) -> FormData:
+        return self._form
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "analysis"),
+    (
+        ("module.py", b"value = 1\n", "{"),
+        ("module.txt", b"value = 1\n", "{}"),
+        ("module.py", b"", "{}"),
+        ("module.py", b" \t\r\n", "{}"),
+    ),
+)
+def test_upload_handle_is_closed_on_every_pre_admission_rejection(
+    tmp_path: Path,
+    filename: str,
+    content: bytes,
+    analysis: str,
+) -> None:
+    runner = Mock()
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+    upload = _TrackedUpload(filename, content)
+    request = _TrackedUploadRequest(
+        service=service,
+        upload=upload,
+        analysis=analysis,
+    )
+
+    with pytest.raises(HTTPException):
+        asyncio.run(submit_upload(request, upload, analysis))
+
+    assert upload.closed is True
+    assert service.capacity()[:2] == (0, 0)
+    assert service._jobs == {}
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_upload_handle_is_closed_when_read_raises_unexpected_error(
+    tmp_path: Path,
+) -> None:
+    private_detail = str(tmp_path / "private-upload-read")
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(),
+    )
+    upload = _TrackedUpload(
+        "module.py",
+        b"",
+        read_error=RuntimeError(private_detail),
+    )
+    request = _TrackedUploadRequest(
+        service=service,
+        upload=upload,
+        analysis="{}",
+    )
+
+    with pytest.raises(RuntimeError, match="private-upload-read"):
+        asyncio.run(submit_upload(request, upload, "{}"))
+
+    assert upload.closed is True
+    assert service.capacity()[:2] == (0, 0)
+    assert service._jobs == {}
+    service.shutdown()
+
+
+def test_upload_handle_is_closed_after_size_limit_rejection(
+    tmp_path: Path,
+) -> None:
+    runner = Mock()
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(
+            output_root=tmp_path,
+            maximum_upload_bytes=4,
+        ),
+        runner_factory=Mock(return_value=runner),
+    )
+    upload = _TrackedUpload("module.py", b"value")
+    request = _TrackedUploadRequest(
+        service=service,
+        upload=upload,
+        analysis="{}",
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        asyncio.run(submit_upload(request, upload, "{}"))
+
+    assert captured.value.status_code == 413
+    assert upload.closed is True
+    assert service.capacity()[:2] == (0, 0)
+    assert service._jobs == {}
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_invalid_multipart_shape_closes_every_upload_before_admission(
+    tmp_path: Path,
+) -> None:
+    runner = Mock()
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+    selected = _TrackedUpload("selected.py", b"value = 1\n")
+    extra = _TrackedUpload("extra.py", b"value = 2\n")
+    request = _TrackedUploadRequest(
+        service=service,
+        upload=selected,
+        analysis="{}",
+    )
+    request._form = FormData(
+        (
+            ("file", selected),
+            ("attachment", extra),
+            ("analysis", "{}"),
+        )
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        asyncio.run(submit_upload(request, selected, "{}"))
+
+    assert captured.value.status_code == 422
+    assert selected.closed is True
+    assert extra.closed is True
+    assert service.capacity()[:2] == (0, 0)
+    assert service._jobs == {}
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+@pytest.mark.parametrize(
+    "files",
+    (
+        [
+            ("file", ("first.py", b"value = 1\n", "text/x-python")),
+            ("file", ("second.py", b"value = 2\n", "text/x-python")),
+        ],
+        [
+            ("file", ("module.py", b"value = 1\n", "text/x-python")),
+            ("attachment", ("extra.py", b"value = 2\n", "text/x-python")),
+        ],
+    ),
+)
+def test_upload_rejects_duplicate_or_unexpected_file_parts_before_admission(
+    tmp_path: Path,
+    files: list[tuple[str, tuple[str, bytes, str]]],
+) -> None:
+    client, service, runner = _client(tmp_path)
+    before = service.capacity()
+
+    with client:
+        response = client.post(
+            "/api/v1/jobs/upload",
+            files=files,
+            data={"analysis": "{}"},
+        )
+
+    assert response.status_code == 422
+    assert service.capacity() == before
+    assert service._jobs == {}
+    runner.run.assert_not_called()
+    service.shutdown()
+
+
+def test_unexpected_worker_failure_has_safe_http_200_terminal_result(
+    tmp_path: Path,
+) -> None:
+    callback_completed = Event()
+    private_detail = str(tmp_path / "private-worker-trace")
+    runner = Mock()
+    runner.run.side_effect = RuntimeError(private_detail)
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "def target():\n    return 1\n"},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        future = service._entry(job_id).future
+        assert future is not None
+        future.add_done_callback(lambda _: callback_completed.set())
+        with pytest.raises(RuntimeError, match="private-worker-trace"):
+            service.wait(job_id, timeout=5)
+        assert callback_completed.wait(2)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}")
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "FAILED"
+    assert snapshot.json()["safe_error_category"] == "INTERNAL_WORKER_ERROR"
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["status"] == "FAILED"
+    assert payload["issues"] == ["INTERNAL_WORKER_ERROR"]
+    assert private_detail not in json.dumps(payload)
+    assert service.capacity()[:2] == (0, 0)
+    service.shutdown()

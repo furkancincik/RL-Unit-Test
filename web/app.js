@@ -16,6 +16,8 @@ const TERMINAL_STATUSES = new Set([
 const MAX_SOURCE_BYTES = 2000000;
 const MAX_RETRY_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 1000;
+const GITHUB_TARGET_ACKNOWLEDGEMENT_STALE =
+  "Hedef seçimi değişti; current target kümesini yeniden onaylayın.";
 
 const state = {
   activeSource: "inline",
@@ -23,12 +25,18 @@ const state = {
     inline: "STATIC_DISCOVERY_ONLY",
     upload: "STATIC_DISCOVERY_ONLY",
   },
+  githubTrust: null,
+  acknowledgedTargetFingerprint: null,
+  currentSubmission: null,
   selectedFile: null,
   currentJobId: null,
   currentStatus: null,
   submitInFlight: false,
+  activeJobInFlight: false,
   pollTimer: null,
   pollAbortController: null,
+  terminalAbortController: null,
+  pollGeneration: 0,
   retryAttempt: 0,
   createdAt: null,
 };
@@ -110,12 +118,13 @@ function setMessage(message) {
 function setSubmitting(submitting) {
   state.submitInFlight = submitting;
   const button = byId("submit-analysis");
-  button.disabled = submitting;
+  button.disabled = submitting || state.activeJobInFlight;
   button.querySelector(".button-label").hidden = submitting;
   button.querySelector(".loading-label").hidden = !submitting;
 }
 
 function resetSourceSpecificControls() {
+  invalidateGitHubTrust();
   byId("target-selection-mode").value = "ALL_ELIGIBLE_WITH_LIMIT";
   byId("explicit-target-names").value = "";
   byId("module-target-rows").replaceChildren();
@@ -173,6 +182,124 @@ function selectedPolicy() {
   return document.querySelector('input[name="analysis-mode"]:checked').value;
 }
 
+function invalidateGitHubTrust() {
+  state.githubTrust = null;
+  state.acknowledgedTargetFingerprint = null;
+  const trust = byId("github-trust-commit");
+  if (trust) {
+    trust.checked = false;
+  }
+  byId("github-trust-panel").hidden = true;
+  byId("github-trusted-sha").textContent = "";
+  byId("github-discovered-target").replaceChildren(
+    new Option("Static discovery hedefi seçin", ""),
+  );
+  const dynamicPolicy = document.querySelector(
+    'input[name="analysis-mode"][value="TRUSTED_DYNAMIC_ANALYSIS"]',
+  );
+  if (state.activeSource === "github" && dynamicPolicy.checked) {
+    document.querySelector(
+      'input[name="analysis-mode"][value="STATIC_DISCOVERY_ONLY"]',
+    ).checked = true;
+  }
+  restoreSourcePolicy();
+}
+
+function currentGitHubTargetFingerprint() {
+  if (state.activeSource !== "github") {
+    return null;
+  }
+  const selection = targetSelectionOptions();
+  if (!selection.valid
+      || selection.target_selection_mode !== "EXPLICIT_QUALIFIED_TARGETS"
+      || selection.explicit_module_targets.length === 0) {
+    return null;
+  }
+  const selectors = selection.explicit_module_targets
+    .map(({ module_identity: moduleIdentity, qualified_name: qualifiedName }) => (
+      `${moduleIdentity}\u0000${qualifiedName}`
+    ))
+    .sort();
+  return JSON.stringify({
+    mode: selection.target_selection_mode,
+    selectors,
+  });
+}
+
+function invalidateGitHubTargetAcknowledgement() {
+  state.acknowledgedTargetFingerprint = null;
+  byId("github-trust-commit").checked = false;
+  restoreSourcePolicy();
+}
+
+function updateGitHubTargetAcknowledgement() {
+  const acknowledgement = byId("github-trust-commit");
+  if (!acknowledgement.checked) {
+    state.acknowledgedTargetFingerprint = null;
+    restoreSourcePolicy();
+    return;
+  }
+  const fingerprint = currentGitHubTargetFingerprint();
+  if (state.githubTrust === null || fingerprint === null) {
+    acknowledgement.checked = false;
+    state.acknowledgedTargetFingerprint = null;
+    restoreSourcePolicy();
+    return;
+  }
+  state.acknowledgedTargetFingerprint = fingerprint;
+  restoreSourcePolicy();
+}
+
+function applyGitHubDiscoveryTrust(result) {
+  const submission = state.currentSubmission;
+  const availableTargets = (Array.isArray(result.modules) ? result.modules : [])
+    .flatMap((module) => (
+      typeof module.module_name === "string"
+        ? (Array.isArray(module.discovered_function_names)
+            ? module.discovered_function_names
+            : []).map((qualifiedName) => ({
+              moduleIdentity: module.module_name,
+              qualifiedName,
+            }))
+        : []
+    ));
+  if (!submission
+      || submission.source !== "github"
+      || submission.policy !== "STATIC_DISCOVERY_ONLY"
+      || result.source_kind !== "PUBLIC_GITHUB_REPOSITORY"
+      || result.analysis_policy !== "STATIC_DISCOVERY_ONLY"
+      || result.status !== "COMPLETED"
+      || result.acquisition_status !== "COMPLETED"
+      || byId("github-url").value.trim() !== submission.repositoryUrl
+      || byId("github-ref").value.trim() !== submission.repositoryRef
+      || availableTargets.length === 0
+      || !/^[0-9a-f]{40}$/.test(result.resolved_commit_sha || "")) {
+    return;
+  }
+  state.githubTrust = Object.freeze({
+    discoveryJobId: state.currentJobId,
+    repositoryUrl: submission.repositoryUrl,
+    requestedRef: submission.repositoryRef,
+    resolvedCommitSha: result.resolved_commit_sha,
+  });
+  state.acknowledgedTargetFingerprint = null;
+  byId("github-trusted-sha").textContent = result.resolved_commit_sha;
+  const targetSelect = byId("github-discovered-target");
+  targetSelect.replaceChildren(
+    new Option("Static discovery hedefi seçin", ""),
+  );
+  for (const target of availableTargets) {
+    const option = new Option(
+      `${target.moduleIdentity} · ${target.qualifiedName}`,
+      `${target.moduleIdentity}\u0000${target.qualifiedName}`,
+    );
+    targetSelect.append(option);
+  }
+  byId("github-trust-panel").hidden = false;
+  byId("github-trust-commit").checked = false;
+  restoreSourcePolicy();
+}
+
 function rememberSourcePolicy() {
   if (state.activeSource !== "github") {
     state.sourcePolicies[state.activeSource] = selectedPolicy();
@@ -187,9 +314,16 @@ function restoreSourcePolicy() {
   const dynamicPolicy = document.querySelector(
     'input[name="analysis-mode"][value="TRUSTED_DYNAMIC_ANALYSIS"]',
   );
-  dynamicPolicy.disabled = githubMode;
+  const githubDynamicAuthorized = githubMode
+    && state.githubTrust !== null
+    && byId("github-trust-commit").checked
+    && state.acknowledgedTargetFingerprint !== null
+    && state.acknowledgedTargetFingerprint === currentGitHubTargetFingerprint();
+  dynamicPolicy.disabled = githubMode && !githubDynamicAuthorized;
   if (githubMode) {
-    staticPolicy.checked = true;
+    if (!githubDynamicAuthorized) {
+      staticPolicy.checked = true;
+    }
   } else {
     const restored = state.sourcePolicies[state.activeSource]
       || "STATIC_DISCOVERY_ONLY";
@@ -279,6 +413,7 @@ function createModuleTargetRow() {
     if (!byId("module-target-rows").children.length) {
       byId("module-target-rows").append(createModuleTargetRow());
     }
+    invalidateGitHubTargetAcknowledgement();
   });
   row.append(moduleInput, targetInput, remove);
   return row;
@@ -505,6 +640,27 @@ async function sourceRequest(options) {
       || parsed.hash) {
     throw new Error("Beklenen biçim: https://github.com/owner/repository");
   }
+  const dynamic = options.policy === "TRUSTED_DYNAMIC_ANALYSIS";
+  if (dynamic) {
+    const trust = state.githubTrust;
+    if (!trust || !byId("github-trust-commit").checked) {
+      throw new Error("Önce başarılı static discovery commit'ini açıkça trusted olarak onaylayın.");
+    }
+    if (repositoryUrl !== trust.repositoryUrl || repositoryRef !== trust.requestedRef) {
+      invalidateGitHubTrust();
+      throw new Error("Repository veya ref değişti; static discovery yeniden çalıştırılmalıdır.");
+    }
+    if (options.target_selection_mode !== "EXPLICIT_QUALIFIED_TARGETS"
+        || options.explicit_module_targets.length === 0) {
+      throw new Error("Pinned GitHub dynamic explicit module ve target seçimi gerektirir.");
+    }
+    const currentTargetFingerprint = currentGitHubTargetFingerprint();
+    if (currentTargetFingerprint === null
+        || state.acknowledgedTargetFingerprint !== currentTargetFingerprint) {
+      invalidateGitHubTargetAcknowledgement();
+      throw new Error(GITHUB_TARGET_ACKNOWLEDGEMENT_STALE);
+    }
+  }
   return {
     url: ENDPOINTS.github,
     init: {
@@ -512,9 +668,16 @@ async function sourceRequest(options) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         repository_url: repositoryUrl,
-        ref: repositoryRef || null,
+        ref: dynamic ? null : repositoryRef || null,
+        discovery_job_id: dynamic ? state.githubTrust.discoveryJobId : null,
         analysis: options,
       }),
+    },
+    context: {
+      source: "github",
+      policy: options.policy,
+      repositoryUrl,
+      repositoryRef,
     },
   };
 }
@@ -532,6 +695,7 @@ async function safeResponseMessage(response, fallback) {
 }
 
 function stopPolling() {
+  state.pollGeneration += 1;
   if (state.pollTimer !== null) {
     window.clearTimeout(state.pollTimer);
     state.pollTimer = null;
@@ -539,6 +703,10 @@ function stopPolling() {
   if (state.pollAbortController !== null) {
     state.pollAbortController.abort();
     state.pollAbortController = null;
+  }
+  if (state.terminalAbortController !== null) {
+    state.terminalAbortController.abort();
+    state.terminalAbortController = null;
   }
   state.retryAttempt = 0;
 }
@@ -572,6 +740,10 @@ function statusDescription(status) {
 
 function updateJobStatus(snapshot) {
   state.currentStatus = snapshot.status;
+  if (TERMINAL_STATUSES.has(snapshot.status)) {
+    state.activeJobInFlight = false;
+    setSubmitting(state.submitInFlight);
+  }
   const badge = byId("job-status-badge");
   badge.textContent = snapshot.status;
   badge.dataset.status = snapshot.status;
@@ -607,21 +779,44 @@ async function pollJob() {
   if (!state.currentJobId) {
     return;
   }
-  state.pollAbortController = new AbortController();
+  state.pollTimer = null;
+  const jobId = state.currentJobId;
+  const generation = state.pollGeneration;
+  const controller = new AbortController();
+  state.pollAbortController = controller;
   try {
     const response = await fetch(
-      `${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}`,
-      { signal: state.pollAbortController.signal },
+      `${API_ROOT}/jobs/${encodeURIComponent(jobId)}`,
+      { signal: controller.signal },
     );
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
+    if (response.status === 404) {
+      if (state.pollAbortController === controller) {
+        state.pollAbortController = null;
+      }
+      state.activeJobInFlight = false;
+      setSubmitting(state.submitInFlight);
+      showError("JOB_NOT_FOUND", measured(state.currentStatus), "Job kaydı retention süresi sonunda kaldırılmış; yeni bir analiz başlatabilirsiniz.");
+      return;
+    }
     if (!response.ok) {
       throw new Error(await safeResponseMessage(response, "Job durumu alınamadı."));
     }
     const snapshot = await response.json();
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
     state.retryAttempt = 0;
-    state.pollAbortController = null;
+    if (state.pollAbortController === controller) {
+      state.pollAbortController = null;
+    }
     updateJobStatus(snapshot);
     if (TERMINAL_STATUSES.has(snapshot.status)) {
-      await loadTerminalResult(snapshot);
+      await loadTerminalResult(snapshot, jobId, generation);
       return;
     }
     schedulePoll(POLL_INTERVAL_MS);
@@ -629,7 +824,13 @@ async function pollJob() {
     if (error.name === "AbortError") {
       return;
     }
-    state.pollAbortController = null;
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
+    if (state.pollAbortController === controller) {
+      state.pollAbortController = null;
+    }
     state.retryAttempt += 1;
     if (state.retryAttempt <= MAX_RETRY_ATTEMPTS) {
       const delay = Math.min(POLL_INTERVAL_MS * (2 ** state.retryAttempt), 8000);
@@ -637,16 +838,20 @@ async function pollJob() {
       schedulePoll(delay);
       return;
     }
+    state.activeJobInFlight = false;
+    setSubmitting(state.submitInFlight);
     showError("NETWORK_POLLING_FAILED", measured(state.currentStatus), "Job durumu güvenli retry sınırı içinde alınamadı.");
   }
 }
 
-function beginJob(snapshot) {
+function beginJob(snapshot, submission = null) {
   stopPolling();
   resetOutput();
   state.currentJobId = snapshot.job_id;
   state.currentStatus = snapshot.status;
   state.createdAt = snapshot.created_at;
+  state.currentSubmission = submission;
+  state.activeJobInFlight = true;
   byId("job-section").hidden = false;
   updateJobStatus(snapshot);
   byId("job-section").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -658,12 +863,25 @@ async function submitAnalysis(event) {
   if (state.submitInFlight) {
     return;
   }
+  if (state.activeJobInFlight) {
+    setMessage("Mevcut analiz terminal duruma ulaşmadan yeni bir analiz başlatılamaz.");
+    return;
+  }
   setMessage("");
   try {
     const request = await sourceRequest(buildAnalysisOptions());
     setSubmitting(true);
+    if (request.context?.source === "github"
+        && request.context.policy === "STATIC_DISCOVERY_ONLY") {
+      invalidateGitHubTrust();
+    }
     const response = await fetch(request.url, request.init);
     if (!response.ok) {
+      if (request.context?.source === "github"
+          && request.context.policy === "TRUSTED_DYNAMIC_ANALYSIS"
+          && response.status === 422) {
+        invalidateGitHubTrust();
+      }
       throw new Error(await safeResponseMessage(response, "Analiz isteği kabul edilmedi."));
     }
     const snapshot = await response.json();
@@ -672,11 +890,12 @@ async function submitAnalysis(event) {
       updateSourceByteCount();
     } else if (state.activeSource === "upload") {
       clearSelectedFile();
-    } else {
-      byId("github-url").value = "";
-      byId("github-ref").value = "";
     }
-    beginJob(snapshot);
+    beginJob(snapshot, request.context || { source: state.activeSource, policy: selectedPolicy() });
+    if (request.context?.source === "github"
+        && request.context.policy === "TRUSTED_DYNAMIC_ANALYSIS") {
+      invalidateGitHubTrust();
+    }
   } catch (error) {
     setMessage(error.message || "Analiz isteği gönderilemedi.");
   } finally {
@@ -1092,18 +1311,62 @@ function showError(category, stage, message) {
   byId("error-message").textContent = message || "Analiz güvenli bir hata ile durdu.";
 }
 
-async function loadTerminalResult(snapshot) {
+async function loadArtifactsForJob(jobId, generation) {
+  const controller = new AbortController();
+  state.terminalAbortController = controller;
+  try {
+    const response = await fetch(
+      `${API_ROOT}/jobs/${encodeURIComponent(jobId)}/artifacts`,
+      { signal: controller.signal },
+    );
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
+    if (!response.ok) {
+      renderArtifacts([]);
+      return;
+    }
+    const payload = await response.json();
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
+    renderArtifacts(payload.artifacts);
+  } catch (error) {
+    if (error.name !== "AbortError"
+        && state.currentJobId === jobId
+        && state.pollGeneration === generation) {
+      renderArtifacts([]);
+    }
+  } finally {
+    if (state.terminalAbortController === controller) {
+      state.terminalAbortController = null;
+    }
+  }
+}
+
+async function loadTerminalResult(snapshot, jobId, generation) {
   state.pollTimer = null;
-  state.pollAbortController = null;
+  if (state.currentJobId !== jobId
+      || state.pollGeneration !== generation) {
+    return;
+  }
   if (snapshot.status === "CANCELLED") {
     showError("CANCELLED", snapshot.progress_stage, "Kuyruktaki iş çalıştırılmadan iptal edildi.");
     return;
   }
+  const controller = new AbortController();
+  state.terminalAbortController = controller;
   try {
-    const [resultResponse, artifactResponse] = await Promise.all([
-      fetch(`${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/result`),
-      fetch(`${API_ROOT}/jobs/${encodeURIComponent(state.currentJobId)}/artifacts`),
-    ]);
+    const resultResponse = await fetch(
+      `${API_ROOT}/jobs/${encodeURIComponent(jobId)}/result`,
+      { signal: controller.signal },
+    );
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
     if (!resultResponse.ok) {
       if (resultResponse.status === 409) {
         showError(
@@ -1116,12 +1379,19 @@ async function loadTerminalResult(snapshot) {
       throw new Error(await safeResponseMessage(resultResponse, "Analiz sonucu alınamadı."));
     }
     const result = await resultResponse.json();
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
+    }
     renderResult(result);
-    if (artifactResponse.ok) {
-      const artifactPayload = await artifactResponse.json();
-      renderArtifacts(artifactPayload.artifacts);
-    } else {
-      renderArtifacts([]);
+    applyGitHubDiscoveryTrust(result);
+    if (state.terminalAbortController === controller) {
+      state.terminalAbortController = null;
+    }
+    await loadArtifactsForJob(jobId, generation);
+    if (state.currentJobId !== jobId
+        || state.pollGeneration !== generation) {
+      return;
     }
     if (["FAILED", "TIMED_OUT"].includes(snapshot.status)) {
       showError(
@@ -1132,7 +1402,15 @@ async function loadTerminalResult(snapshot) {
     }
     byId("result-section").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
-    showError("RESULT_FETCH_FAILED", snapshot.progress_stage, error.message);
+    if (error.name !== "AbortError"
+        && state.currentJobId === jobId
+        && state.pollGeneration === generation) {
+      showError("RESULT_FETCH_FAILED", snapshot.progress_stage, error.message);
+    }
+  } finally {
+    if (state.terminalAbortController === controller) {
+      state.terminalAbortController = null;
+    }
   }
 }
 
@@ -1162,7 +1440,9 @@ async function cancelCurrentJob() {
     updateJobStatus(snapshot);
     if (snapshot.status === "CANCELLED") {
       stopPolling();
-      await loadTerminalResult(snapshot);
+      const jobId = state.currentJobId;
+      const generation = state.pollGeneration;
+      await loadTerminalResult(snapshot, jobId, generation);
     }
   } catch (error) {
     byId("job-live-status").textContent = error.message;
@@ -1206,10 +1486,22 @@ for (const radio of document.querySelectorAll('input[name="analysis-mode"]')) {
 }
 
 byId("selection-mode").addEventListener("change", updateSelectionControls);
-byId("target-selection-mode").addEventListener("change", updateTargetSelectionControls);
+byId("target-selection-mode").addEventListener("change", () => {
+  updateTargetSelectionControls();
+  invalidateGitHubTargetAcknowledgement();
+});
 byId("add-module-target").addEventListener("click", () => {
   byId("module-target-rows").append(createModuleTargetRow());
+  invalidateGitHubTargetAcknowledgement();
 });
+byId("module-target-rows").addEventListener(
+  "input",
+  invalidateGitHubTargetAcknowledgement,
+);
+byId("module-target-rows").addEventListener(
+  "change",
+  invalidateGitHubTargetAcknowledgement,
+);
 byId("strategy-comparison").addEventListener("change", (event) => {
   if (event.currentTarget.checked) {
     byId("greedy-minimization").checked = true;
@@ -1218,6 +1510,26 @@ byId("strategy-comparison").addEventListener("change", (event) => {
 byId("inline-source").addEventListener("input", updateSourceByteCount);
 byId("python-file").addEventListener("change", (event) => selectFile(event.target.files[0]));
 byId("remove-file").addEventListener("click", clearSelectedFile);
+byId("github-url").addEventListener("input", invalidateGitHubTrust);
+byId("github-ref").addEventListener("input", invalidateGitHubTrust);
+byId("github-trust-commit").addEventListener(
+  "change",
+  updateGitHubTargetAcknowledgement,
+);
+byId("github-discovered-target").addEventListener("change", (event) => {
+  invalidateGitHubTargetAcknowledgement();
+  const [moduleIdentity, qualifiedName] = event.currentTarget.value.split("\u0000");
+  if (!moduleIdentity || !qualifiedName) {
+    return;
+  }
+  byId("target-selection-mode").value = "EXPLICIT_QUALIFIED_TARGETS";
+  byId("module-target-rows").replaceChildren();
+  const row = createModuleTargetRow();
+  row.querySelector("[data-module-identity]").value = moduleIdentity;
+  row.querySelector("[data-qualified-target]").value = qualifiedName;
+  byId("module-target-rows").append(row);
+  updateTargetSelectionControls();
+});
 byId("analysis-form").addEventListener("submit", submitAnalysis);
 byId("cancel-job").addEventListener("click", cancelCurrentJob);
 byId("retry-analysis").addEventListener("click", () => {

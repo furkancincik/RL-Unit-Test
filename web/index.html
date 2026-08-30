@@ -88,7 +88,19 @@
             <label for="github-ref">Branch, tag veya commit (opsiyonel)</label>
             <input id="github-ref" type="text" autocomplete="off" maxlength="128" placeholder="main veya 40 karakter commit SHA" aria-describedby="github-ref-help">
             <p id="github-ref-help" class="field-help">Tekrarlanabilir analiz için immutable 40 karakter commit SHA kullanın.</p>
-            <p id="github-static-policy" class="field-help">Yalnız güvenli statik keşif desteklenir; public GitHub repository kaynak kodu çalıştırılmaz.</p>
+            <p id="github-static-policy" class="field-help">Önce güvenli statik keşif çalıştırılır. Dinamik analiz yalnız bu sonucun exact commit SHA’sı açıkça trusted olarak onaylandığında açılır.</p>
+            <div id="github-trust-panel" class="warning-card" hidden>
+              <strong>Resolved commit SHA: <span id="github-trusted-sha"></span></strong>
+              <p>Bu exact repository commit’i yerel makinenizde çalıştırılacaktır. Timeout bir güvenlik sandbox’ı değildir; dependency kurulmaz.</p>
+              <label class="acknowledgement" for="github-trust-commit">
+                <input id="github-trust-commit" type="checkbox">
+                <span>Bu exact commit’i trusted dinamik analiz için kullan.</span>
+              </label>
+              <label for="github-discovered-target">Static discovery hedefi</label>
+              <select id="github-discovered-target">
+                <option value="">Static discovery hedefi seçin</option>
+              </select>
+            </div>
           </div>
 
           <div class="mode-layout">

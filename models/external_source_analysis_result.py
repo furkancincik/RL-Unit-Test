@@ -14,7 +14,9 @@ from analyzer.python_source_reader import (
 from models.project_analysis_result import (
     FunctionRunStatus,
     ProjectAnalysisResult,
+    QualifiedTargetSelector,
     TargetSelection,
+    TargetSelectionMode,
 )
 from models.project_coverage_result import ProjectCoverageResult
 from models.source_acquisition_result import SourceAcquisitionLimits
@@ -176,17 +178,87 @@ ExternalSourcePayload = (
 )
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class PinnedGitHubDynamicAuthorization:
+    """Server registry'sinin ürettiği, public serialization dışı capability."""
+
+    discovery_job_id: str
+    repository_url: str
+    resolved_commit_sha: str
+    selectors: tuple[QualifiedTargetSelector, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.discovery_job_id, str) or not self.discovery_job_id:
+            raise ValueError("discovery_job_id boş olamaz.")
+        if not isinstance(self.repository_url, str) or not self.repository_url:
+            raise ValueError("repository_url boş olamaz.")
+        if (
+            not isinstance(self.resolved_commit_sha, str)
+            or len(self.resolved_commit_sha) != 40
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in self.resolved_commit_sha
+            )
+        ):
+            raise ValueError("resolved_commit_sha tam hexadecimal SHA olmalıdır.")
+        if not isinstance(self.selectors, tuple) or not self.selectors or any(
+            not isinstance(item, QualifiedTargetSelector)
+            for item in self.selectors
+        ):
+            raise ValueError("Pinned authorization explicit selector gerektirir.")
+        object.__setattr__(
+            self,
+            "resolved_commit_sha",
+            self.resolved_commit_sha.lower(),
+        )
+        object.__setattr__(
+            self,
+            "selectors",
+            tuple(dict.fromkeys(self.selectors)),
+        )
+
+
 def validate_external_source_execution_policy(
     source: ExternalSourcePayload,
     execution_policy: ExternalExecutionPolicy,
+    configuration: ExternalAnalysisConfiguration | None = None,
+    authorization: PinnedGitHubDynamicAuthorization | None = None,
 ) -> None:
-    if (
+    dynamic_github = (
         isinstance(source, PublicGitHubRepository)
-        and execution_policy
-        is not ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY
-    ):
+        and execution_policy is ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS
+    )
+    if dynamic_github and authorization is None:
         raise ExternalSourcePolicyValidationError(
             PUBLIC_GITHUB_STATIC_ONLY_MESSAGE
+        )
+    if not dynamic_github and authorization is not None:
+        raise ExternalSourcePolicyValidationError(
+            "Pinned GitHub authorization yalnız trusted dynamic için kullanılabilir."
+        )
+    if not dynamic_github:
+        return
+    assert isinstance(source, PublicGitHubRepository)
+    assert authorization is not None
+    if (
+        source.repository_url.casefold()
+        != authorization.repository_url.casefold()
+        or source.ref != authorization.resolved_commit_sha
+    ):
+        raise ExternalSourcePolicyValidationError(
+            "Pinned GitHub source authoritative snapshot ile eşleşmiyor."
+        )
+    if not isinstance(configuration, ExternalAnalysisConfiguration):
+        raise ExternalSourcePolicyValidationError(
+            "Pinned GitHub dynamic configuration gerektirir."
+        )
+    selection = configuration.target_selection
+    if (
+        selection.mode is not TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS
+        or selection.selectors != authorization.selectors
+    ):
+        raise ExternalSourcePolicyValidationError(
+            "Pinned GitHub authorization exact explicit selector gerektirir."
         )
 
 
@@ -309,6 +381,7 @@ class ExternalSourceAnalysisRequest:
     execution_policy: ExternalExecutionPolicy
     configuration: ExternalAnalysisConfiguration
     acquisition_limits: SourceAcquisitionLimits
+    pinned_github_authorization: PinnedGitHubDynamicAuthorization | None
 
     def __init__(
         self,
@@ -316,6 +389,8 @@ class ExternalSourceAnalysisRequest:
         execution_policy: ExternalExecutionPolicy = ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
         configuration: ExternalAnalysisConfiguration | None = None,
         acquisition_limits: SourceAcquisitionLimits = SourceAcquisitionLimits(),
+        *,
+        pinned_github_authorization: PinnedGitHubDynamicAuthorization | None = None,
     ) -> None:
         if not isinstance(source, (InlinePythonSource, UploadedPythonFile, LocalProjectDirectory, PublicGitHubRepository)):
             raise TypeError("source external source payload olmalıdır.")
@@ -325,11 +400,29 @@ class ExternalSourceAnalysisRequest:
             raise TypeError("configuration gereklidir.")
         if not isinstance(acquisition_limits, SourceAcquisitionLimits):
             raise TypeError("acquisition_limits geçersiz.")
-        validate_external_source_execution_policy(source, execution_policy)
+        if (
+            pinned_github_authorization is not None
+            and not isinstance(
+                pinned_github_authorization,
+                PinnedGitHubDynamicAuthorization,
+            )
+        ):
+            raise TypeError("pinned_github_authorization geçersiz.")
+        validate_external_source_execution_policy(
+            source,
+            execution_policy,
+            configuration,
+            pinned_github_authorization,
+        )
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "execution_policy", execution_policy)
         object.__setattr__(self, "configuration", configuration)
         object.__setattr__(self, "acquisition_limits", acquisition_limits)
+        object.__setattr__(
+            self,
+            "pinned_github_authorization",
+            pinned_github_authorization,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

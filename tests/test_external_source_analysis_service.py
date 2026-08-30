@@ -58,6 +58,46 @@ def test_inline_static_discovery_writes_no_source_to_json_and_cleans(tmp_path: P
     assert "rl-unit-test-inline-" not in report
 
 
+def test_normal_finalization_attempts_external_workspace_cleanup_exactly_once(
+    tmp_path: Path,
+) -> None:
+    service = ExternalSourceAnalysisService()
+    with patch.object(service, "_cleanup", wraps=service._cleanup) as cleanup:
+        result = service.run(
+            ExternalSourceAnalysisRequest(
+                InlinePythonSource("def target():\n    return 1\n"),
+                configuration=_configuration(tmp_path),
+            )
+        )
+
+    assert result.status is ExternalAnalysisStatus.STATIC_COMPLETED
+    assert result.cleanup_status is ExternalWorkspaceCleanupStatus.COMPLETED
+    assert cleanup.call_count == 1
+
+
+def test_unexpected_external_failure_still_attempts_cleanup_exactly_once(
+    tmp_path: Path,
+) -> None:
+    service = ExternalSourceAnalysisService()
+    with (
+        patch.object(
+            service,
+            "_target_inventories",
+            side_effect=RuntimeError("private worker detail"),
+        ),
+        patch.object(service, "_cleanup", wraps=service._cleanup) as cleanup,
+    ):
+        with pytest.raises(RuntimeError, match="private worker detail"):
+            service.run(
+                ExternalSourceAnalysisRequest(
+                    InlinePythonSource("def target():\n    return 1\n"),
+                    configuration=_configuration(tmp_path),
+                )
+            )
+
+    assert cleanup.call_count == 1
+
+
 def test_inline_source_canonicalization_is_idempotent_and_repeated_bom_safe() -> None:
     canonicalize = python_source_reader.canonicalize_inline_python_source
     source = "\ufeffdef hedef():\r\n    return 'Türkçe'\r\n"

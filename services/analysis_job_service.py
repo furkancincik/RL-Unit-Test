@@ -18,10 +18,22 @@ from models.analysis_job_result import (
     AnalysisModuleSummary,
 )
 from models.external_source_analysis_result import (
+    ExternalModuleSelection,
+    ExternalModuleSelectionMode,
     ExternalAnalysisStatus,
+    ExternalAnalysisConfiguration,
+    ExternalExecutionPolicy,
     ExternalSourceAnalysisRequest,
     ExternalSourceAnalysisResult,
+    ExternalWorkspaceCleanupStatus,
+    PinnedGitHubDynamicAuthorization,
+    PublicGitHubRepository,
+    SourceAcquisitionLimits,
     validate_external_source_execution_policy,
+)
+from models.project_analysis_result import (
+    QualifiedTargetSelector,
+    TargetSelectionMode,
 )
 from services.external_source_analysis_service import ExternalSourceAnalysisService
 
@@ -40,6 +52,10 @@ class AnalysisJobStateConflictError(RuntimeError):
 
 class AnalysisArtifactNotFoundError(LookupError):
     pass
+
+
+class PinnedGitHubAuthorizationError(ValueError):
+    """Static discovery snapshot'ı pinned dynamic çalışmayı yetkilendirmedi."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +84,17 @@ class _JobEntry:
     result: AnalysisJobResultSummary | None = None
     future: Future[ExternalSourceAnalysisResult] | None = None
     artifacts: dict[str, tuple[AnalysisArtifactSummary, Path]] | None = None
+    github_discovery_snapshot: _GitHubDiscoverySnapshot | None = None
+    artifact_leases: int = 0
+    authorization_leases: int = 0
+    purge_in_progress: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _GitHubDiscoverySnapshot:
+    repository_url: str
+    resolved_commit_sha: str
+    selectors: frozenset[QualifiedTargetSelector]
 
 
 class AnalysisJobService:
@@ -100,23 +127,124 @@ class AnalysisJobService:
         validate_external_source_execution_policy(
             request.source,
             request.execution_policy,
+            request.configuration,
+            request.pinned_github_authorization,
         )
+        authorization = request.pinned_github_authorization
+        authorization_lease: _JobEntry | None = None
+        if authorization is not None:
+            self.purge_expired()
+            authorization_lease = self._acquire_pinned_github_authorization(request)
+        try:
+            return self._submit_validated(request)
+        finally:
+            if authorization_lease is not None:
+                self._release_pinned_github_authorization(
+                    authorization.discovery_job_id,
+                    authorization_lease,
+                )
+
+    def submit_pinned_github_dynamic(
+        self,
+        *,
+        discovery_job_id: str,
+        repository_url: str,
+        configuration: ExternalAnalysisConfiguration,
+        trusted_execution_acknowledged: bool,
+        acquisition_limits: SourceAcquisitionLimits = SourceAcquisitionLimits(),
+    ) -> AnalysisJobSummary:
+        """Başarılı static snapshot'tan exact-SHA dynamic request üretir."""
+        if not isinstance(discovery_job_id, str) or not discovery_job_id:
+            raise PinnedGitHubAuthorizationError(
+                "Başarılı GitHub static discovery job referansı gereklidir."
+            )
+        if not isinstance(repository_url, str) or not repository_url:
+            raise PinnedGitHubAuthorizationError(
+                "GitHub repository identity doğrulanamadı."
+            )
+        if not isinstance(configuration, ExternalAnalysisConfiguration):
+            raise TypeError("configuration ExternalAnalysisConfiguration olmalıdır.")
+        if trusted_execution_acknowledged is not True:
+            raise PinnedGitHubAuthorizationError(
+                "Pinned GitHub dynamic açık trust acknowledgement gerektirir."
+            )
+        if not isinstance(acquisition_limits, SourceAcquisitionLimits):
+            raise TypeError("acquisition_limits SourceAcquisitionLimits olmalıdır.")
         if self._shutdown:
             raise AnalysisJobStateConflictError("Job service kapatıldı.")
         self.purge_expired()
-        if not self._capacity.acquire(blocking=False):
-            raise AnalysisJobQueueFullError("Analysis job kuyruğu dolu.")
+        with self._lock:
+            try:
+                discovery = self._entry(discovery_job_id)
+            except AnalysisJobNotFoundError as error:
+                raise PinnedGitHubAuthorizationError(
+                    "GitHub static discovery snapshot artık mevcut değil."
+                ) from error
+            snapshot = discovery.github_discovery_snapshot
+        if snapshot is None:
+            raise PinnedGitHubAuthorizationError(
+                "Job başarılı GitHub static discovery snapshot'ı değildir."
+            )
+        if repository_url.casefold() != snapshot.repository_url.casefold():
+            raise PinnedGitHubAuthorizationError(
+                "GitHub repository identity discovery snapshot ile eşleşmiyor."
+            )
+        selection = configuration.target_selection
+        if (
+            selection.mode is not TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS
+            or not selection.selectors
+        ):
+            raise PinnedGitHubAuthorizationError(
+                "Pinned GitHub dynamic analiz explicit target seçimi gerektirir."
+            )
+        if any(item not in snapshot.selectors for item in selection.selectors):
+            raise PinnedGitHubAuthorizationError(
+                "Seçilen target GitHub static discovery snapshot'ında bulunmuyor."
+            )
+        selected_modules = tuple(
+            dict.fromkeys(item.module_identity for item in selection.selectors)
+        )
+        pinned_configuration = replace(
+            configuration,
+            module_selection=ExternalModuleSelection(
+                ExternalModuleSelectionMode.EXPLICIT_MODULE_NAMES,
+                selected_modules,
+            ),
+        )
+        authorization = PinnedGitHubDynamicAuthorization(
+            discovery_job_id=discovery_job_id,
+            repository_url=snapshot.repository_url,
+            resolved_commit_sha=snapshot.resolved_commit_sha,
+            selectors=selection.selectors,
+        )
+        request = ExternalSourceAnalysisRequest(
+            source=PublicGitHubRepository(
+                repository_url=snapshot.repository_url,
+                ref=snapshot.resolved_commit_sha,
+            ),
+            execution_policy=ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            configuration=pinned_configuration,
+            acquisition_limits=acquisition_limits,
+            pinned_github_authorization=authorization,
+        )
+        return self.submit(request)
+
+    def _submit_validated(
+        self,
+        request: ExternalSourceAnalysisRequest,
+    ) -> AnalysisJobSummary:
+        self.purge_expired()
         job_id = uuid.uuid4().hex
         now = self._utc_now()
         job_output = (self.settings.output_root.resolve() / job_id).resolve()
         if not job_output.is_relative_to(self.settings.output_root.resolve()):
-            self._capacity.release()
             raise RuntimeError("Job output root containment ihlali.")
         safe_request = ExternalSourceAnalysisRequest(
             source=request.source,
             execution_policy=request.execution_policy,
             configuration=replace(request.configuration, output_root=job_output),
             acquisition_limits=request.acquisition_limits,
+            pinned_github_authorization=request.pinned_github_authorization,
         )
         summary = AnalysisJobSummary(
             job_id=job_id,
@@ -129,16 +257,25 @@ class AnalysisJobService:
         )
         entry = _JobEntry(summary=summary, artifacts={})
         with self._lock:
+            if self._shutdown:
+                raise AnalysisJobStateConflictError("Job service kapatıldı.")
+            if not self._capacity.acquire(blocking=False):
+                raise AnalysisJobQueueFullError("Analysis job kuyruğu dolu.")
             self._jobs[job_id] = entry
-        try:
-            future = self._executor.submit(self._run_job, job_id, safe_request)
-        except RuntimeError:
-            with self._lock:
+            try:
+                future = self._executor.submit(self._run_job, job_id, safe_request)
+            except RuntimeError as error:
                 self._jobs.pop(job_id, None)
-            self._capacity.release()
-            raise
-        entry.future = future
-        future.add_done_callback(lambda completed, current=job_id: self._on_done(current, completed))
+                self._capacity.release()
+                if self._shutdown:
+                    raise AnalysisJobStateConflictError(
+                        "Job service kapatıldı."
+                    ) from error
+                raise
+            entry.future = future
+            future.add_done_callback(
+                lambda completed, current=job_id: self._on_done(current, completed)
+            )
         return summary
 
     def get(self, job_id: str) -> AnalysisJobSummary:
@@ -160,6 +297,39 @@ class AnalysisJobService:
             return tuple(item[0] for item in (entry.artifacts or {}).values())
 
     def artifact_path(self, job_id: str, artifact_id: str) -> tuple[AnalysisArtifactSummary, Path]:
+        return self._validated_artifact(job_id, artifact_id)
+
+    def acquire_artifact(
+        self,
+        job_id: str,
+        artifact_id: str,
+    ) -> tuple[AnalysisArtifactSummary, Path]:
+        """Artifact purge'a karşı kısa ömürlü download lease'i edinir."""
+        with self._lock:
+            entry = self._entry(job_id)
+            if entry.purge_in_progress:
+                raise AnalysisArtifactNotFoundError("Artifact bulunamadı.")
+            metadata, resolved = self._validated_artifact(
+                job_id,
+                artifact_id,
+            )
+            entry.artifact_leases += 1
+            return metadata, resolved
+
+    def release_artifact(self, job_id: str) -> None:
+        with self._lock:
+            entry = self._jobs.get(job_id)
+            if entry is None or entry.artifact_leases <= 0:
+                raise AnalysisJobStateConflictError(
+                    "Aktif artifact download lease'i bulunamadı."
+                )
+            entry.artifact_leases -= 1
+
+    def _validated_artifact(
+        self,
+        job_id: str,
+        artifact_id: str,
+    ) -> tuple[AnalysisArtifactSummary, Path]:
         with self._lock:
             entry = self._entry(job_id)
             value = (entry.artifacts or {}).get(artifact_id)
@@ -177,13 +347,7 @@ class AnalysisJobService:
             entry = self._entry(job_id)
             status = entry.summary.status
             if status is AnalysisJobStatus.QUEUED and entry.future is not None and entry.future.cancel():
-                entry.summary = replace(
-                    entry.summary,
-                    status=AnalysisJobStatus.CANCELLED,
-                    finished_at=self._utc_now(),
-                    progress_stage="CANCELLED",
-                    cancellation_requested=True,
-                )
+                self._publish_cancelled(entry)
                 return entry.summary
             if status is AnalysisJobStatus.RUNNING:
                 entry.summary = replace(entry.summary, cancellation_requested=True)
@@ -201,19 +365,47 @@ class AnalysisJobService:
 
     def purge_expired(self) -> int:
         threshold = self._utc_now() - timedelta(seconds=float(self.settings.retention_seconds))
-        removed: list[str] = []
+        candidates: list[str] = []
         with self._lock:
             for job_id, entry in tuple(self._jobs.items()):
                 if (
                     entry.summary.status.terminal
                     and entry.summary.finished_at is not None
                     and entry.summary.finished_at < threshold
+                    and entry.artifact_leases == 0
+                    and entry.authorization_leases == 0
+                    and not entry.purge_in_progress
                 ):
-                    self._jobs.pop(job_id)
-                    removed.append(job_id)
-        for job_id in removed:
-            self._remove_job_output(job_id)
-        return len(removed)
+                    candidates.append(job_id)
+        removed_count = 0
+        for job_id in candidates:
+            with self._lock:
+                entry = self._jobs.get(job_id)
+                if (
+                    entry is None
+                    or not entry.summary.status.terminal
+                    or entry.summary.finished_at is None
+                    or entry.summary.finished_at >= threshold
+                    or entry.artifact_leases != 0
+                    or entry.authorization_leases != 0
+                    or entry.purge_in_progress
+                ):
+                    continue
+                entry.purge_in_progress = True
+            cleanup_succeeded = False
+            try:
+                self._remove_job_output(job_id)
+                cleanup_succeeded = True
+            finally:
+                with self._lock:
+                    current = self._jobs.get(job_id)
+                    if current is entry:
+                        if cleanup_succeeded:
+                            self._jobs.pop(job_id, None)
+                            removed_count += 1
+                        else:
+                            entry.purge_in_progress = False
+        return removed_count
 
     def capacity(self) -> tuple[int, int, int]:
         with self._lock:
@@ -222,21 +414,24 @@ class AnalysisJobService:
         return running, queued, self.settings.maximum_running_jobs + self.settings.maximum_queued_jobs
 
     def shutdown(self, wait: bool = True) -> None:
-        self._shutdown = True
+        with self._lock:
+            self._shutdown = True
         self._executor.shutdown(wait=wait, cancel_futures=True)
 
     def _run_job(self, job_id: str, request: ExternalSourceAnalysisRequest) -> ExternalSourceAnalysisResult:
-        with self._lock:
-            entry = self._entry(job_id)
-            if entry.summary.status is AnalysisJobStatus.CANCELLED:
-                raise AnalysisJobStateConflictError("Cancelled job çalıştırılamaz.")
-            entry.summary = replace(
-                entry.summary,
-                status=AnalysisJobStatus.RUNNING,
-                started_at=self._utc_now(),
-                progress_stage="EXTERNAL_ANALYSIS",
-            )
         try:
+            with self._lock:
+                entry = self._entry(job_id)
+                if entry.summary.status is AnalysisJobStatus.CANCELLED:
+                    raise AnalysisJobStateConflictError(
+                        "Cancelled job çalıştırılamaz."
+                    )
+                entry.summary = replace(
+                    entry.summary,
+                    status=AnalysisJobStatus.RUNNING,
+                    started_at=self._utc_now(),
+                    progress_stage="EXTERNAL_ANALYSIS",
+                )
             result = self._runner_factory().run(request)
             with self._lock:
                 entry = self._entry(job_id)
@@ -244,6 +439,11 @@ class AnalysisJobService:
                 artifacts = self._collect_artifacts(job_id, result)
                 entry.artifacts = artifacts
                 entry.result = self._result_summary(job_id, result, terminal)
+                entry.github_discovery_snapshot = self._github_discovery_snapshot(
+                    request,
+                    result,
+                    terminal,
+                )
                 entry.summary = replace(
                     entry.summary,
                     status=terminal,
@@ -260,10 +460,109 @@ class AnalysisJobService:
                 )
             return result
         finally:
-            self._capacity.release()
+            try:
+                with self._lock:
+                    entry = self._jobs.get(job_id)
+                    if entry is not None and not entry.summary.status.terminal:
+                        self._publish_worker_failure(entry)
+            finally:
+                self._capacity.release()
+
+    @staticmethod
+    def _github_discovery_snapshot(
+        request: ExternalSourceAnalysisRequest,
+        result: ExternalSourceAnalysisResult,
+        terminal: AnalysisJobStatus,
+    ) -> _GitHubDiscoverySnapshot | None:
+        source = request.source
+        sha = result.resolved_commit_sha
+        if (
+            not isinstance(source, PublicGitHubRepository)
+            or request.execution_policy
+            is not ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY
+            or result.status is not ExternalAnalysisStatus.STATIC_COMPLETED
+            or terminal is not AnalysisJobStatus.COMPLETED
+            or result.acquisition_status != "COMPLETED"
+            or result.cleanup_status
+            is not ExternalWorkspaceCleanupStatus.COMPLETED
+            or not isinstance(sha, str)
+            or len(sha) != 40
+            or any(character not in "0123456789abcdefABCDEF" for character in sha)
+            or not result.github_owner
+            or not result.github_repository
+        ):
+            return None
+        resolved_repository_url = (
+            f"https://github.com/{result.github_owner}/{result.github_repository}"
+        )
+        if source.repository_url.casefold() != resolved_repository_url.casefold():
+            return None
+        selectors = frozenset(
+            QualifiedTargetSelector(module.module_name, qualified_name)
+            for module in result.module_results
+            if module.module_name is not None
+            for qualified_name in module.discovered_function_names
+        )
+        if not selectors:
+            return None
+        return _GitHubDiscoverySnapshot(
+            repository_url=source.repository_url,
+            resolved_commit_sha=sha.lower(),
+            selectors=selectors,
+        )
+
+    def _acquire_pinned_github_authorization(
+        self,
+        request: ExternalSourceAnalysisRequest,
+    ) -> _JobEntry | None:
+        authorization = request.pinned_github_authorization
+        if authorization is None:
+            return None
+        with self._lock:
+            try:
+                entry = self._entry(authorization.discovery_job_id)
+            except AnalysisJobNotFoundError as error:
+                raise PinnedGitHubAuthorizationError(
+                    "GitHub static discovery snapshot artık mevcut değil."
+                ) from error
+            snapshot = entry.github_discovery_snapshot
+            if (
+                entry.purge_in_progress
+                or snapshot is None
+                or snapshot.repository_url.casefold()
+                != authorization.repository_url.casefold()
+                or snapshot.resolved_commit_sha
+                != authorization.resolved_commit_sha
+                or any(
+                    item not in snapshot.selectors
+                    for item in authorization.selectors
+                )
+            ):
+                raise PinnedGitHubAuthorizationError(
+                    "Pinned GitHub authorization registry snapshot ile eşleşmiyor."
+                )
+            entry.authorization_leases += 1
+            return entry
+
+    def _release_pinned_github_authorization(
+        self,
+        discovery_job_id: str,
+        leased_entry: _JobEntry,
+    ) -> None:
+        with self._lock:
+            current = self._jobs.get(discovery_job_id)
+            if current is not leased_entry or current.authorization_leases <= 0:
+                raise AnalysisJobStateConflictError(
+                    "Aktif pinned GitHub authorization lease'i bulunamadı."
+                )
+            current.authorization_leases -= 1
 
     def _on_done(self, job_id: str, future: Future[ExternalSourceAnalysisResult]) -> None:
         if future.cancelled():
+            with self._lock:
+                entry = self._jobs.get(job_id)
+                if entry is not None:
+                    self._publish_cancelled(entry)
             self._capacity.release()
             return
         error = future.exception()
@@ -271,15 +570,84 @@ class AnalysisJobService:
             return
         with self._lock:
             entry = self._jobs.get(job_id)
-            if entry is None or entry.summary.status is AnalysisJobStatus.CANCELLED:
+            if (
+                entry is None
+                or entry.summary.status
+                in {AnalysisJobStatus.CANCELLED, AnalysisJobStatus.FAILED}
+            ):
                 return
-            entry.summary = replace(
+            self._publish_worker_failure(entry)
+
+    def _publish_cancelled(self, entry: _JobEntry) -> None:
+        entry.summary = replace(
+            entry.summary,
+            status=AnalysisJobStatus.CANCELLED,
+            finished_at=entry.summary.finished_at or self._utc_now(),
+            progress_stage="CANCELLED",
+            cancellation_requested=True,
+        )
+        if entry.result is None:
+            entry.result = self._safe_empty_terminal_result(
                 entry.summary,
-                status=AnalysisJobStatus.FAILED,
-                finished_at=self._utc_now(),
-                progress_stage="FAILED",
-                safe_error_category="INTERNAL_WORKER_ERROR",
+                AnalysisJobStatus.CANCELLED,
+                "CANCELLED",
+                cleanup_status=ExternalWorkspaceCleanupStatus.NOT_REQUIRED,
             )
+
+    def _publish_worker_failure(self, entry: _JobEntry) -> None:
+        entry.summary = replace(
+            entry.summary,
+            status=AnalysisJobStatus.FAILED,
+            finished_at=self._utc_now(),
+            progress_stage="FAILED",
+            safe_error_category="INTERNAL_WORKER_ERROR",
+        )
+        entry.artifacts = {}
+        entry.github_discovery_snapshot = None
+        entry.result = self._safe_empty_terminal_result(
+            entry.summary,
+            AnalysisJobStatus.FAILED,
+            "INTERNAL_WORKER_ERROR",
+            cleanup_status=ExternalWorkspaceCleanupStatus.FAILED,
+        )
+
+    @staticmethod
+    def _safe_empty_terminal_result(
+        summary: AnalysisJobSummary,
+        status: AnalysisJobStatus,
+        issue: str,
+        *,
+        cleanup_status: ExternalWorkspaceCleanupStatus,
+    ) -> AnalysisJobResultSummary:
+        return AnalysisJobResultSummary(
+            job_id=summary.job_id,
+            source_kind=summary.source_kind,
+            analysis_policy=summary.analysis_policy,
+            status=status,
+            acquisition_status=None,
+            resolved_commit_sha=None,
+            discovered_module_count=0,
+            selected_module_count=0,
+            discovered_function_count=0,
+            analyzed_function_count=0,
+            limit_skipped_function_count=0,
+            selection_skipped_function_count=0,
+            deadline_skipped_function_count=0,
+            project_line_coverage_percent=None,
+            project_branch_coverage_percent=None,
+            project_coverage=None,
+            duration_seconds=0.0,
+            cleanup_status=cleanup_status.value,
+            modules=(),
+            issues=(issue,),
+            project_timeout_seconds=summary.project_timeout_seconds,
+            project_deadline_exceeded=summary.project_deadline_exceeded,
+            last_completed_stage=summary.last_completed_stage,
+            deadline_stage=summary.deadline_stage,
+            completed_function_count=0,
+            partial_function_count=0,
+            timed_out_function_count=0,
+        )
 
     def _collect_artifacts(
         self, job_id: str, result: ExternalSourceAnalysisResult

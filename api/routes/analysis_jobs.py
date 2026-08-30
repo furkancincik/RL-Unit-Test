@@ -7,6 +7,8 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
+from starlette.background import BackgroundTask
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from analyzer.python_source_reader import (
     PythonSourceEncodingError,
@@ -25,6 +27,7 @@ from api.schemas.analysis_jobs import (
 )
 from models.external_source_analysis_result import (
     ExternalAnalysisConfiguration,
+    ExternalExecutionPolicy,
     ExternalModuleSelection,
     ExternalModuleSelectionMode,
     ExternalSourcePolicyValidationError,
@@ -44,6 +47,7 @@ from services.analysis_job_service import (
     AnalysisJobQueueFullError,
     AnalysisJobService,
     AnalysisJobStateConflictError,
+    PinnedGitHubAuthorizationError,
 )
 from services.external_source_analysis_service import (
     portable_upload_module_identity,
@@ -166,15 +170,49 @@ async def submit_upload(
     analysis: Annotated[str, Form()] = "{}",
 ) -> JobStatusResponse:
     service = _service(request)
+    form = await request.form()
+    form_items = tuple(form.multi_items())
+    upload_parts = tuple(
+        value
+        for _, value in form_items
+        if isinstance(value, StarletteUploadFile)
+    )
+    named_file_parts = tuple(
+        value
+        for key, value in form_items
+        if key == "file" and isinstance(value, StarletteUploadFile)
+    )
+    invalid_form_shape = (
+        len(named_file_parts) != 1
+        or named_file_parts[0] is not file
+        or len(upload_parts) != 1
+        or any(key not in {"file", "analysis"} for key, _ in form_items)
+        or sum(key == "analysis" for key, _ in form_items) > 1
+    )
+    if invalid_form_shape:
+        for upload in upload_parts:
+            await upload.close()
+        raise HTTPException(
+            status_code=422,
+            detail="Upload isteği tam olarak bir Python dosyası içermelidir.",
+        )
     try:
-        options = AnalysisOptionsRequest.model_validate_json(analysis)
-    except ValidationError as error:
-        raise HTTPException(status_code=422, detail="Upload analysis configuration geçersiz.") from error
-    supplied_name = file.filename or "upload.py"
-    if Path(supplied_name).suffix.lower() != ".py":
-        raise HTTPException(status_code=422, detail="Upload .py uzantılı olmalıdır.")
-    content = await file.read(service.settings.maximum_upload_bytes + 1)
-    await file.close()
+        try:
+            options = AnalysisOptionsRequest.model_validate_json(analysis)
+        except ValidationError as error:
+            raise HTTPException(
+                status_code=422,
+                detail="Upload analysis configuration geçersiz.",
+            ) from error
+        supplied_name = file.filename or "upload.py"
+        if Path(supplied_name).suffix.lower() != ".py":
+            raise HTTPException(
+                status_code=422,
+                detail="Upload .py uzantılı olmalıdır.",
+            )
+        content = await file.read(service.settings.maximum_upload_bytes + 1)
+    finally:
+        await file.close()
     if len(content) > service.settings.maximum_upload_bytes:
         raise HTTPException(status_code=413, detail="Upload byte limiti aşıldı.")
     try:
@@ -197,22 +235,65 @@ async def submit_upload(
 
 @router.post("/jobs/github", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
 def submit_github(payload: GitHubJobRequest, request: Request) -> JobStatusResponse:
+    dynamic = (
+        payload.analysis.policy
+        is ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS
+    )
+    if dynamic and payload.ref is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Pinned GitHub dynamic ref değerini static snapshot'tan alır.",
+        )
+    if dynamic and payload.discovery_job_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Pinned GitHub dynamic başarılı static discovery job gerektirir.",
+        )
+    if not dynamic and payload.discovery_job_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Discovery job referansı yalnız pinned GitHub dynamic için kullanılır.",
+        )
     try:
         normalized_url, _, _ = (
             SourceAcquisitionService.validate_public_github_repository(
-                str(payload.repository_url), payload.ref
+                str(payload.repository_url), None if dynamic else payload.ref
             )
         )
     except SourceAcquisitionValidationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return _submit(
-        _service(request),
-        PublicGitHubRepository(
-            repository_url=normalized_url,
-            ref=payload.ref,
-        ),
-        payload.analysis,
+    service = _service(request)
+    source = PublicGitHubRepository(
+        repository_url=normalized_url,
+        ref=None if dynamic else payload.ref,
     )
+    if not dynamic:
+        return _submit(service, source, payload.analysis)
+    try:
+        configuration = _configuration(
+            payload.analysis,
+            service.settings.output_root,
+            source,
+        )
+        summary = service.submit_pinned_github_dynamic(
+            discovery_job_id=payload.discovery_job_id or "",
+            repository_url=normalized_url,
+            configuration=configuration,
+            trusted_execution_acknowledged=(
+                payload.analysis.trusted_execution_acknowledged
+            ),
+        )
+    except (
+        PinnedGitHubAuthorizationError,
+        AnalysisJobStateConflictError,
+    ) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except AnalysisJobQueueFullError as error:
+        raise HTTPException(
+            status_code=429,
+            detail="Analysis job kuyruğu dolu.",
+        ) from error
+    return JobStatusResponse.model_validate(summary.to_dict())
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -249,11 +330,17 @@ def artifacts(job_id: str, request: Request) -> ArtifactListResponse:
 
 @router.get("/jobs/{job_id}/artifacts/{artifact_id}", response_class=FileResponse)
 def download_artifact(job_id: str, artifact_id: str, request: Request) -> FileResponse:
+    service = _service(request)
     try:
-        metadata, path = _service(request).artifact_path(job_id, artifact_id)
+        metadata, path = service.acquire_artifact(job_id, artifact_id)
     except (AnalysisJobNotFoundError, AnalysisArtifactNotFoundError) as error:
         raise HTTPException(status_code=404, detail="Artifact bulunamadı.") from error
-    return FileResponse(path, media_type=metadata.content_type, filename=metadata.filename)
+    return FileResponse(
+        path,
+        media_type=metadata.content_type,
+        filename=metadata.filename,
+        background=BackgroundTask(service.release_artifact, job_id),
+    )
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobStatusResponse)
