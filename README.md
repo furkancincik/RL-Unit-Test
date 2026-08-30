@@ -41,7 +41,7 @@ Start the localhost Web UI and API with:
 .\.venv\Scripts\python.exe -m api.server
 ```
 
-Open `http://127.0.0.1:8000/`. The browser supports separate inline-code, single-`.py` upload, and anonymous public-GitHub-repository URL flows. Static discovery is the default. Inline and upload sources may use trusted dynamic analysis, which executes the supplied Python code and therefore requires an explicit acknowledgement and a positive timeout; timeout is not a sandbox. Public GitHub repositories are static-discovery-only.
+Open `http://127.0.0.1:8000/`. The browser supports separate inline-code, single-`.py` upload, and anonymous public-GitHub-repository URL flows. Static discovery is the default. Inline and upload sources may use trusted dynamic analysis, which executes the supplied Python code and therefore requires an explicit acknowledgement and a positive timeout. A public GitHub source can enter trusted dynamic analysis only after a successful static job exposes its actual resolved commit SHA and discovered targets; the user must explicitly trust that exact snapshot and select an explicit target. Timeout is not a sandbox, and dependencies are not installed.
 
 ---
 
@@ -152,6 +152,7 @@ CLI, interactive terminal, API, and Web selectors accept an exact top-level `Fun
 - Safe Untyped Primitive Parameter Inference from AST Defaults, Comparisons, Boolean Identity, and Arithmetic
 - Annotation-First Type Resolution with Deterministic Numeric Witnesses
 - Primitive and Collection Type Support
+- Typed Primitive Literal-Left Collection Membership (`literal in collection` / `literal not in collection`)
 - `list`, `tuple`, `set`, `Optional`, `Union`, and Nested Type Support
 - Subscript Alias Propagation
 - Loop-Variable Constraint Propagation
@@ -167,6 +168,8 @@ CLI, interactive terminal, API, and Web selectors accept an exact top-level `Fun
 - Concrete Result and Exception Validation
 
 Untyped primitive inference uses only validated AST structure, literal types, operators, and data-flow provenance. It never infers from parameter, function, class, file, or dataset names and contains no fixture-specific hardcoding. Missing, conflicting, call-, attribute-, or subscript-based evidence remains controlled unsupported rather than being guessed.
+
+Literal-left membership synthesis supports primitive schemas for `dict[K, V]` keys, `list[T]`, homogeneous `tuple[T, ...]`, `set[T]`, and `frozenset[T]`. True/false edge polarity, collection truthiness, required/forbidden member contradictions, and copy-on-write candidate materialization are preserved. Bare or ambiguous schemas, fixed heterogeneous tuples, incompatible or unhashable literals, and witnesses that would alter a bounded loop's iteration count remain controlled unsupported.
 
 ---
 
@@ -423,7 +426,7 @@ All file-backed production AST entry points use one PEP 263 source-reading polic
 
 Ignored directories come from one general policy covering Git metadata, virtual environments, caches, build outputs, installed dependencies, `node_modules`, and generated output. Discovery does not follow symlinks, junctions, or reparse points, and every candidate is checked against the resolved project root. Configurable limits cover clone time, repository bytes, Python file count, single-file bytes, total Python bytes, and path depth.
 
-Public GitHub acquisition uses a unique tool-owned system-temp workspace and a shallow, single-branch, no-tags clone. The default branch is used when no ref is supplied; safe branch/tag refs and full 40-character commit refs are supported, with exact commits fetched and checked out detached. Git runs with `shell=False`, credential prompting and helpers disabled, process-local Git configuration, disabled LFS smudge, no submodule recursion, and a disabled hook path. Clone output is discarded; the normalized 40-character SHA resolved from the actual checkout is exposed in the safe result and Web summary. URL/ref validation occurs before job creation or queue-capacity use. Failed or timed-out clones clean their partial workspace, while local user-owned sources are never cleanup targets. No dependency manifest, setup script, package manager, repository code, pytest, coverage, greedy minimization, or RL is executed for a public GitHub source.
+Public GitHub acquisition uses a unique tool-owned system-temp workspace and a shallow, single-branch, no-tags clone. The default branch is used when no ref is supplied; safe branch/tag refs and full 40-character commit refs are supported for static discovery, with exact commits fetched and checked out detached. Git runs with `shell=False`, credential prompting and helpers disabled, process-local Git configuration, disabled LFS smudge, no submodule recursion, and a disabled hook path. Clone output is discarded; the normalized 40-character SHA resolved from the actual checkout is exposed in the safe result and Web summary. URL/ref validation occurs before job creation or queue-capacity use. Failed or timed-out clones clean their partial workspace, while local user-owned sources are never cleanup targets. Static discovery executes no repository code, pytest, coverage, greedy minimization, or RL. A later trusted-dynamic run is authorized only from the server-held successful static snapshot, checks out its exact SHA, and runs explicitly selected discovered targets; branch, tag, or default-ref text is never executed directly. Dependency manifests and package managers are not run in either mode.
 
 The real local-project acceptance discovered top-level, package, and `src/` modules, excluded tests by default, included them on request, ignored `.venv`, and preserved the user-owned workspace. A real temporary local Git fixture verified commit-SHA resolution. Anonymous `ls-remote` access succeeded for both the current origin and GitHub's official small public connectivity fixture. The single official resolver acceptance completed the clone in 1.133 seconds and resolved commit `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`. The fixture contained no Python files; this is reported as a non-fatal `NO_PYTHON_FILES` partial inventory rather than `CLONE_FAILED`. That run exposed Windows read-only Git pack cleanup behavior, which now has a regression-tested writable-retry path; the tool-owned workspace was removed and no Git process remained.
 
@@ -442,16 +445,19 @@ Local project directory -+                              |        |
                                                         |               +--> greedy minimization
                                                         |               +--> RL vs greedy report
                                                         +--> Static metadata
-Public GitHub repository URL + optional ref ------------+--> Static metadata only
+Public GitHub repository URL + optional ref ------------+--> Static snapshot + resolved SHA
+                                                                  |
+                                                                  +--> Explicit trust + target
+                                                                  +--> Exact-SHA trusted dynamic
 ```
 
-`STATIC_DISCOVERY_ONLY` is the default and never starts pytest, coverage, greedy minimization, or RL. Inline, upload, and user-owned local sources may execute only when the caller selects `TRUSTED_DYNAMIC_ANALYSIS` explicitly. Public GitHub repositories are always static-only; a trusted-dynamic GitHub request is rejected rather than silently downgraded. Per-function and optional total-project timeouts bound trusted local work; they are not a security sandbox. Trusted external code can still access host resources, so arbitrary untrusted execution remains unsupported.
+`STATIC_DISCOVERY_ONLY` is the default and never starts pytest, coverage, greedy minimization, or RL. Inline, upload, and user-owned local sources may execute only when the caller selects `TRUSTED_DYNAMIC_ANALYSIS` explicitly. Public GitHub dynamic analysis additionally requires a successful terminal static-discovery job, its authoritative 40-character resolved SHA, an explicit acknowledgement, and explicit module/target selectors present in that snapshot. Repository or ref changes invalidate the trust state, and a branch, tag, or default ref cannot directly authorize execution. Per-function and optional total-project timeouts bound trusted work; they are not a security sandbox. Trusted external code can still access host resources, so arbitrary untrusted execution remains unsupported.
 
 Inline and upload payloads are byte-limited, encoding/syntax checked, written to unique tool-owned system-temp files, retained through analysis, and cleaned afterward. Zero-byte, whitespace-only, and BOM-only uploads are rejected before job creation, while comment-only, docstring-only, and valid zero-function modules remain valid sources. Inline transport normalization has one immutable owner and is idempotent: one leading BOM is accepted without changing LF/CRLF semantics; repeated leading or mid-source BOMs remain controlled syntax errors, matching upload behavior. Their source text and bytes are never serialized. Local directories remain user-owned. Public GitHub sources retain the secure anonymous clone and resolved-commit-SHA policy, and their tool-owned clone survives until persistent artifacts and the atomic external report are written.
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2337 passed, 1 skipped in 716.99s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2426 passed, 1 skipped in 662.18s`.
 
 ---
 
@@ -463,7 +469,7 @@ Source submission remains explicit and separate:
 
 - `POST /api/v1/jobs/inline` accepts inline Python JSON.
 - `POST /api/v1/jobs/upload` accepts one multipart `.py` upload.
-- `POST /api/v1/jobs/github` accepts a public GitHub repository URL and an optional safe branch/tag/full-commit ref.
+- `POST /api/v1/jobs/github` accepts a public GitHub repository URL and an optional safe branch/tag/full-commit ref for static discovery; a later pinned dynamic request references the successful static job instead of trusting a client SHA.
 - No API endpoint accepts an arbitrary local server filesystem path. Local project selection remains terminal-only.
 
 ```text
@@ -480,17 +486,21 @@ Multipart .py ---+--> Bounded job queue --> External analysis service
 
 Public GitHub HTTPS + optional ref --> Pre-queue URL/ref validation
                                            +--> Bounded job queue
-                                           +--> Static discovery only
+                                           +--> Static discovery snapshot
                                            +--> Actual resolved commit SHA
+                                           +--> Explicit trust + discovered target
+                                           +--> Exact-SHA trusted dynamic job
 ```
 
 `GET /api/v1/jobs/{job_id}` returns safe status and progress metadata. The `/result` endpoint returns `409` until a result exists, `/artifacts` lists allowlisted persistent artifacts, and `/artifacts/{artifact_id}` downloads by server-generated opaque ID without accepting client paths. `GET /api/v1/health` reports bounded queue capacity without running a pipeline.
 
 The backend limits concurrent and queued jobs, inline/upload bytes, and terminal-job retention. Expired terminal records and their server-owned output directories are removed lazily and idempotently; running jobs and user-owned sources are not retention cleanup targets. Raw source, upload bytes, kwargs, expected/actual values, tracebacks, credentials, environment values, and tool-temp paths are not stored in public job models.
 
-`STATIC_DISCOVERY_ONLY` remains the default. For inline and upload sources, `TRUSTED_DYNAMIC_ANALYSIS` requires both `trusted_execution_acknowledged: true` and a positive per-function pipeline timeout. Public GitHub requests cannot select trusted dynamic analysis. GitHub URL/ref and optional bounded `project_timeout_seconds` validation run before job creation, so invalid values do not consume queue capacity. Partial and timed-out jobs retain safe results through the normal HTTP `200` result endpoint. Strategy comparison enables its production greedy baseline. Timeout is not a security sandbox; dynamic execution is only for trusted inline/upload or user-owned local sources.
+`STATIC_DISCOVERY_ONLY` remains the default. For inline and upload sources, `TRUSTED_DYNAMIC_ANALYSIS` requires both `trusted_execution_acknowledged: true` and a positive per-function pipeline timeout. GitHub dynamic analysis requires the same trust acknowledgement plus an explicit target and an opaque reference to a retained successful static snapshot; the server supplies the exact resolved SHA and rejects repository, SHA, or target mismatches before creating a job. GitHub URL/ref and optional bounded `project_timeout_seconds` validation run before job creation, so invalid values do not consume queue capacity. Partial and timed-out jobs retain safe results through the normal HTTP `200` result endpoint. Strategy comparison enables its production greedy baseline. Timeout is not a security sandbox; dynamic execution is only for explicitly trusted sources.
 
 Queued jobs can be cancelled before execution. Running jobs are not falsely reported as cancelled because the production pipeline does not expose a safe job-level worker termination handle; a cancellation request is recorded and the API returns `409` while existing per-function timeout protection remains active. Terminal jobs cannot be cancelled again.
+
+Gate C verifies failure recovery across inline source, one-file multipart upload, and pinned public-GitHub analysis. Invalid pre-admission requests return a safe `4xx` without creating a job, consuming queue capacity, or creating output/temp state. Post-admission controlled failures, timeouts, shutdown-cancelled queued work, and unexpected worker failures publish immutable terminal summaries; `/result` remains safely readable, capacity is released only after run cleanup, retention cleanup is retryable, and an active artifact download lease prevents purge races. Each subsequent run receives a new job ID, runner/output scope, counters, polling generation, and abort state. The live exact-SHA acceptance timed out one selected target and then completed the same target from the same retained snapshot at the identical resolved commit, with measured coverage and no inherited deadline state.
 
 CORS is disabled unless an explicit origin allowlist is supplied. Anonymous public GitHub acquisition uses the existing resolver; private credentials and dependency installation are unsupported. Authentication and rate limiting are not implemented yet.
 
@@ -508,8 +518,10 @@ Then open `http://127.0.0.1:8000/`. The server remains bound to localhost by def
 Kod Yapıştır --------+
 Python .py upload ---+--> Aynı-origin FastAPI job API
 Public GitHub repository URL + optional ref
-                     +--> static-only submission
-                                |
+                     +--> static discovery + resolved SHA
+                     +--> explicit exact-commit trust + target
+                     +--> pinned trusted dynamic submission
+                                 |
                                 +--> QUEUED / RUNNING polling
                                 +--> Terminal result metadata
                                 +--> Scenario-pool target coverage
@@ -521,13 +533,13 @@ Public GitHub repository URL + optional ref
 
 The three browser inputs are separate tabs and map directly to the inline, multipart upload, and public GitHub endpoints. The browser does not guess whether one value is code, a path, or a public GitHub repository URL. Source-specific target, ref, policy, loading, result, and error state is reset or restored without leaking into another mode. Server filesystem and local project-directory input is intentionally absent from the Web UI; local project analysis remains available through the terminal workflow.
 
-`STATIC_DISCOVERY_ONLY` is selected by default. Inline and upload `TRUSTED_DYNAMIC_ANALYSIS` reveals a visible execution warning and requires a separate acknowledgement before submission. GitHub mode forces static discovery, disables dynamic-only controls, accepts an optional ref, and displays the actual resolved commit SHA returned by the backend. Timeout limits trusted local work but is not a sandbox; dynamic mode must only be used for trusted code. Advanced settings expose the existing API module-selection modes, module/function limits, optional total project timeout, episode count, deterministic random seed `42`, pytest/coverage timeout, per-function pipeline timeout, greedy minimization, and RL–greedy comparison without duplicating analysis logic in the browser. Greedy minimization is enabled by default in the Web UI because it is the primary minimum-suite baseline; the more expensive RL–greedy comparison remains optional. The backward-compatible API and service defaults are unchanged.
+`STATIC_DISCOVERY_ONLY` is selected by default. Inline and upload `TRUSTED_DYNAMIC_ANALYSIS` reveals a visible execution warning and requires a separate acknowledgement before submission. GitHub mode first performs static discovery and displays the actual resolved commit SHA and discovered targets returned by the backend. Only after the user explicitly trusts that exact commit and selects a discovered target does the dynamic option become available; changing the repository URL or ref clears that trust. Timeout limits trusted work but is not a sandbox, and dependency installation is never attempted. Advanced settings expose the existing API module-selection modes, module/function limits, optional total project timeout, episode count, deterministic random seed `42`, pytest/coverage timeout, per-function pipeline timeout, greedy minimization, and RL–greedy comparison without duplicating analysis logic in the browser. Greedy minimization is enabled by default in the Web UI because it is the primary minimum-suite baseline; the more expensive RL–greedy comparison remains optional. The backward-compatible API and service defaults are unchanged.
 
-The page polls one opaque job ID at a time with bounded retry/backoff and stops at `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, or `CANCELLED`. Queued cancellation is distinguished from the `409` response for a running job. Dynamic function cards keep three measured results distinct: the concrete-valid full scenario pool is the attainable target, greedy is the independently verified minimized suite, and best RL is the actual coverage snapshot of the highest-ranked episode. A lower RL result never replaces the attainable target. Greedy and RL preservation are reported against exact line and branch identities, and a non-preserving greedy candidate is not presented as a successful minimum. `null` remains `Ölçülmedi`, and the UI does not calculate its own strategy winner. A separate Project Coverage section renders only the backend's combined project result; it never derives project coverage from function percentages. Generated pytest and JSON reports are listed and downloaded only through server-issued artifact IDs.
+The page polls one opaque job ID at a time with bounded retry/backoff and stops at `COMPLETED`, `PARTIAL`, `FAILED`, `TIMED_OUT`, or `CANCELLED`. Polling and terminal requests carry a captured job identity and generation; starting another run aborts stale requests, while artifact-list failure cannot discard an already validated result. An active non-terminal job blocks duplicate submission, a purged job ends polling with `JOB_NOT_FOUND`, and a rejected pinned-dynamic request clears stale trust. Queued cancellation is distinguished from the `409` response for a running job. Dynamic function cards keep three measured results distinct: the concrete-valid full scenario pool is the attainable target, greedy is the independently verified minimized suite, and best RL is the actual coverage snapshot of the highest-ranked episode. A lower RL result never replaces the attainable target. Greedy and RL preservation are reported against exact line and branch identities, and a non-preserving greedy candidate is not presented as a successful minimum. `null` remains `Ölçülmedi`, and the UI does not calculate its own strategy winner. A separate Project Coverage section renders only the backend's combined project result; it never derives project coverage from function percentages. Generated pytest and JSON reports are listed and downloaded only through server-issued artifact IDs.
 
 The UI uses DOM text APIs for external values and does not place source code in the URL, browser storage, logs, or result surface. Static assets are contained under the fixed `/static` mount. Responses add a self-only Content Security Policy, `nosniff`, no-referrer, frame denial, and a restrictive permissions policy. CORS stays disabled by default. Authentication and rate limiting remain unimplemented and are part of production hardening rather than completed UI functionality.
 
-The automated Web UI contract and real localhost HTTP acceptance cover static and trusted-dynamic inline submission, multipart upload, static-only pinned GitHub routing, resolved-SHA rendering, immutable three-channel static parity, polling, measured coverage, backend-authoritative `TIE` comparison, JSON/generated-pytest downloads, source non-reflection, temp cleanup, and orphan-server cleanup. One leading BOM with LF/CRLF and Unicode completed in inline and multipart channels; repeated BOMs produced the same controlled syntax category and the next valid jobs completed. The browser console had no warning/error, and `/favicon.ico` returns `204` without a binary or external asset. The project-level result is exposed through the same asynchronous job result and artifact endpoints; static discovery keeps it `null`.
+The automated Web UI contract and real localhost HTTP acceptance cover static and trusted-dynamic inline submission, multipart upload, two-phase pinned GitHub authorization, resolved-SHA rendering, explicit target selection, immutable three-channel static parity, polling, measured coverage, backend-authoritative `TIE` comparison, JSON/generated-pytest downloads, source non-reflection, temp cleanup, and orphan-server cleanup. The pinned GitHub acceptance performed static discovery first and then ran one explicit target at the authoritative exact SHA, producing real pytest, coverage, greedy, and RL results; changing the repository/ref cleared the previous trust. One leading BOM with LF/CRLF and Unicode completed in inline and multipart channels; repeated BOMs produced the same controlled syntax category and the next valid jobs completed. The browser console had no warning/error, and `/favicon.ico` returns `204` without a binary or external asset. The project-level result is exposed through the same asynchronous job result and artifact endpoints; static discovery keeps dynamic metrics `null` / `Ölçülmedi`.
 
 A controlled trusted-dynamic acceptance of `sample_complex_code.py` used the Web production configuration (`max_visits_per_node=3`, three episodes, epsilon `0.0`, learning rate `0.5`, discount factor `0.9`, seed `42`, 30-second coverage timeout, 120-second function timeout, greedy and comparison enabled):
 
@@ -736,6 +748,7 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 
 - ✅ Input Candidate Generator
 - ✅ Typed Path Input Generator
+- ✅ Typed Primitive Literal-Left Collection Membership
 - ✅ Loop and Alias-Aware Input Generation
 - ✅ Aggregate-Aware Derived-Value Input Synthesis
 - ✅ Affine `while` Control-Variable Initialization
@@ -797,6 +810,7 @@ The feasibility and concrete-validation layers prevent contradictory or behavior
 - ✅ Atomic Project JSON Report
 - ✅ Four-Mode External Source Analysis API
 - ✅ Static-Only Default and Explicit Trusted Dynamic Policy
+- ✅ Pinned Resolved-SHA GitHub Trusted Dynamic Authorization
 - ✅ Module/Function Selection Limits and Import-Root Isolation
 - ✅ External Coverage, Greedy, and RL Comparison Reporting
 - ✅ Combined Project Coverage in Terminal, JSON, API, Artifacts, and Web UI
@@ -949,14 +963,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2337 passed, 1 skipped in 716.99s`
+`2426 passed, 1 skipped in 662.18s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,337 |
+| Passed | 2,426 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 716.99s |
+| Duration | 662.18s |
 
 ---
 
@@ -1055,6 +1069,8 @@ RL-Unit-Test
 - Separate Inline, Upload, Local Directory, and Public GitHub Source Models
 - Static-Only External Discovery Default
 - Explicit Trusted External Dynamic Analysis
+- Pinned Resolved-SHA GitHub Trusted Dynamic Authorization
+- Typed Primitive Literal-Left Collection Membership Synthesis
 - Deterministic External Module and Function Limits
 - Subprocess/Worker Import-Root Isolation
 - External Source to Coverage, Greedy, and RL Comparison Integration
@@ -1120,6 +1136,7 @@ RL-Unit-Test
 - The available deterministic greedy baseline is 1-minimal after backward elimination, not globally optimal; exact global minimum-suite guarantees are not available.
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function and total-project timeouts do not prevent source code from accessing host files, processes, or networks.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
+- Trusted GitHub dynamic execution is limited to a retained successful static snapshot, its server-authoritative exact SHA, and explicitly selected discovered targets. It does not add general object setup/method-effect synthesis or guarantee high coverage for every external source.
 - The FastAPI job backend and local Web UI completed final localhost browser hardening, but authentication and rate limiting are not implemented. The terminal workflow remains the only interface for user-owned local project directories.
 - Job records are held in the application process memory. Restarting the API server does not restore previous job states; even when artifact files remain on disk, access through the old job endpoint is not guaranteed because the new process does not know the previous opaque job identifiers.
 
