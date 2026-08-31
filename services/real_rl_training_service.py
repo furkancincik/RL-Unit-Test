@@ -47,6 +47,11 @@ from models.coverage_result import (
     CoverageResult,
     FunctionCoverageResult,
 )
+from generator.safe_method_setup_plan import (
+    SafeSetupPlanRejection,
+    analyze_safe_object_setup_context,
+    materialize_safe_object_setup_plan,
+)
 from models.pipeline_diagnostic_result import (
     PipelineDiagnosticResult,
     PipelineFunnelSnapshot,
@@ -213,6 +218,12 @@ class RealRLTrainingResult:
 
 class _ControlledPipelineFailure(ValueError):
     """Public diagnostic olarak döndürülebilen kontrollü domain duruşu."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ConcreteValidationOutcome:
+    matched: bool
+    category: str | None = None
 
 
 @dataclass(slots=True)
@@ -526,6 +537,7 @@ class RealRLTrainingService:
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
         import_root: str | Path | None = None,
+        allow_safe_object_setup: bool = True,
     ) -> RealRLTrainingResult | PipelineDiagnosticResult:
         """Mevcut exception davranışını koruyarak production run çalıştırır."""
         self._active_diagnostic_accumulator = None
@@ -535,6 +547,8 @@ class RealRLTrainingService:
             raise TypeError("run_greedy_baseline bool olmalıdır.")
         if not isinstance(run_strategy_comparison, bool):
             raise TypeError("run_strategy_comparison bool olmalıdır.")
+        if not isinstance(allow_safe_object_setup, bool):
+            raise TypeError("allow_safe_object_setup bool olmalıdır.")
         self._validate_optional_timeout(
             greedy_timeout_seconds,
             "greedy_timeout_seconds",
@@ -572,6 +586,7 @@ class RealRLTrainingService:
                     "run_strategy_comparison": run_strategy_comparison,
                     "comparison_timeout_seconds": comparison_timeout_seconds,
                     "import_root": import_root,
+                    "allow_safe_object_setup": allow_safe_object_setup,
                 },
                 source_file=Path(source_file).resolve(),
                 function_name=function_name,
@@ -618,6 +633,7 @@ class RealRLTrainingService:
                 run_strategy_comparison=run_strategy_comparison,
                 comparison_timeout_seconds=comparison_timeout_seconds,
                 import_root=import_root,
+                allow_safe_object_setup=allow_safe_object_setup,
             )
         except Exception as error:
             accumulator = self._active_diagnostic_accumulator
@@ -674,6 +690,7 @@ class RealRLTrainingService:
         run_strategy_comparison: bool = False,
         comparison_timeout_seconds: float | None = None,
         import_root: str | Path | None = None,
+        allow_safe_object_setup: bool = True,
     ) -> RealRLTrainingResult:
         """
         Seçilen fonksiyon için gerçek coverage tabanlı RL eğitimi yapar.
@@ -885,6 +902,14 @@ class RealRLTrainingService:
         )
         if custom_object_reason is not None:
             raise _ControlledPipelineFailure(custom_object_reason)
+        setup_context = None
+        if allow_safe_object_setup and custom_object_spec is not None:
+            setup_context, _ = analyze_safe_object_setup_context(
+                source_tree,
+                module_identity=normalized_module_path,
+                target_name=normalized_function_name,
+                custom_object_spec=custom_object_spec,
+            )
 
         stage_started = diagnostic.start_stage(
             PipelineStage.PATH_DISCOVERY
@@ -904,6 +929,8 @@ class RealRLTrainingService:
         diagnostic.complete_stage(
             PipelineStage.PATH_DISCOVERY, stage_started
         )
+        if setup_context is not None:
+            paths = [setup_context.rewrite_path(path) for path in paths]
 
         parameter_names = (
             method_spec.analysis_parameter_names
@@ -921,6 +948,11 @@ class RealRLTrainingService:
                     tuple(parameter_names),
                     dict(parameter_types),
                 )
+            )
+        if setup_context is not None:
+            parameter_names, parameter_types = setup_context.analysis_metadata(
+                tuple(parameter_names),
+                dict(parameter_types),
             )
 
         stage_started = diagnostic.start_stage(
@@ -1035,8 +1067,9 @@ class RealRLTrainingService:
             candidate_values_by_path=(
                 candidate_values_by_path
             ),
+            setup_context=setup_context,
         )
-        if custom_object_spec is not None:
+        if setup_context is None and custom_object_spec is not None:
             scenarios = [
                 custom_object_spec.bind_scenario(
                     scenario,
@@ -1084,12 +1117,14 @@ class RealRLTrainingService:
         stage_started = diagnostic.start_stage(
             PipelineStage.CONCRETE_VALIDATION
         )
-        scenario_tuple = self._filter_executable_scenarios(
-            source_file=normalized_source_file,
-            module_path=normalized_module_path,
-            function_name=function.name,
-            scenarios=tuple(scenarios),
-            import_root=normalized_import_root,
+        scenario_tuple, concrete_rejection_counts = (
+            self._filter_executable_scenarios_with_rejections(
+                source_file=normalized_source_file,
+                module_path=normalized_module_path,
+                function_name=function.name,
+                scenarios=tuple(scenarios),
+                import_root=normalized_import_root,
+            )
         )
 
         concrete_rejected_count = len(scenarios) - len(scenario_tuple)
@@ -1097,11 +1132,7 @@ class RealRLTrainingService:
         diagnostic.concrete_validation_rejected_count = (
             concrete_rejected_count
         )
-        diagnostic.concrete_rejection_counts = (
-            (("EXECUTION_MISMATCH", concrete_rejected_count),)
-            if concrete_rejected_count
-            else ()
-        )
+        diagnostic.concrete_rejection_counts = concrete_rejection_counts
         diagnostic.final_scenario_count = len(scenario_tuple)
 
         if not scenario_tuple:
@@ -1530,6 +1561,24 @@ class RealRLTrainingService:
         uyuşmuyorsa senaryo ulaşılamaz veya yanlış modellenmiş kabul
         edilir ve RL aksiyon kümesine eklenmez.
         """
+        executable, _ = self._filter_executable_scenarios_with_rejections(
+            source_file=source_file,
+            module_path=module_path,
+            function_name=function_name,
+            scenarios=scenarios,
+            import_root=import_root,
+        )
+        return executable
+
+    def _filter_executable_scenarios_with_rejections(
+        self,
+        *,
+        source_file: Path,
+        module_path: str | None = None,
+        function_name: str,
+        scenarios: tuple[Scenario, ...],
+        import_root: Path | None = None,
+    ) -> tuple[tuple[Scenario, ...], tuple[tuple[str, int], ...]]:
         previous_path = tuple(sys.path)
         previous_modules = frozenset(sys.modules)
         if import_root is not None:
@@ -1547,7 +1596,11 @@ class RealRLTrainingService:
                 source_file=source_file,
                 module_path=(
                     module_path
-                    if import_root is not None and module_path is not None
+                    if module_path is not None
+                    and (
+                        import_root is not None
+                        or any(item.setup_plan is not None for item in scenarios)
+                    )
                     else None
                 ),
             )
@@ -1557,15 +1610,22 @@ class RealRLTrainingService:
             )
 
             executable_scenarios: list[Scenario] = []
+            rejection_counts: Counter[str] = Counter()
             for scenario in scenarios:
-                if self._scenario_matches_execution(
+                outcome = self._scenario_validation_outcome(
                     target_function=target_function,
                     target_module=target_module,
                     scenario=scenario,
                     method_name=(function_name if target_class_name else None),
-                ):
+                )
+                if outcome.matched:
                     executable_scenarios.append(scenario)
-            return tuple(executable_scenarios)
+                elif outcome.category is not None:
+                    rejection_counts[outcome.category] += 1
+            return (
+                tuple(executable_scenarios),
+                tuple(sorted(rejection_counts.items())),
+            )
         finally:
             if import_root is not None:
                 sys.path[:] = previous_path
@@ -1679,8 +1739,48 @@ class RealRLTrainingService:
         Tek bir senaryonun gerçek çalışma sonucu ile beklenen
         davranışının uyuşup uyuşmadığını döndürür.
         """
+        return cls._scenario_validation_outcome(
+            target_function=target_function,
+            target_module=target_module,
+            scenario=scenario,
+            method_name=method_name,
+        ).matched
+
+    @classmethod
+    def _scenario_validation_outcome(
+        cls,
+        *,
+        target_function: Callable[..., Any],
+        scenario: Scenario,
+        target_module: ModuleType | None = None,
+        method_name: str | None = None,
+    ) -> _ConcreteValidationOutcome:
         keyword_arguments: dict[str, Any] = {}
+        setup_bound_names: set[str] = set()
+        setup_receiver: object | None = None
+        if scenario.setup_plan is not None:
+            if target_module is None:
+                raise TypeError(
+                    "Setup plan concrete validation target module gerektirir."
+                )
+            try:
+                setup_arguments, setup_receiver = materialize_safe_object_setup_plan(
+                    scenario.setup_plan,
+                    target_module,
+                    include_receiver=True,
+                )
+            except (AssertionError, TypeError, RuntimeError):
+                raise
+            except (SafeSetupPlanRejection, ValueError):
+                return _ConcreteValidationOutcome(
+                    matched=False,
+                    category="SETUP_EXECUTION_REJECTED",
+                )
+            keyword_arguments.update(setup_arguments)
+            setup_bound_names.update(setup_arguments)
         for name, value in scenario.keyword_arguments:
+            if name in setup_bound_names:
+                continue
             if isinstance(value, SafeObjectConstructionBlueprint):
                 if target_module is None:
                     raise TypeError(
@@ -1697,27 +1797,47 @@ class RealRLTrainingService:
             if method_name is None:
                 actual_result = target_function(**keyword_arguments)
             else:
-                instance = target_function(
-                    **copy.deepcopy(dict(scenario.constructor_arguments))
-                )
+                instance = setup_receiver
+                if instance is None:
+                    instance = target_function(
+                        **copy.deepcopy(dict(scenario.constructor_arguments))
+                    )
+                elif type(instance) is not target_function:
+                    return _ConcreteValidationOutcome(
+                        matched=False,
+                        category="SETUP_EXECUTION_REJECTED",
+                    )
                 method = getattr(instance, method_name)
                 actual_result = method(**keyword_arguments)
         except Exception as error:
             if scenario.expected_exception is None:
-                return False
+                return _ConcreteValidationOutcome(
+                    matched=False,
+                    category="EXECUTION_MISMATCH",
+                )
 
-            return any(
-                exception_type.__name__
-                == scenario.expected_exception
+            matched = any(
+                exception_type.__name__ == scenario.expected_exception
                 for exception_type in type(error).mro()
+            )
+            return _ConcreteValidationOutcome(
+                matched=matched,
+                category=None if matched else "EXECUTION_MISMATCH",
             )
 
         if scenario.expected_exception is not None:
-            return False
+            return _ConcreteValidationOutcome(
+                matched=False,
+                category="EXECUTION_MISMATCH",
+            )
 
-        return cls._values_match(
+        matched = cls._values_match(
             actual=actual_result,
             expected=scenario.expected_result,
+        )
+        return _ConcreteValidationOutcome(
+            matched=matched,
+            category=None if matched else "EXECUTION_MISMATCH",
         )
 
     @staticmethod

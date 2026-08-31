@@ -8,6 +8,7 @@ from analyzer.safe_custom_object import (
     MAX_SAFE_OBJECTS_PER_SCENARIO,
     SafeObjectConstructionBlueprint,
 )
+from generator.safe_method_setup_plan import SafeObjectSetupPlan
 from generator.scenario_generator import Scenario
 
 
@@ -71,6 +72,12 @@ class PytestGenerator:
             for _, value in scenario.keyword_arguments
             if isinstance(value, SafeObjectConstructionBlueprint)
         }
+        custom_object_class_names.update(
+            slot.blueprint.class_name
+            for scenario in scenarios
+            if scenario.setup_plan is not None
+            for slot in scenario.setup_plan.object_slots
+        )
 
         code_lines = self._create_header(
             module_path=normalized_module_path,
@@ -261,6 +268,11 @@ class PytestGenerator:
         )
         if blueprint_count > MAX_SAFE_OBJECTS_PER_SCENARIO:
             raise ValueError("Scenario custom object limitini aşıyor.")
+        if scenario.setup_plan is not None:
+            if not isinstance(scenario.setup_plan, SafeObjectSetupPlan):
+                raise TypeError("Scenario setup_plan türü geçersizdir.")
+            if len(scenario.setup_plan.object_slots) > MAX_SAFE_OBJECTS_PER_SCENARIO:
+                raise ValueError("Scenario setup object limitini aşıyor.")
 
         if (
             scenario.expected_exception is not None
@@ -326,10 +338,6 @@ class PytestGenerator:
                 f"{scenario.priority_level}"
             ),
             (
-                f"    # Normalize DQM skoru: "
-                f"{scenario.dqm_score}"
-            ),
-            (
                 f"    # CFG düğüm yolu: "
                 f"{list(scenario.node_ids)}"
             ),
@@ -339,6 +347,12 @@ class PytestGenerator:
             ),
         ]
         argument_expressions: dict[str, str] = {}
+        if scenario.setup_plan is not None:
+            plan_lines, plan_arguments = self._create_setup_plan_lines(
+                scenario.setup_plan,
+            )
+            code_lines.extend(plan_lines)
+            argument_expressions.update(plan_arguments)
         for argument_name, argument_value in scenario.keyword_arguments:
             if not isinstance(argument_value, SafeObjectConstructionBlueprint):
                 continue
@@ -350,21 +364,39 @@ class PytestGenerator:
             code_lines.append(f"    {variable_name} = {constructor_call}")
             argument_expressions[argument_name] = variable_name
 
+        invocation_arguments = list(scenario.keyword_arguments)
+        supplied_argument_names = {name for name, _ in invocation_arguments}
+        if scenario.setup_plan is not None:
+            invocation_arguments.extend(
+                (binding.parameter_name, None)
+                for binding in scenario.setup_plan.target_bindings
+                if binding.parameter_name not in supplied_argument_names
+            )
+
         if target_class_name is None:
             function_call = self._create_function_call(
                 function_name=function_name,
-                keyword_arguments=scenario.keyword_arguments,
+                keyword_arguments=tuple(invocation_arguments),
                 argument_expressions=argument_expressions,
             )
         else:
-            constructor_call = self._create_function_call(
-                function_name=target_class_name,
-                keyword_arguments=scenario.constructor_arguments,
+            receiver_expression = (
+                f"setup_object_{scenario.setup_plan.receiver_slot_id}"
+                if scenario.setup_plan is not None
+                and scenario.setup_plan.receiver_slot_id is not None
+                else None
             )
-            code_lines.append(f"    target = {constructor_call}")
+            if receiver_expression is None:
+                constructor_call = self._create_function_call(
+                    function_name=target_class_name,
+                    keyword_arguments=scenario.constructor_arguments,
+                )
+                code_lines.append(f"    target = {constructor_call}")
+            else:
+                code_lines.append(f"    target = {receiver_expression}")
             function_call = self._create_function_call(
                 function_name=f"target.{function_name}",
-                keyword_arguments=scenario.keyword_arguments,
+                keyword_arguments=tuple(invocation_arguments),
                 argument_expressions=argument_expressions,
             )
 
@@ -386,6 +418,48 @@ class PytestGenerator:
             )
 
         return code_lines
+
+    def _create_setup_plan_lines(
+        self,
+        plan: SafeObjectSetupPlan,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Constructor ve setup çağrılarını kanıtlanmış sırayla render eder."""
+        slot_variables = {
+            slot.slot_id: f"setup_object_{index}"
+            for index, slot in enumerate(plan.object_slots, start=1)
+        }
+        lines: list[str] = []
+        for slot in plan.object_slots:
+            constructor = self._create_function_call(
+                function_name=slot.blueprint.class_name,
+                keyword_arguments=slot.blueprint.constructor_arguments,
+            )
+            lines.append(f"    {slot_variables[slot.slot_id]} = {constructor}")
+        for call in plan.setup_calls:
+            values: list[tuple[str, Any]] = []
+            expressions: dict[str, str] = {}
+            for argument in call.arguments:
+                values.append((argument.parameter_name, argument.value))
+                if argument.object_slot_id is not None:
+                    expressions[argument.parameter_name] = slot_variables[
+                        argument.object_slot_id
+                    ]
+            rendered = self._create_function_call(
+                function_name=(
+                    f"{slot_variables[call.receiver_slot_id]}."
+                    f"{call.method_summary.receiver.method_identity}"
+                ),
+                keyword_arguments=tuple(values),
+                argument_expressions=expressions,
+            )
+            lines.append(f"    {rendered}")
+        return (
+            lines,
+            {
+                binding.parameter_name: slot_variables[binding.object_slot_id]
+                for binding in plan.target_bindings
+            },
+        )
 
     @classmethod
     def _target_class_name(

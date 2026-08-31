@@ -970,6 +970,68 @@ def test_none_pipeline_timeout_preserves_in_process_run(
     dependencies[0].analyze_file.assert_called_once()
 
 
+def test_run_forwards_safe_object_setup_flag_to_in_process_pipeline(
+    tmp_path: Path,
+) -> None:
+    service = RealRLTrainingService()
+    pipeline_result = Mock(diagnostic=None)
+
+    with patch.object(
+        service,
+        "_run_pipeline",
+        return_value=pipeline_result,
+    ) as run_pipeline:
+        result = service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            allow_safe_object_setup=False,
+        )
+
+    assert result is pipeline_result
+    assert run_pipeline.call_args.kwargs["allow_safe_object_setup"] is False
+
+
+@patch.object(TrainingSession, "run")
+def test_disabled_safe_object_setup_never_builds_setup_context(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = create_session_result()
+    service, _ = create_service()
+    custom_object_spec = Mock()
+    custom_object_spec.analysis_metadata.return_value = (
+        ("score",),
+        {"score": "int"},
+    )
+    custom_object_spec.bind_scenario.side_effect = lambda scenario, **_: scenario
+
+    with (
+        patch(
+            "services.real_rl_training_service."
+            "analyze_safe_custom_object_target",
+            return_value=(custom_object_spec, None),
+        ),
+        patch(
+            "services.real_rl_training_service."
+            "analyze_safe_object_setup_context",
+            side_effect=AssertionError("setup context yetkisiz kuruldu"),
+        ) as setup_context,
+    ):
+        result = service.run(
+            source_file=create_source_file(tmp_path),
+            module_path="sample_code",
+            function_name="calculate_score",
+            output_directory=tmp_path,
+            episode_count=1,
+            allow_safe_object_setup=False,
+        )
+
+    assert isinstance(result, RealRLTrainingResult)
+    setup_context.assert_not_called()
+
+
 def test_global_timeout_rejects_injected_pipeline_dependencies(
     tmp_path: Path,
 ) -> None:
@@ -1007,9 +1069,14 @@ def test_global_timeout_keeps_coverage_timeout_meaning(tmp_path: Path) -> None:
         output_directory=tmp_path,
         timeout_seconds=7.5,
         pipeline_timeout_seconds=2.0,
+        allow_safe_object_setup=False,
     )
 
     assert runner.run.call_args.kwargs["run_arguments"]["timeout_seconds"] == 7.5
+    assert (
+        runner.run.call_args.kwargs["run_arguments"]["allow_safe_object_setup"]
+        is False
+    )
 
 
 @patch.object(TrainingSession, "run")

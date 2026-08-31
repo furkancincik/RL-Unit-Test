@@ -11,9 +11,11 @@ from analyzer.python_analyzer import PythonAnalyzer
 from analyzer.safe_custom_object import (
     SafeObjectConstructionBlueprint,
     UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
+    analyze_safe_custom_object_method_summaries,
     analyze_safe_custom_object_target,
     normalized_custom_object_target,
 )
+from analyzer.safe_method_summary import SafeMethodCategory
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from generator.project_pytest_generator import ProjectPytestGenerator
 from generator.pytest_generator import PytestGenerator
@@ -284,6 +286,72 @@ def test_untyped_structural_method_call_remains_controlled_unsupported() -> None
     assert "if not {}" in normalized
     assert "subject.calculate()" not in normalized
     assert UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER in normalized
+
+
+def test_normalized_object_method_marker_preserves_static_call_requirement() -> None:
+    tree = ast.parse(
+        "class Ledger:\n"
+        "    def __init__(self):\n"
+        "        self.entries = {}\n\n"
+        "    def measure(self, scale: int) -> int:\n"
+        "        return scale\n\n"
+        "def inspect(subject: Ledger, factor: int) -> int:\n"
+        "    return subject.measure(factor)\n"
+    )
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    normalized = normalized_custom_object_target(spec)
+    marker = next(
+        node
+        for node in ast.walk(normalized)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER
+    )
+
+    assert [
+        argument.value
+        for argument in marker.args[:3]
+        if isinstance(argument, ast.Constant)
+    ] == ["METHOD", "subject", "measure"]
+    assert isinstance(marker.args[3], ast.Name)
+    assert marker.args[3].id == "factor"
+
+
+def test_normalized_empty_collection_read_preserves_path_scoped_state_proof() -> None:
+    tree = ast.parse(
+        "class Registry:\n"
+        "    def __init__(self):\n"
+        "        self.records = {}\n\n"
+        "    def size(self) -> int:\n"
+        "        return len(self.records)\n\n"
+        "    def empty(self) -> bool:\n"
+        "        return not self.records\n\n"
+        "def inspect(subject: Registry) -> bool:\n"
+        "    if not subject.records:\n"
+        "        return subject.empty()\n"
+        "    return subject.size() > 0\n"
+    )
+    spec, reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert reason is None and spec is not None
+    normalized = normalized_custom_object_target(spec)
+    marker = next(
+        node
+        for node in ast.walk(normalized)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "STATE_TRUTHINESS"
+    )
+
+    assert tuple(argument.value for argument in marker.args) == (
+        "STATE_TRUTHINESS",
+        "subject",
+        "records",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1694,3 +1762,235 @@ def test_unexpected_programming_errors_are_not_normalized_as_unsupported(
     )
     with pytest.raises(error_type, match="programming failure"):
         analyze_safe_custom_object_target(tree, "inspect")
+
+
+def test_method_summary_integration_preserves_blueprint_identity_contract() -> None:
+    tree = ast.parse(
+        "class Register:\n"
+        "    def __init__(self, value: int = 3):\n"
+        "        self.value = value\n\n"
+        "    def replace(self, value: int) -> None:\n"
+        "        self.value = value\n"
+    )
+    before = SafeObjectConstructionBlueprint(
+        module_identity="package.register_module",
+        class_name="Register",
+        constructor_arguments=(("value", 7),),
+        class_fingerprint="stable-class-proof",
+    )
+
+    bundle, reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="package.register_module",
+        class_name="Register",
+    )
+    after = SafeObjectConstructionBlueprint(
+        module_identity="package.register_module",
+        class_name="Register",
+        constructor_arguments=(("value", 7),),
+        class_fingerprint="stable-class-proof",
+    )
+
+    assert reason is None and bundle is not None
+    assert before == after
+    assert before.fingerprint == after.fingerprint
+    assert (
+        before.fingerprint
+        == "283e01d6abbddc9b9b9185fe0b9eeef7e7731fa09bccbb5e23d49327da554c4c"
+    )
+    assert before.constructor_arguments == (("value", 7),)
+    assert not hasattr(before, "method_summary_bundle")
+
+
+def test_safe_local_class_exposes_internal_method_summary_bundle() -> None:
+    tree = ast.parse(
+        "class Gauge:\n"
+        "    def __init__(self, level: int = 2):\n"
+        "        self.level = level\n\n"
+        "    def set_level(self, level: int) -> None:\n"
+        "        self.level = level\n\n"
+        "    def read(self) -> int:\n"
+        "        return self.level\n"
+    )
+
+    bundle, reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="package.gauge_module",
+        class_name="Gauge",
+    )
+
+    assert reason is None and bundle is not None
+    mutator = bundle.summary_for("Gauge.set_level")
+    observer = bundle.summary_for("Gauge.read")
+    assert mutator is not None and mutator.supported is True
+    assert observer is not None and observer.supported is True
+    assert mutator.category is SafeMethodCategory.MUTATOR
+    assert observer.category is SafeMethodCategory.OBSERVER
+    assert tuple(effect.kind for effect in mutator.state_effects) == (
+        "ASSIGN_PARAMETER",
+    )
+    assert observer.return_summary is not None
+
+
+def test_constructor_proof_failure_does_not_promote_method_summary() -> None:
+    tree = ast.parse(
+        "class UnsafeGauge:\n"
+        "    def __init__(self, level: int):\n"
+        "        self.level = normalize(level)\n\n"
+        "    def read(self) -> int:\n"
+        "        return self.level\n"
+    )
+
+    bundle, reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="package.unsafe_gauge",
+        class_name="UnsafeGauge",
+    )
+
+    assert bundle is None
+    assert "constructor" in (reason or "").lower()
+
+
+def test_method_summary_stays_internal_to_public_analysis_metadata(
+    tmp_path: Path,
+) -> None:
+    source_file = _write_source(
+        tmp_path,
+        "class Meter:\n"
+        "    def __init__(self, value: int = 5):\n"
+        "        self.value = value\n\n"
+        "    def read(self) -> int:\n"
+        "        return self.value\n",
+        "public_contract.py",
+    )
+    tree = ast.parse(source_file.read_text(encoding="utf-8"))
+
+    bundle, reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="public_contract",
+        class_name="Meter",
+    )
+    analysis = PythonAnalyzer().analyze_file(source_file)
+    public_payload = json.dumps(
+        [vars(function) for function in analysis.functions],
+        ensure_ascii=False,
+        default=str,
+    )
+
+    assert reason is None and bundle is not None
+    assert not hasattr(bundle, "to_dict")
+    for secret in (
+        "SafeMethodSummary",
+        "execution_fingerprint",
+        "semantic_shape_digest",
+        "state_effects",
+        "canonical_execution_payload",
+        "canonical_semantic_payload",
+    ):
+        assert secret not in public_payload
+
+
+def test_method_summary_analysis_never_executes_import_constructor_or_method(
+    tmp_path: Path,
+) -> None:
+    import_marker = tmp_path / "imported.txt"
+    constructor_marker = tmp_path / "constructed.txt"
+    method_marker = tmp_path / "called.txt"
+    source_file = _write_source(
+        tmp_path,
+        "from pathlib import Path\n"
+        f"Path({str(import_marker)!r}).write_text('imported')\n\n"
+        "class UnsafeConstructor:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.value = value\n"
+        f"        Path({str(constructor_marker)!r}).write_text('constructed')\n\n"
+        "    def read(self) -> int:\n"
+        "        return self.value\n\n"
+        "class Passive:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.value = value\n\n"
+        "    def touch(self) -> int:\n"
+        f"        Path({str(method_marker)!r}).write_text('called')\n"
+        "        return self.value\n",
+        "side_effect_source.py",
+    )
+    tree = ast.parse(source_file.read_text(encoding="utf-8"))
+
+    unsafe_bundle, unsafe_reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="side_effect_source",
+        class_name="UnsafeConstructor",
+    )
+    bundle, reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="side_effect_source",
+        class_name="Passive",
+    )
+
+    assert unsafe_bundle is None
+    assert unsafe_reason is not None
+    assert reason is None and bundle is not None
+    summary = bundle.summary_for("Passive.touch")
+    assert summary is not None and summary.supported is False
+    assert summary.category is SafeMethodCategory.UNSUPPORTED
+    assert import_marker.exists() is False
+    assert constructor_marker.exists() is False
+    assert method_marker.exists() is False
+
+
+def test_method_summary_does_not_remove_existing_custom_object_method_marker() -> None:
+    tree = ast.parse(
+        "class Ledger:\n"
+        "    def __init__(self):\n"
+        "        self.records = {}\n\n"
+        "    def count(self) -> int:\n"
+        "        return len(self.records)\n\n"
+        "def inspect(subject: Ledger) -> int:\n"
+        "    if not subject.records:\n"
+        "        return 0\n"
+        "    return subject.count()\n"
+    )
+
+    bundle, summary_reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="package.ledger_module",
+        class_name="Ledger",
+    )
+    spec, target_reason = analyze_safe_custom_object_target(tree, "inspect")
+
+    assert summary_reason is None and bundle is not None
+    summary = bundle.summary_for("Ledger.count")
+    assert summary is not None and summary.supported is True
+    assert target_reason is None and spec is not None
+    normalized = ast.unparse(normalized_custom_object_target(spec))
+    assert "subject.count()" not in normalized
+    assert UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER in normalized
+
+
+def test_integrated_method_summary_uses_module_qualified_execution_identity() -> None:
+    tree = ast.parse(
+        "class Shared:\n"
+        "    def __init__(self, value: int = 1):\n"
+        "        self.value = value\n\n"
+        "    def read(self) -> int:\n"
+        "        return self.value\n"
+    )
+
+    first, first_reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="first_package.shared_module",
+        class_name="Shared",
+    )
+    second, second_reason = analyze_safe_custom_object_method_summaries(
+        tree,
+        module_identity="second_package.shared_module",
+        class_name="Shared",
+    )
+
+    assert first_reason is None and first is not None
+    assert second_reason is None and second is not None
+    first_summary = first.summary_for("Shared.read")
+    second_summary = second.summary_for("Shared.read")
+    assert first_summary is not None and second_summary is not None
+    assert first_summary.execution_fingerprint != second_summary.execution_fingerprint
+    assert first_summary.semantic_shape_digest == second_summary.semantic_shape_digest

@@ -1,12 +1,13 @@
 import re
 import runpy
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from analyzer.python_analyzer import PythonAnalyzer
+from analyzer.safe_custom_object import SafeObjectConstructionBlueprint
 from cfg.control_flow_graph import ControlFlowGraphBuilder
 from cfg.data_flow_analyzer import DataFlowAnalyzer
 from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
@@ -25,6 +26,11 @@ from generator.path_input_generator import (
     UnsupportedInputSynthesisError,
 )
 from generator.pytest_generator import PytestGenerator
+from generator.safe_method_setup_plan import (
+    SafeObjectSetupPlan,
+    SafeObjectSlot,
+    SafeTargetBinding,
+)
 from generator.scenario_generator import (
     Scenario,
     ScenarioGenerator,
@@ -120,6 +126,152 @@ def create_mock_score(
         normalized_score=normalized_score,
         priority_level="High",
     )
+
+
+def create_safe_setup_plan(
+    *,
+    constructor_value: int = 0,
+) -> SafeObjectSetupPlan:
+    """Scenario binding testleri için minimal internal setup planı."""
+    return SafeObjectSetupPlan(
+        module_identity="examples.setup_subject",
+        target_identity="inspect",
+        object_slots=(
+            SafeObjectSlot(
+                slot_id="root",
+                blueprint=SafeObjectConstructionBlueprint(
+                    module_identity="examples.setup_subject",
+                    class_name="Subject",
+                    constructor_arguments=(("value", constructor_value),),
+                ),
+            ),
+        ),
+        target_bindings=(
+            SafeTargetBinding(
+                parameter_name="subject",
+                object_slot_id="root",
+            ),
+        ),
+    )
+
+
+def test_generate_carries_setup_plan_into_internal_scenario_identity() -> None:
+    plan = create_safe_setup_plan()
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.return_value = GeneratedTestInput(
+        keyword_arguments=(),
+        expected_result=1,
+        setup_plan=plan,
+    )
+
+    scenarios = ScenarioGenerator(
+        path_input_generator=path_input_generator,
+    ).generate(
+        function_name="inspect",
+        paths=[create_mock_path(1)],
+        scores=[create_mock_score(1, 100.0)],
+        parameter_names=("subject",),
+    )
+
+    assert len(scenarios) == 1
+    scenario = scenarios[0]
+    assert scenario.setup_plan is plan
+    assert scenario.execution_identity == (
+        scenario.path_index,
+        plan.execution_fingerprint,
+    )
+    assert scenario.scenario_id == "inspect_scenario_001"
+
+
+def test_execution_identity_is_independent_from_dqm_rank_and_score() -> None:
+    scenario = Scenario(
+        scenario_id="inspect_scenario_001",
+        name="inspect path",
+        path_index=7,
+        priority_rank=1,
+        priority_level="High",
+        dqm_score=100.0,
+        node_ids=(1, 2),
+        edge_labels=("True",),
+        contains_loop=False,
+        contains_exception=False,
+        description="inspect path",
+        keyword_arguments=(("value", 3),),
+        expected_result=4,
+    )
+    reranked = replace(
+        scenario,
+        scenario_id="inspect_scenario_009",
+        priority_rank=9,
+        priority_level="Low",
+        dqm_score=1.0,
+    )
+
+    assert scenario.execution_identity == reranked.execution_identity
+    assert scenario.execution_identity == (7, "")
+    assert replace(scenario, path_index=8).execution_identity != (
+        scenario.execution_identity
+    )
+
+
+def test_generate_keeps_same_inputs_with_different_setup_state_distinct() -> None:
+    first_plan = create_safe_setup_plan(constructor_value=0)
+    second_plan = create_safe_setup_plan(constructor_value=1)
+    path_input_generator = Mock(spec=PathInputGenerator)
+    path_input_generator.generate.side_effect = (
+        GeneratedTestInput(
+            keyword_arguments=(),
+            expected_result=1,
+            setup_plan=first_plan,
+        ),
+        GeneratedTestInput(
+            keyword_arguments=(),
+            expected_result=1,
+            setup_plan=second_plan,
+        ),
+    )
+
+    scenarios = ScenarioGenerator(
+        path_input_generator=path_input_generator,
+    ).generate(
+        function_name="inspect",
+        paths=[create_mock_path(1), create_mock_path(2)],
+        scores=[
+            create_mock_score(1, 100.0),
+            create_mock_score(2, 90.0),
+        ],
+        parameter_names=("subject",),
+    )
+
+    assert scenarios[0].keyword_arguments == scenarios[1].keyword_arguments == ()
+    assert scenarios[0].execution_identity[1] == first_plan.execution_fingerprint
+    assert scenarios[1].execution_identity[1] == second_plan.execution_fingerprint
+    assert scenarios[0].execution_identity != scenarios[1].execution_identity
+
+
+def test_scenario_repr_does_not_expose_internal_setup_plan() -> None:
+    plan = create_safe_setup_plan(constructor_value=731)
+    scenario = Scenario(
+        scenario_id="private_setup",
+        name="private setup",
+        path_index=1,
+        priority_rank=1,
+        priority_level="High",
+        dqm_score=100.0,
+        node_ids=(1,),
+        edge_labels=(),
+        contains_loop=False,
+        contains_exception=False,
+        description="private setup",
+        setup_plan=plan,
+    )
+
+    rendered = repr(scenario)
+
+    assert "setup_plan" not in rendered
+    assert plan.execution_fingerprint not in rendered
+    assert plan.semantic_shape_digest not in rendered
+    assert "731" not in rendered
 
 
 def test_generate_creates_scenario_for_each_dqm_score() -> None:

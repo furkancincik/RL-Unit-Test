@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -330,3 +331,116 @@ def test_completed_run_writes_matching_durable_checkpoint(
     checkpoint = PipelineDiagnosticCheckpointStore(checkpoint_path).read()
     assert checkpoint is not None
     assert checkpoint.to_dict() == result.diagnostic.to_dict()
+
+
+def test_bounded_object_setup_runs_through_concrete_coverage_greedy_and_rl(
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "bounded_runtime_slice.py"
+    source_file.write_text(
+        """
+class Piece:
+    def __init__(self, code: str, value: int, stock: int):
+        self.code = code
+        self.value = value
+        self.stock = stock
+
+    def adjust(self, amount: int):
+        if self.stock + amount < 0:
+            raise ValueError("invalid")
+        self.stock += amount
+
+class Store:
+    def __init__(self):
+        self.entries = {}
+
+    def attach(self, item, quantity: int):
+        if quantity <= 0:
+            raise ValueError("invalid")
+        if item.stock < quantity:
+            return False
+        if item.code in self.entries:
+            self.entries[item.code]["quantity"] += quantity
+        else:
+            self.entries[item.code] = {"item": item, "quantity": quantity}
+        item.adjust(-quantity)
+        return True
+
+    def measure(self, mode: str = ""):
+        total = 0
+        for record in self.entries.values():
+            item = record["item"]
+            quantity = record["quantity"]
+            total += item.value * quantity
+        return round(total, 2)
+
+    def label(self):
+        if not self.entries:
+            return None
+        selected = None
+        for record in self.entries.values():
+            item = record["item"]
+            if selected is None:
+                selected = item
+            elif item.value > selected.value:
+                selected = item
+        return selected.code
+
+def evaluate(subject, mode):
+    if not subject.entries:
+        return "empty"
+    total = subject.measure(mode)
+    if total >= 10:
+        return subject.label()
+    return "low"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = RealRLTrainingService().run(
+        source_file=source_file,
+        module_path="bounded_runtime_slice",
+        function_name="evaluate",
+        output_directory=tmp_path / "output",
+        import_root=tmp_path,
+        episode_count=1,
+        epsilon=0.0,
+        epsilon_decay_rate=None,
+        minimum_epsilon=0.0,
+        random_seed=42,
+        run_greedy_baseline=True,
+        timeout_seconds=30.0,
+    )
+
+    assert isinstance(result, RealRLTrainingResult)
+    assert result.scenario_count >= 3
+    assert result.diagnostic is not None
+    assert result.diagnostic.status is PipelineRunStatus.COMPLETED
+    assert result.diagnostic.funnel.concrete_validation_accepted_count >= 3
+    assert result.diagnostic.funnel.concrete_validation_rejected_count == 0
+    assert result.function_coverage is not None
+    assert result.function_coverage.line_coverage_percent > 50.0
+    assert result.function_coverage.branch_coverage_percent > 25.0
+    assert result.q_table_state_count > 0
+    assert result.minimization_result is not None
+    assert result.minimization_result.coverage_preserved is True
+    generated_file = next((tmp_path / "output").glob("test_*.py"))
+    generated = generated_file.read_text(encoding="utf-8")
+    assert "Piece(" in generated
+    assert "Store(" in generated
+    assert ".attach(" in generated
+    assert generated.index(".attach(") < generated.index("evaluate(")
+    assert "setattr(" not in generated
+    assert ".__dict__" not in generated
+    public_diagnostic = json.dumps(result.diagnostic.to_dict(), sort_keys=True)
+    for private_field in (
+        "setup_plan",
+        "constructor_arguments",
+        "execution_fingerprint",
+        "semantic_shape_digest",
+        "abstract_state",
+        "keyword_arguments",
+        "expected_result",
+        "actual_result",
+    ):
+        assert private_field not in public_diagnostic

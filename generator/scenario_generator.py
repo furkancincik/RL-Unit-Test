@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cfg.path_analyzer import ExecutionPath
 from evaluator.dqm import DQMScore
@@ -13,6 +13,13 @@ from generator.path_input_generator import (
     UnsupportedExpectedResultError,
     UnsupportedInputSynthesisError,
 )
+from generator.safe_method_setup_plan import (
+    SafeObjectSetupContext,
+    SafeSetupPlanRejection,
+)
+
+if TYPE_CHECKING:
+    from generator.safe_method_setup_plan import SafeObjectSetupPlan
 
 
 class ScenarioRejectionStage(str, Enum):
@@ -108,6 +115,7 @@ class Scenario:
     expected_exception: str | None = None
     constructor_arguments: tuple[tuple[str, Any], ...] = ()
     target_class_name: str | None = None
+    setup_plan: SafeObjectSetupPlan | None = field(default=None, repr=False)
 
     @property
     def keyword_argument_dict(self) -> dict[str, Any]:
@@ -123,6 +131,18 @@ class Scenario:
         Senaryonun bir exception bekleyip beklemediğini belirtir.
         """
         return self.expected_exception is not None
+
+    @property
+    def execution_identity(self) -> tuple[int, str]:
+        """DQM sırasından bağımsız path/setup cache kimliğini döndürür."""
+        return (
+            self.path_index,
+            (
+                self.setup_plan.execution_fingerprint
+                if self.setup_plan is not None
+                else ""
+            ),
+        )
 
 
 class ScenarioGenerator:
@@ -186,6 +206,7 @@ class ScenarioGenerator:
             int,
             dict[str, Any],
         ] | None = None,
+        setup_context: SafeObjectSetupContext | None = None,
     ) -> list[Scenario]:
         """
         Bir fonksiyona ait yürütme yollarını test senaryolarına
@@ -242,6 +263,11 @@ class ScenarioGenerator:
         self._validate_candidate_values_by_path(
             candidate_values_by_path
         )
+        if setup_context is not None and not isinstance(
+            setup_context,
+            SafeObjectSetupContext,
+        ):
+            raise TypeError("setup_context SafeObjectSetupContext olmalıdır.")
 
         normalized_parameter_types = (
             self._normalize_parameter_types(
@@ -275,6 +301,10 @@ class ScenarioGenerator:
                         ),
                     )
                 )
+                if setup_context is not None:
+                    generated_input = setup_context.bind_generated_input(
+                        generated_input
+                    )
             except UnreachablePathError as error:
                 rejections.append(
                     self._create_rejection(
@@ -299,6 +329,18 @@ class ScenarioGenerator:
                 )
                 continue
             except UnsupportedInputSynthesisError as error:
+                rejections.append(
+                    self._create_rejection(
+                        path_index=score.path_index,
+                        category=(
+                            ScenarioRejectionCategory
+                            .UNSUPPORTED_INPUT_SYNTHESIS
+                        ),
+                        error=error,
+                    )
+                )
+                continue
+            except SafeSetupPlanRejection as error:
                 rejections.append(
                     self._create_rejection(
                         path_index=score.path_index,
@@ -390,6 +432,7 @@ class ScenarioGenerator:
             expected_exception=(
                 generated_input.expected_exception
             ),
+            setup_plan=generated_input.setup_plan,
         )
 
     @staticmethod

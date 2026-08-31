@@ -1,7 +1,7 @@
 
 import ast
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from analyzer.safe_custom_object import (
     UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
@@ -13,6 +13,9 @@ from generator.derived_value_input_synthesizer import (
     DerivedValueSynthesisError,
     UnsupportedDerivedValueSynthesisError,
 )
+
+if TYPE_CHECKING:
+    from generator.safe_method_setup_plan import SafeObjectSetupPlan
 
 
 _SHADOWED_SAFE_CALL = object()
@@ -81,6 +84,7 @@ class GeneratedTestInput:
     keyword_arguments: tuple[tuple[str, Any], ...]
     expected_result: Any = None
     expected_exception: str | None = None
+    setup_plan: SafeObjectSetupPlan | None = field(default=None, repr=False)
 
     @property
     def keyword_argument_dict(self) -> dict[str, Any]:

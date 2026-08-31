@@ -6,13 +6,16 @@ import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from analyzer.primitive_parameter_inference import (
     infer_primitive_parameter_types,
     primitive_annotation_type,
     primitive_literal_type,
 )
+
+if TYPE_CHECKING:
+    from analyzer.safe_method_summary import SafeMethodSummaryBundle
 
 
 MAX_SAFE_OBJECTS_PER_SCENARIO = 4
@@ -331,6 +334,18 @@ class _ObjectStateTransformer(ast.NodeTransformer):
             parameter.parameter_name: parameter
             for parameter in spec.object_parameters
         }
+        direct_call_counts = {name: 0 for name in self._bindings}
+        for candidate in ast.walk(spec.target_node):
+            if (
+                isinstance(candidate, ast.Call)
+                and isinstance(candidate.func, ast.Attribute)
+                and isinstance(candidate.func.value, ast.Name)
+                and candidate.func.value.id in direct_call_counts
+            ):
+                direct_call_counts[candidate.func.value.id] += 1
+        self._composed_state_receivers = frozenset(
+            name for name, count in direct_call_counts.items() if count >= 2
+        )
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         if (
@@ -343,8 +358,13 @@ class _ObjectStateTransformer(ast.NodeTransformer):
                     id=UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
                     ctx=ast.Load(),
                 ),
-                args=[],
-                keywords=[],
+                args=[
+                    ast.Constant(value="METHOD"),
+                    ast.Constant(value=node.func.value.id),
+                    ast.Constant(value=node.func.attr),
+                    *(copy.deepcopy(argument) for argument in node.args),
+                ],
+                keywords=copy.deepcopy(node.keywords),
             )
             return ast.copy_location(replacement, node)
         return self.generic_visit(node)
@@ -366,11 +386,29 @@ class _ObjectStateTransformer(ast.NodeTransformer):
                     ctx=copy.deepcopy(node.ctx),
                 )
             elif initializer.empty_collection_kind is not None:
-                replacement = _empty_collection_expression(
-                    initializer.empty_collection_kind,
-                )
-                if isinstance(replacement, (ast.List, ast.Tuple)):
-                    replacement.ctx = copy.deepcopy(node.ctx)
+                if (
+                    isinstance(node.ctx, ast.Load)
+                    and initializer.empty_collection_kind == "EMPTY_DICT"
+                    and node.value.id in self._composed_state_receivers
+                ):
+                    replacement = ast.Call(
+                        func=ast.Name(
+                            id=UNSUPPORTED_CUSTOM_OBJECT_METHOD_MARKER,
+                            ctx=ast.Load(),
+                        ),
+                        args=[
+                            ast.Constant(value="STATE_TRUTHINESS"),
+                            ast.Constant(value=node.value.id),
+                            ast.Constant(value=node.attr),
+                        ],
+                        keywords=[],
+                    )
+                else:
+                    replacement = _empty_collection_expression(
+                        initializer.empty_collection_kind,
+                    )
+                    if isinstance(replacement, (ast.List, ast.Tuple)):
+                        replacement.ctx = copy.deepcopy(node.ctx)
             else:
                 replacement = ast.Constant(value=initializer.literal_value)
             return ast.copy_location(replacement, node)
@@ -512,6 +550,51 @@ def analyze_safe_custom_object_target(
             original_parameter_names=tuple(argument.arg for argument in arguments),
             object_parameters=tuple(object_parameters),
             target_node=target,
+        ),
+        None,
+    )
+
+
+def analyze_safe_custom_object_method_summaries(
+    tree: ast.Module,
+    *,
+    module_identity: str,
+    class_name: str,
+) -> tuple[SafeMethodSummaryBundle | None, str | None]:
+    """Builds internal method proofs after the existing safe-constructor gate."""
+    if not isinstance(tree, ast.Module):
+        raise TypeError("tree ast.Module olmalıdır.")
+    _validate_module_identity(module_identity)
+    if not isinstance(class_name, str) or not class_name.isidentifier():
+        raise ValueError("Method summary class adı geçerli identifier olmalıdır.")
+    class_node = next(
+        (
+            statement
+            for statement in tree.body
+            if isinstance(statement, ast.ClassDef)
+            and statement.name == class_name
+        ),
+        None,
+    )
+    if class_node is None:
+        return None, "Method summary local top-level class bulunamadı."
+    _, constructor_reason = _analyze_safe_class(class_node, object_index=1)
+    if constructor_reason is not None:
+        return None, constructor_reason
+
+    from analyzer.safe_method_summary import (
+        SafeMethodSummaryBundle,
+        analyze_safe_method_summaries,
+    )
+
+    analyzed = analyze_safe_method_summaries(
+        tree,
+        module_identity=module_identity,
+    )
+    return (
+        SafeMethodSummaryBundle(
+            module_identity=module_identity,
+            summaries=analyzed.summaries_for_class(class_name),
         ),
         None,
     )

@@ -33,9 +33,21 @@ class ProjectPytestGenerator:
             )
             object_class_names = tuple(
                 dict.fromkeys(
-                    value.class_name
-                    for _, value in candidate.scenario.keyword_arguments
-                    if isinstance(value, SafeObjectConstructionBlueprint)
+                    (
+                        *(
+                            value.class_name
+                            for _, value in candidate.scenario.keyword_arguments
+                            if isinstance(value, SafeObjectConstructionBlueprint)
+                        ),
+                        *(
+                            slot.blueprint.class_name
+                            for slot in (
+                                candidate.scenario.setup_plan.object_slots
+                                if candidate.scenario.setup_plan is not None
+                                else ()
+                            )
+                        ),
+                    )
                 )
             )
             for object_index, class_name in enumerate(
@@ -61,14 +73,69 @@ class ProjectPytestGenerator:
                 class_name: f"_project_object_class_{index:04d}_{object_index:03d}"
                 for object_index, class_name in enumerate(
                     dict.fromkeys(
-                        value.class_name
-                        for _, value in scenario.keyword_arguments
-                        if isinstance(value, SafeObjectConstructionBlueprint)
+                        (
+                            *(
+                                value.class_name
+                                for _, value in scenario.keyword_arguments
+                                if isinstance(value, SafeObjectConstructionBlueprint)
+                            ),
+                            *(
+                                slot.blueprint.class_name
+                                for slot in (
+                                    scenario.setup_plan.object_slots
+                                    if scenario.setup_plan is not None
+                                    else ()
+                                )
+                            ),
+                        )
                     ),
                     start=1,
                 )
             }
             argument_expressions: dict[str, str] = {}
+            if scenario.setup_plan is not None:
+                setup_variables = {
+                    slot.slot_id: (
+                        f"setup_object_{index:04d}_{slot_index:03d}"
+                    )
+                    for slot_index, slot in enumerate(
+                        scenario.setup_plan.object_slots,
+                        start=1,
+                    )
+                }
+                for slot in scenario.setup_plan.object_slots:
+                    constructor_arguments = ", ".join(
+                        f"{name}={value!r}"
+                        for name, value in slot.blueprint.constructor_arguments
+                    )
+                    lines.append(
+                        f"    {setup_variables[slot.slot_id]} = "
+                        f"{object_aliases[slot.blueprint.class_name]}"
+                        f"({constructor_arguments})"
+                    )
+                for setup_call in scenario.setup_plan.setup_calls:
+                    rendered_arguments = ", ".join(
+                        (
+                            f"{argument.parameter_name}="
+                            f"{setup_variables[argument.object_slot_id]}"
+                            if argument.object_slot_id is not None
+                            else f"{argument.parameter_name}={argument.value!r}"
+                        )
+                        for argument in setup_call.arguments
+                    )
+                    lines.append(
+                        f"    {setup_variables[setup_call.receiver_slot_id]}."
+                        f"{setup_call.method_summary.receiver.method_identity}"
+                        f"({rendered_arguments})"
+                    )
+                argument_expressions.update(
+                    {
+                        binding.parameter_name: setup_variables[
+                            binding.object_slot_id
+                        ]
+                        for binding in scenario.setup_plan.target_bindings
+                    }
+                )
             object_value_index = 0
             for name, value in scenario.keyword_arguments:
                 if not isinstance(value, SafeObjectConstructionBlueprint):
@@ -87,25 +154,42 @@ class ProjectPytestGenerator:
                     f"({constructor_arguments})"
                 )
                 argument_expressions[name] = variable_name
+            invocation_arguments = list(scenario.keyword_arguments)
+            supplied_names = {name for name, _ in invocation_arguments}
+            if scenario.setup_plan is not None:
+                invocation_arguments.extend(
+                    (binding.parameter_name, None)
+                    for binding in scenario.setup_plan.target_bindings
+                    if binding.parameter_name not in supplied_names
+                )
             arguments = ", ".join(
                 (
                     f"{name}={argument_expressions[name]}"
                     if name in argument_expressions
                     else f"{name}={value!r}"
                 )
-                for name, value in scenario.keyword_arguments
+                for name, value in invocation_arguments
             )
             if scenario.target_class_name is None:
                 call = f"_project_target_{index:04d}({arguments})"
             else:
-                constructor_arguments = ", ".join(
-                    f"{name}={value!r}"
-                    for name, value in scenario.constructor_arguments
+                receiver_variable = (
+                    setup_variables[scenario.setup_plan.receiver_slot_id]
+                    if scenario.setup_plan is not None
+                    and scenario.setup_plan.receiver_slot_id is not None
+                    else None
                 )
-                lines.append(
-                    f"    target = _project_target_{index:04d}"
-                    f"({constructor_arguments})"
-                )
+                if receiver_variable is None:
+                    constructor_arguments = ", ".join(
+                        f"{name}={value!r}"
+                        for name, value in scenario.constructor_arguments
+                    )
+                    lines.append(
+                        f"    target = _project_target_{index:04d}"
+                        f"({constructor_arguments})"
+                    )
+                else:
+                    lines.append(f"    target = {receiver_variable}")
                 call = f"target.{candidate.function_name}({arguments})"
             if scenario.expects_exception:
                 if scenario.expected_exception is None:
