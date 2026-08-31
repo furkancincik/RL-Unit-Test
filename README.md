@@ -94,6 +94,10 @@ Explicit local class annotations take precedence. For an annotation-free paramet
 
 Aliasing, bare receiver use alongside structural evidence, attribute writes or deletes, nested or dynamic access, imported/cross-module candidates, unsafe constructors, recursive object graphs, and arbitrary method execution or replay remain controlled unsupported. Callable metadata may distinguish candidates but does not authorize execution during inference. Blueprint data, candidate lists, module identity, constructor values, object state, synthetic keyword arguments, and expected/actual runtime values are not serialized into public project, API, or Web results.
 
+## Bounded Safe Method Setup
+
+Statically proven local method summaries can create a bounded setup plan for fresh, safe objects before the selected target is invoked. Plans are immutable, retain constructor and execution fingerprints internally, enforce object/depth/statement/guard/state-effect budgets, and replay only verified receiver calls. Instance-method scenarios bind the final receiver produced by that plan instead of constructing a second object; the implicit receiver remains separate from public keyword arguments. Unknown receiver slots, unproven calls, excessive effects, and unsafe state transitions remain controlled rejections rather than being executed speculatively.
+
 ## Qualified Analysis Target Selection
 
 CLI, interactive terminal, API, and Web selectors accept an exact top-level `FunctionName` or simple instance-method `ClassName.method_name`. Multi-module requests bind every selected target to a validated canonical dotted module identity, so equal qualified names in different modules remain distinct. Upload selectors derive that identity through the same portable filename policy used by external analysis; for example, `my-file.py` maps to `upload_my_file` without exposing an absolute or temporary path.
@@ -136,6 +140,8 @@ CLI, interactive terminal, API, and Web selectors accept an exact top-level `Fun
 - Path Ranking
 - Risk-Based Prioritization
 - Normalized DQM Scores
+
+DQM ranks bounded candidate paths before input generation; it does not authorize an unsupported path and its score is not part of scenario or cache identity. Real pytest/coverage execution measures each candidate's contribution, deterministic greedy selection preserves the resulting exact line and branch identities with a smaller verified suite, and RL continues to provide the independent selection/learning comparison.
 
 ---
 
@@ -457,7 +463,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2426 passed, 1 skipped in 662.18s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2805 passed, 1 skipped in 665.51s`.
 
 ---
 
@@ -541,6 +547,8 @@ The UI uses DOM text APIs for external values and does not place source code in 
 
 The automated Web UI contract and real localhost HTTP acceptance cover static and trusted-dynamic inline submission, multipart upload, two-phase pinned GitHub authorization, resolved-SHA rendering, explicit target selection, immutable three-channel static parity, polling, measured coverage, backend-authoritative `TIE` comparison, JSON/generated-pytest downloads, source non-reflection, temp cleanup, and orphan-server cleanup. The pinned GitHub acceptance performed static discovery first and then ran one explicit target at the authoritative exact SHA, producing real pytest, coverage, greedy, and RL results; changing the repository/ref cleared the previous trust. One leading BOM with LF/CRLF and Unicode completed in inline and multipart channels; repeated BOMs produced the same controlled syntax category and the next valid jobs completed. The browser console had no warning/error, and `/favicon.ico` returns `204` without a binary or external asset. The project-level result is exposed through the same asynchronous job result and artifact endpoints; static discovery keeps dynamic metrics `null` / `Ölçülmedi`.
 
+The final D4 browser acceptance completed static discovery and two consecutive trusted-dynamic runs against the same safe two-function source. Each dynamic run emitted four monotonic measured updates after its initial pending snapshot and finished at 90.00% line, 83.33% branch, four selected tests, and exact full/minimized preservation. The second run used a new job identity and fresh progress state. The terminal public label was `Seçili güvenli aday kapsamı tamamlandı`; no console warning/error or application-request `4xx/5xx` occurred, and the run-owned server, child processes, job output, and temporary log root were removed afterward.
+
 A controlled trusted-dynamic acceptance of `sample_complex_code.py` used the Web production configuration (`max_visits_per_node=3`, three episodes, epsilon `0.0`, learning rate `0.5`, discount factor `0.9`, seed `42`, 30-second coverage timeout, 120-second function timeout, greedy and comparison enabled):
 
 | Function | Pool | Pool line / branch | Greedy tests | Greedy line / branch | Preserved | Best RL tests | Best RL line / branch | Preserved | Winner |
@@ -562,7 +570,9 @@ Exact identities are module-qualified and serialized with normalized `/` paths:
 - line: `(relative_module_path, line_number)`
 - branch: `(relative_module_path, from_line, to_line)`
 
-Coverage.py negative branch targets are retained because they represent real function-exit arcs. Absolute source and tool-temporary paths are not included in the public result. The full combined suite's actually covered exact identity set is the minimization target, so an attainable target below 100% is reported honestly rather than inflated.
+Coverage.py negative branch targets are retained because they represent real function-exit arcs. Absolute source and tool-temporary paths are not included in the public result. The full combined suite's actually covered exact identity set is the minimization target, so an attainable target below 100% is reported honestly rather than inflated. Line coverage is `covered executable line identities / executable line identities`; branch coverage is `covered branch-edge identities / branch-edge identities`; combined progress is `(covered line identities + covered branch identities) / (line identities + branch identities)`. Live progress is derived from actual scenario execution and is monotonic. Candidates with zero new exact contribution are not admitted to the online effective suite. Final deterministic greedy selection then removes redundant tests while replay-verifying the full suite's exact identities.
+
+`TARGET_REACHED` means that the exact contribution target derived from the selected concrete-valid candidate suite has been covered. It does not prove a theoretical or absolute program maximum and does not mean that all source code was covered. The Web UI therefore renders it as `Seçili güvenli aday kapsamı tamamlandı`; candidate exhaustion is `Güvenli adaylar tamamlandı`, a proven plateau is `Yeni doğrulanabilir coverage katkısı bulunamadı`, and test limits and deadlines retain their own separate public labels.
 
 ```text
 Concrete-valid scenarios from selected functions
@@ -593,7 +603,7 @@ Concrete-valid scenarios from selected functions
 
 The result records discovered and selected modules; discovered, eligible, analyzed, completed, partial, failed, timed-out, unsupported, and `SKIPPED_LIMIT` functions; and an explicit `scope_complete` flag. Completed subsets remain measurable, but missing, unsupported, failed, timed-out, or limited targets make the result `PARTIAL`. Interaction-dependent coverage that isolated contributions cannot explain is reported as `NON_ADDITIVE_COVERAGE`; the full suite remains the safe verified fallback. The deterministic greedy result always declares `globally_minimal = false`.
 
-Artifacts are persisted under `project_combined/` as the full generated pytest, minimized generated pytest, and machine-readable project coverage/minimization JSON. They are included in external analysis output, asynchronous API result/artifact contracts, terminal reporting, and the Web UI's separate Project Coverage section. Public JSON contains exact identities, aggregate counts, controlled status/failure metadata, and relative artifact paths, but no raw source, kwargs, expected/actual values, tracebacks, credentials, environment values, or absolute tool paths.
+Artifacts are persisted under `project_combined/` as the full generated pytest, minimized generated pytest, and machine-readable project coverage/minimization JSON. They are included in external analysis output, asynchronous API result/artifact contracts, terminal reporting, and the Web UI's separate Project Coverage section. Public JSON contains exact identities, aggregate counts, controlled status/failure metadata, and relative artifact paths, but no raw source, constructor/setup state, synthetic kwargs, expected/actual values, DQM feature vectors or scores, execution fingerprints, semantic digests, worker payloads, object representations or memory addresses, tracebacks, credentials, environment values, or absolute tool paths.
 
 Generated pytest artifacts contain tests, not the target source module. Place a downloaded test in the analyzed project's import root and run `python -m pytest <test_file.py> -q`. Keep a GitHub project's package layout unchanged. For inline analysis, save the source beside the test as `inline_source.py`. For uploads, use the safe module name shown in the result (for example, `upload_sample_code.py`) when placing the original source beside the downloaded test. The final portability acceptance copied generated tests outside the job output, reconstructed only this documented import root, and replayed the project full/minimized suites successfully.
 
@@ -610,6 +620,19 @@ One anonymous static clone of `https://github.com/pallets/markupsafe` completed 
 The final `sample_complex_code.py` run completed all five functions in 139.60 seconds. Combined project minimization itself took 2.05 seconds: 39 full tests became 29 tests (25.64% reduction), with 97.30% line coverage, 96.67% branch coverage, identical 72-line/58-branch exact targets, and successful full/minimized pytest exit codes. Replayed download-root full/minimized artifacts executed 68 tests successfully. The heavier ultracomplex and `analyze_transactions` experiments were intentionally not repeated; their earlier bounded checkpoints remain the documented evidence.
 
 Server lifecycle acceptance confirmed import safety, localhost-only binding, all nine OpenAPI operations, static assets, `/docs`, `/redoc`, and graceful application shutdown after a Windows console break with no remaining port-8000 listener. A real two-second pipeline timeout produced a `TIMED_OUT` partial snapshot, running cancellation returned `409`, and the next job completed normally. Authentication, rate limiting, and sandboxing are not part of this local developer-tool release.
+
+## D4 Shopping Cart Coverage-Closure Evidence
+
+A read-only trusted-dynamic run selected all four safe targets discovered in the user-supplied Shopping Cart fixture. The full pool contained 10 concrete-valid scenarios; 11 monotonic snapshots processed all 10 candidates and retained 9 with non-zero exact contribution. Final cross-target greedy replay kept those 9 artifact tests while preserving the full suite's exact identities. Both generated pytest suites passed. The measured analyzed-module result was 60/92 lines (65.2174%), 27/42 branches (64.2857%), and 87/134 combined identities (64.9254%). Acquisition, module analysis, and cleanup completed; the overall project remained `PARTIAL` because controlled unsupported targets were retained in its inventory. This is the best verified result from the current safe candidate pool, not a 100% or theoretical-maximum claim.
+
+| Qualified target | Final scenarios | Function line | Function branch | Controlled rejection |
+| --- | ---: | ---: | ---: | --- |
+| `ShoppingCart.calculate_total` | 3 | 66.67% | 70.00% | 22 `UNREACHABLE_INPUT` paths |
+| `ShoppingCart.get_most_expensive_item` | 1 | 27.27% | 12.50% | 13 `UNREACHABLE_INPUT` paths |
+| `ShoppingCart.summary` | 1 | 80.00% | 50.00% | 2 `UNREACHABLE_INPUT` paths |
+| `process_order` | 5 | 87.50% | 100.00% | 14 `UNSUPPORTED_INPUT_SYNTHESIS` paths |
+
+The exact uncovered partition contains 12 controlled-unsupported-input/object lines and 6 corresponding branch edges, 2 exception-only lines, and 13 non-target/declaration lines with 3 edges. Five lines and six branch edges remain `SAFE_SUPPORTED_BUT_NOT_GENERATED`: correlated multi-field collection witnesses are not yet synthesized for the safe scalar-fold, argmax-object-return, and dictionary-record-return paths. D4 therefore remains blocked for release readiness even though `UNKNOWN=0`, `INTERNAL_WORKER_ERROR=0`, exact greedy preservation passed, and the preferred 70% line threshold was not relaxed or fabricated.
 
 ---
 
@@ -963,14 +986,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2426 passed, 1 skipped in 662.18s`
+`2805 passed, 1 skipped in 665.51s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,426 |
+| Passed | 2,805 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 662.18s |
+| Duration | 665.51s |
 
 ---
 
@@ -1137,6 +1160,7 @@ RL-Unit-Test
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function and total-project timeouts do not prevent source code from accessing host files, processes, or networks.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
 - Trusted GitHub dynamic execution is limited to a retained successful static snapshot, its server-authoritative exact SHA, and explicitly selected discovered targets. It does not add general object setup/method-effect synthesis or guarantee high coverage for every external source.
+- Bounded safe method setup supports only statically proven, budgeted receiver-call effects. Correlated multi-field collection witnesses needed by some otherwise safe fold, argmax-object-return, and dictionary-record-return paths are not yet generated; these gaps are reported as `SAFE_SUPPORTED_BUT_NOT_GENERATED`, not hidden as full coverage.
 - The FastAPI job backend and local Web UI completed final localhost browser hardening, but authentication and rate limiting are not implemented. The terminal workflow remains the only interface for user-owned local project directories.
 - Job records are held in the application process memory. Restarting the API server does not restore previous job states; even when artifact files remain on disk, access through the old job endpoint is not guaranteed because the new process does not know the previous opaque job identifiers.
 
