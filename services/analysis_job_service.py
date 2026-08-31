@@ -17,6 +17,7 @@ from models.analysis_job_result import (
     AnalysisJobSummary,
     AnalysisModuleSummary,
 )
+from models.coverage_progress import CoverageProgressSnapshot
 from models.external_source_analysis_result import (
     ExternalModuleSelection,
     ExternalModuleSelectionMode,
@@ -88,6 +89,7 @@ class _JobEntry:
     artifact_leases: int = 0
     authorization_leases: int = 0
     purge_in_progress: bool = False
+    run_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,13 +434,29 @@ class AnalysisJobService:
                     started_at=self._utc_now(),
                     progress_stage="EXTERNAL_ANALYSIS",
                 )
-            result = self._runner_factory().run(request)
+                entry.run_generation += 1
+                generation = entry.run_generation
+            runner = self._runner_factory()
+            if isinstance(runner, ExternalSourceAnalysisService):
+                result = runner.run(
+                    request,
+                    coverage_progress_callback=lambda snapshot: self._publish_coverage_progress(
+                        job_id, generation, snapshot
+                    ),
+                )
+            else:
+                result = runner.run(request)
             with self._lock:
                 entry = self._entry(job_id)
                 terminal = self._job_status(result.status)
                 artifacts = self._collect_artifacts(job_id, result)
                 entry.artifacts = artifacts
-                entry.result = self._result_summary(job_id, result, terminal)
+                entry.result = self._result_summary(
+                    job_id,
+                    result,
+                    terminal,
+                    coverage_progress=entry.summary.coverage_progress,
+                )
                 entry.github_discovery_snapshot = self._github_discovery_snapshot(
                     request,
                     result,
@@ -467,6 +485,29 @@ class AnalysisJobService:
                         self._publish_worker_failure(entry)
             finally:
                 self._capacity.release()
+
+    def _publish_coverage_progress(
+        self,
+        job_id: str,
+        generation: int,
+        snapshot: CoverageProgressSnapshot,
+    ) -> None:
+        if not isinstance(snapshot, CoverageProgressSnapshot):
+            raise TypeError("snapshot CoverageProgressSnapshot olmalıdır.")
+        with self._lock:
+            entry = self._jobs.get(job_id)
+            if (
+                entry is None
+                or entry.run_generation != generation
+                or entry.summary.status is not AnalysisJobStatus.RUNNING
+                or entry.summary.cancellation_requested
+                or entry.purge_in_progress
+            ):
+                return
+            current = entry.summary.coverage_progress
+            if current is not None and snapshot.revision <= current.revision:
+                return
+            entry.summary = replace(entry.summary, coverage_progress=snapshot)
 
     @staticmethod
     def _github_discovery_snapshot(
@@ -647,6 +688,7 @@ class AnalysisJobService:
             completed_function_count=0,
             partial_function_count=0,
             timed_out_function_count=0,
+            coverage_progress=summary.coverage_progress,
         )
 
     def _collect_artifacts(
@@ -681,7 +723,11 @@ class AnalysisJobService:
 
     @staticmethod
     def _result_summary(
-        job_id: str, result: ExternalSourceAnalysisResult, status: AnalysisJobStatus
+        job_id: str,
+        result: ExternalSourceAnalysisResult,
+        status: AnalysisJobStatus,
+        *,
+        coverage_progress: CoverageProgressSnapshot | None = None,
     ) -> AnalysisJobResultSummary:
         modules: list[AnalysisModuleSummary] = []
         for module in result.module_results:
@@ -881,6 +927,7 @@ class AnalysisJobService:
             completed_function_count=result.completed_function_count,
             partial_function_count=result.partial_function_count,
             timed_out_function_count=result.timed_out_function_count,
+            coverage_progress=coverage_progress,
         )
 
     @staticmethod

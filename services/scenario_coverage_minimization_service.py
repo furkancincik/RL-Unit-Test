@@ -491,7 +491,7 @@ class ScenarioCoverageMinimizationService:
             start_line,
             end_line,
             float(timeout_seconds),
-            scenario.scenario_id,
+            scenario.execution_identity,
         )
 
     def _effective_timeout(

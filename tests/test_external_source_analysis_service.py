@@ -19,6 +19,7 @@ from models.external_source_analysis_result import (
     ExternalModuleSelection,
     ExternalModuleSelectionMode,
     ExternalModuleStatus,
+    PinnedGitHubDynamicAuthorization,
     ExternalSourceAnalysisRequest,
     ExternalWorkspaceCleanupStatus,
     InlinePythonSource,
@@ -613,7 +614,66 @@ def test_dynamic_forwards_import_root_limits_and_strategy_flags(tmp_path: Path) 
     assert call["maximum_functions"] == 2
     assert call["run_greedy_baseline"] is True
     assert call["run_strategy_comparison"] is True
+    assert call["allow_safe_object_setup"] is True
     assert result.status is ExternalAnalysisStatus.COMPLETED
+
+
+def test_pinned_github_dynamic_disables_safe_object_setup_closure(
+    tmp_path: Path,
+) -> None:
+    commit_sha = "a" * 40
+    repository_url = "https://github.com/owner/repository"
+
+    def runner(
+        arguments: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if "clone" in arguments:
+            destination = Path(arguments[-1])
+            destination.mkdir(parents=True)
+            (destination / "module.py").write_text(
+                "def target() -> int:\n    return 1\n",
+                encoding="utf-8",
+            )
+        output = commit_sha if "rev-parse" in arguments else ""
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("module", "target"),),
+    )
+    authorization = PinnedGitHubDynamicAuthorization(
+        discovery_job_id="discovery-job",
+        repository_url=repository_url,
+        resolved_commit_sha=commit_sha,
+        selectors=selection.selectors,
+    )
+    orchestrator = Mock()
+    orchestrator.run.return_value = Mock(
+        status=ProjectRunStatus.COMPLETED,
+        function_results=(),
+        discovered_targets=(),
+        coverage_candidates=(),
+        report_path=tmp_path / "missing.json",
+    )
+
+    result = ExternalSourceAnalysisService(
+        acquisition_service=SourceAcquisitionService(
+            subprocess_runner=runner,
+            git_executable="git",
+        ),
+        orchestrator_factory=lambda: orchestrator,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            PublicGitHubRepository(repository_url, ref=commit_sha),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path, target_selection=selection),
+            pinned_github_authorization=authorization,
+        )
+    )
+
+    assert result.status is ExternalAnalysisStatus.COMPLETED
+    assert orchestrator.run.call_args.kwargs["allow_safe_object_setup"] is False
 
 
 def test_unexpected_orchestrator_runtime_error_propagates_and_cleans(tmp_path: Path) -> None:
@@ -980,7 +1040,7 @@ def test_project_deadline_preserves_completed_module_and_skips_later_module(
     assert result.project_coverage is None
 
 
-def test_project_coverage_receives_remaining_project_budget(
+def test_project_coverage_keeps_execution_timeout_and_receives_overall_budget(
     tmp_path: Path,
 ) -> None:
     clock = _ExternalDeadlineClock()
@@ -1014,7 +1074,64 @@ def test_project_coverage_receives_remaining_project_budget(
     assert result.status is ExternalAnalysisStatus.COMPLETED
     assert coverage_service.measure_and_minimize.call_args.kwargs[
         "timeout_seconds"
+    ] == pytest.approx(30.0)
+    assert coverage_service.measure_and_minimize.call_args.kwargs[
+        "overall_timeout_seconds"
     ] == pytest.approx(5.0)
+
+
+def test_dynamic_project_coverage_forwards_authoritative_progress_callback(
+    tmp_path: Path,
+) -> None:
+    orchestrator = Mock()
+    orchestrator.run.return_value = Mock(
+        status=ProjectRunStatus.COMPLETED,
+        function_results=(),
+        discovered_targets=(),
+        coverage_candidates=(),
+        report_path=tmp_path / "none.json",
+    )
+    coverage_service = Mock()
+    coverage_service.measure_and_minimize.return_value = None
+    callback = Mock()
+
+    ExternalSourceAnalysisService(
+        orchestrator_factory=lambda: orchestrator,
+        project_coverage_service=coverage_service,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def target() -> int:\n    return 1\n"),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _configuration(tmp_path),
+        ),
+        coverage_progress_callback=callback,
+    )
+
+    assert coverage_service.measure_and_minimize.call_args.kwargs[
+        "coverage_progress_callback"
+    ] is callback
+
+
+def test_static_discovery_emits_no_coverage_progress(
+    tmp_path: Path,
+) -> None:
+    coverage_service = Mock()
+    callback = Mock()
+
+    result = ExternalSourceAnalysisService(
+        project_coverage_service=coverage_service,
+    ).run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource("def target() -> int:\n    return 1\n"),
+            ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
+            _configuration(tmp_path),
+        ),
+        coverage_progress_callback=callback,
+    )
+
+    assert result.status is ExternalAnalysisStatus.STATIC_COMPLETED
+    coverage_service.measure_and_minimize.assert_not_called()
+    callback.assert_not_called()
 
 
 def test_public_clone_timeout_is_clamped_by_remaining_project_budget(

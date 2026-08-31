@@ -360,3 +360,190 @@ def test_github_submit_rejects_stale_target_acknowledgement_before_request() -> 
     )
     assert "invalidateGitHubTargetAcknowledgement();" in source_request
     assert "throw new Error(GITHUB_TARGET_ACKNOWLEDGEMENT_STALE);" in source_request
+
+
+def test_job_card_exposes_authoritative_coverage_progress_contract() -> None:
+    script = _script()
+    markup = Path("web/index.html").read_text(encoding="utf-8")
+
+    for element_id in (
+        "coverage-progress-card",
+        "coverage-progress-stage",
+        "coverage-progress-metric",
+        "coverage-progress-line",
+        "coverage-progress-branch",
+        "coverage-progress-candidates",
+        "coverage-progress-validated",
+        "coverage-progress-effective",
+        "coverage-progress-last-gain",
+        "coverage-progress-stop-reason",
+    ):
+        assert f'id="{element_id}"' in markup
+    assert 'id="coverage-progress-bar"' in markup
+    assert 'aria-label="Canlı coverage ilerlemesi"' in markup
+    assert "function renderCoverageProgress" in script
+    assert "snapshot.coverage_progress" in script
+    assert '"Ölçüm bekleniyor"' in script
+
+
+def test_coverage_progress_is_backend_authoritative_and_never_fakes_percentages() -> None:
+    script = _script()
+    renderer = script.split("function renderCoverageProgress", 1)[1].split(
+        "function statusDescription", 1
+    )[0]
+
+    for field in (
+        "revision",
+        "stage",
+        "metric",
+        "coverage_percent",
+        "line_percent",
+        "branch_percent",
+        "covered_lines",
+        "total_lines",
+        "covered_branches",
+        "total_branches",
+        "candidate_count",
+        "validated_count",
+        "effective_test_count",
+        "last_gain_percent",
+        "last_new_line_count",
+        "last_new_branch_count",
+        "plateau_count",
+        "stop_reason",
+    ):
+        assert f"progress.{field}" in renderer
+    assert "Math.min" not in renderer
+    assert "Math.max" not in renderer
+    assert "TERMINAL_STATUSES" not in renderer
+    assert "innerHTML" not in renderer
+    assert ".textContent" in renderer
+
+
+def test_coverage_progress_reset_revision_and_stale_job_guards_are_explicit() -> None:
+    script = _script()
+
+    assert "coverageProgressRevision" in script
+    assert "function resetCoverageProgress" in script
+    assert "resetCoverageProgress();" in script.split(
+        "function beginJob", 1
+    )[1].split("async function submitAnalysis", 1)[0]
+    assert "progress.revision <= state.coverageProgressRevision" in script
+    poller = script.split("async function pollJob", 1)[1].split(
+        "function beginJob", 1
+    )[0]
+    assert poller.index("state.currentJobId !== jobId") < poller.index(
+        "updateJobStatus(snapshot)"
+    )
+    assert poller.index("state.pollGeneration !== generation") < poller.index(
+        "updateJobStatus(snapshot)"
+    )
+
+
+def test_terminal_progress_persists_but_failure_without_measurement_clears_it() -> None:
+    script = _script()
+    updater = script.split("function updateJobStatus", 1)[1].split(
+        "function schedulePoll", 1
+    )[0]
+
+    assert "renderCoverageProgress(snapshot.coverage_progress)" in updater
+    assert "snapshot.coverage_progress === null" in updater
+    assert 'snapshot.status === "FAILED"' in updater
+    assert "resetCoverageProgress();" in updater
+    assert 'snapshot.status === "COMPLETED"' not in updater
+    assert 'snapshot.status === "PARTIAL"' not in updater
+
+
+def test_coverage_stage_metric_and_stop_reason_use_safe_allowlist_labels() -> None:
+    script = _script()
+    renderer = script.split("function renderCoverageProgress", 1)[1].split(
+        "function statusDescription", 1
+    )[0]
+
+    assert "function coverageStageLabel" in script
+    assert 'COVERAGE_OPTIMIZATION: "Coverage optimizasyonu"' in script
+    assert 'return labels[value] || "Bilinmeyen coverage aşaması";' in script
+    assert "function coverageMetricLabel" in script
+    assert 'LINE: "Satır coverage"' in script
+    assert 'COMBINED: "Birleşik coverage"' in script
+    assert 'return labels[value] || "Bilinmeyen coverage metriği";' in script
+    assert "function coverageStopReasonLabel" in script
+    for reason in (
+        "TARGET_REACHED",
+        "CANDIDATES_EXHAUSTED",
+        "PROVEN_PLATEAU",
+        "TEST_LIMIT_REACHED",
+        "DEADLINE_REACHED",
+        "CANCELLED",
+        "FAILED",
+    ):
+        assert f'{reason}: "' in script
+    assert 'return labels[value] || "Bilinmeyen durma nedeni";' in script
+    assert "coverageStageLabel(progress.stage)" in renderer
+    assert "coverageMetricLabel(progress.metric)" in renderer
+    assert "coverageStopReasonLabel(progress.stop_reason)" in renderer
+    assert "measured(progress.stage)" not in renderer
+    assert "measured(progress.stop_reason)" not in renderer
+    assert "`${progress.metric}" not in renderer
+
+
+def test_progress_lifecycle_contract_covers_terminal_reset_and_stale_revision() -> None:
+    script = _script()
+    updater = script.split("function updateJobStatus", 1)[1].split(
+        "function schedulePoll", 1
+    )[0]
+    begin_job = script.split("function beginJob", 1)[1].split(
+        "async function submitAnalysis", 1
+    )[0]
+    renderer = script.split("function renderCoverageProgress", 1)[1].split(
+        "function statusDescription", 1
+    )[0]
+
+    assert "renderCoverageProgress(snapshot.coverage_progress)" in updater
+    assert 'snapshot.status === "COMPLETED"' not in updater
+    assert 'snapshot.status === "PARTIAL"' not in updater
+    assert "resetCoverageProgress();" in begin_job
+    assert "state.coverageProgressRevision = -1" in script
+    assert "progress.revision <= state.coverageProgressRevision" in renderer
+    assert "state.coverageProgressRevision = progress.revision" in renderer
+
+
+def test_target_reached_describes_exact_safe_candidate_scope_not_a_numeric_maximum() -> None:
+    script = _script()
+    stop_labels = script.split("function coverageStopReasonLabel", 1)[1].split(
+        "function setMessage", 1
+    )[0]
+    renderer = script.split("function renderCoverageProgress", 1)[1].split(
+        "function statusDescription", 1
+    )[0]
+    representative_backend_snapshot = {
+        "coverage_percent": 57.4627,
+        "stop_reason": "TARGET_REACHED",
+    }
+
+    assert representative_backend_snapshot["coverage_percent"] < 100.0
+    assert (
+        'TARGET_REACHED: "Seçili güvenli aday kapsamı tamamlandı"'
+        in stop_labels
+    )
+    assert 'TARGET_REACHED: "Coverage hedefine ulaşıldı"' not in stop_labels
+    assert "maksimum" not in stop_labels.casefold()
+    assert "progress.coverage_percent === 100" not in renderer
+    assert "progress.coverage_percent >= 100" not in renderer
+
+
+def test_coverage_stop_labels_keep_distinct_controlled_terminal_meanings() -> None:
+    script = _script()
+    stop_labels = script.split("function coverageStopReasonLabel", 1)[1].split(
+        "function setMessage", 1
+    )[0]
+
+    expected = {
+        "CANDIDATES_EXHAUSTED": "Güvenli adaylar tamamlandı",
+        "PROVEN_PLATEAU": "Yeni doğrulanabilir coverage katkısı bulunamadı",
+        "TEST_LIMIT_REACHED": "Test sınırına ulaşıldı",
+        "DEADLINE_REACHED": "Zaman sınırına ulaşıldı",
+    }
+    for reason, label in expected.items():
+        assert f'{reason}: "{label}"' in stop_labels
+    assert 'return labels[value] || "Bilinmeyen durma nedeni";' in stop_labels

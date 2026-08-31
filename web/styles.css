@@ -705,6 +705,43 @@ button:disabled {
   background: rgba(120, 227, 199, 0.06);
 }
 
+.coverage-progress-card {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(5, 14, 26, 0.38);
+}
+
+.coverage-progress-header {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.coverage-progress-header h3,
+.coverage-progress-header p {
+  margin: 0;
+}
+
+.coverage-progress-header strong {
+  color: var(--accent);
+  text-align: right;
+}
+
+.coverage-progress-bar {
+  width: 100%;
+  height: 12px;
+  margin-bottom: 12px;
+  accent-color: var(--accent);
+}
+
+.coverage-progress-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

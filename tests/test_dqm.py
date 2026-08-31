@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 from analyzer.python_analyzer import PythonAnalyzer
 from cfg.control_flow_graph import ControlFlowGraphBuilder
-from cfg.path_analyzer import CFGPathAnalyzer
-from evaluator.dqm import DecisionQualityMatrix
+from cfg.path_analyzer import CFGPathAnalyzer, ExecutionPath
+from evaluator.dqm import DQMScore, DecisionQualityMatrix
 
 
 def test_dqm_scores_all_execution_paths() -> None:
@@ -83,4 +85,47 @@ def test_dqm_returns_empty_list_for_empty_paths() -> None:
     )
 
     assert scores == []
+
+
+def test_dqm_uses_explicit_score_then_path_index_total_order() -> None:
+    function = SimpleNamespace(
+        cyclomatic_complexity=1,
+        risk_level="Low",
+    )
+    paths = [
+        ExecutionPath(node_ids=[1, 2], edge_labels=[None]),
+        ExecutionPath(
+            node_ids=[1, 2, 3],
+            edge_labels=["True", None],
+        ),
+        ExecutionPath(
+            node_ids=[4, 5, 6],
+            edge_labels=["False", None],
+        ),
+    ]
+
+    scores = DecisionQualityMatrix().evaluate_paths(function, paths)
+
+    assert [score.path_index for score in scores] == [2, 3, 1]
+    assert scores[0].normalized_score == scores[1].normalized_score
+
+
+def test_dqm_tie_order_is_independent_of_input_sort_stability() -> None:
+    tied = [
+        DQMScore(
+            path_index=path_index,
+            path_length=2,
+            decision_edge_count=1,
+            contains_loop=False,
+            contains_exception=False,
+            raw_score=10.0,
+            normalized_score=100.0,
+            priority_level="High",
+        )
+        for path_index in (3, 1, 2)
+    ]
+
+    ordered = DecisionQualityMatrix._sort_scores(tied)
+
+    assert [score.path_index for score in ordered] == [1, 2, 3]
 

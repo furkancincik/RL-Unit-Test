@@ -1,10 +1,13 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from models.analysis_job_result import (
     AnalysisFunctionSummary,
     AnalysisJobStatus,
     AnalysisJobSummary,
 )
+from models.coverage_progress import CoverageProgressSnapshot, CoverageStopReason
 from models.external_source_analysis_result import ExternalExecutionPolicy, ExternalSourceKind
 
 
@@ -33,6 +36,167 @@ def test_job_status_contains_all_lifecycle_states() -> None:
         "QUEUED", "RUNNING", "COMPLETED", "PARTIAL", "FAILED",
         "TIMED_OUT", "CANCELLED",
     }
+
+
+def test_coverage_progress_is_immutable_exact_and_publicly_safe() -> None:
+    progress = CoverageProgressSnapshot(
+        revision=3,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="COMBINED",
+        coverage_percent=60.0,
+        line_percent=75.0,
+        branch_percent=50.0,
+        covered_lines=3,
+        total_lines=4,
+        covered_branches=3,
+        total_branches=6,
+        candidate_count=8,
+        validated_count=5,
+        effective_test_count=2,
+        last_gain_percent=20.0,
+        last_new_line_count=1,
+        last_new_branch_count=1,
+        plateau_count=0,
+        stop_reason=None,
+    )
+
+    assert progress.to_dict()["coverage_percent"] == 60.0
+    with pytest.raises((AttributeError, TypeError)):
+        progress.revision = 4  # type: ignore[misc]
+    serialized = repr(progress.to_dict())
+    for forbidden in ("source_code", "keyword_arguments", "expected_result"):
+        assert forbidden not in serialized
+
+
+def test_line_only_progress_uses_line_metric_and_exact_formula() -> None:
+    progress = CoverageProgressSnapshot(
+        revision=1,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="LINE",
+        coverage_percent=50.0,
+        line_percent=50.0,
+        branch_percent=None,
+        covered_lines=1,
+        total_lines=2,
+        covered_branches=0,
+        total_branches=0,
+        candidate_count=1,
+        validated_count=1,
+        effective_test_count=1,
+        last_gain_percent=50.0,
+        last_new_line_count=1,
+        last_new_branch_count=0,
+        plateau_count=0,
+        stop_reason=None,
+    )
+
+    assert progress.coverage_percent == progress.line_percent
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"covered_lines": 3, "total_lines": 2},
+        {"validated_count": 3, "candidate_count": 2},
+        {"effective_test_count": 2, "validated_count": 1},
+        {"coverage_percent": 99.0},
+        {"metric": "LINE", "total_branches": 1, "covered_branches": 0},
+    ),
+)
+def test_coverage_progress_rejects_inconsistent_counts_and_formula(changes) -> None:
+    values = dict(
+        revision=1,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="COMBINED",
+        coverage_percent=50.0,
+        line_percent=50.0,
+        branch_percent=50.0,
+        covered_lines=1,
+        total_lines=2,
+        covered_branches=1,
+        total_branches=2,
+        candidate_count=2,
+        validated_count=1,
+        effective_test_count=1,
+        last_gain_percent=50.0,
+        last_new_line_count=1,
+        last_new_branch_count=1,
+        plateau_count=0,
+        stop_reason=None,
+    )
+    values.update(changes)
+
+    with pytest.raises((TypeError, ValueError)):
+        CoverageProgressSnapshot(**values)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"stage": "PRIVATE_INTERNAL_STAGE"},
+        {"stop_reason": "PRIVATE_INTERNAL_REASON"},
+    ),
+)
+def test_coverage_progress_rejects_non_public_stage_and_stop_reason(changes) -> None:
+    values = dict(
+        revision=1,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="LINE",
+        coverage_percent=50.0,
+        line_percent=50.0,
+        branch_percent=None,
+        covered_lines=1,
+        total_lines=2,
+        covered_branches=0,
+        total_branches=0,
+        candidate_count=1,
+        validated_count=1,
+        effective_test_count=1,
+        last_gain_percent=50.0,
+        last_new_line_count=1,
+        last_new_branch_count=0,
+        plateau_count=0,
+        stop_reason=CoverageStopReason.TARGET_REACHED,
+    )
+    values.update(changes)
+    with pytest.raises((TypeError, ValueError)):
+        CoverageProgressSnapshot(**values)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"last_gain_percent": 25.0},
+        {"last_new_line_count": 2},
+        {"last_new_branch_count": 2},
+        {"plateau_count": 2},
+    ),
+)
+def test_coverage_progress_rejects_inconsistent_last_gain_and_plateau(changes) -> None:
+    values = dict(
+        revision=1,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="COMBINED",
+        coverage_percent=50.0,
+        line_percent=50.0,
+        branch_percent=50.0,
+        covered_lines=1,
+        total_lines=2,
+        covered_branches=1,
+        total_branches=2,
+        candidate_count=2,
+        validated_count=1,
+        effective_test_count=1,
+        last_gain_percent=50.0,
+        last_new_line_count=1,
+        last_new_branch_count=1,
+        plateau_count=0,
+        stop_reason=None,
+    )
+    values.update(changes)
+
+    with pytest.raises((TypeError, ValueError)):
+        CoverageProgressSnapshot(**values)
 
 
 def test_function_summary_keeps_pool_greedy_and_rl_coverage_distinct() -> None:

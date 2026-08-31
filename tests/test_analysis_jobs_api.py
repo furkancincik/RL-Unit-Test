@@ -14,6 +14,7 @@ from starlette.datastructures import FormData, UploadFile as StarletteUploadFile
 
 from api.app import create_app
 from api.routes.analysis_jobs import submit_upload
+from api.schemas.analysis_jobs import JobStatusResponse
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalExecutionPolicy,
@@ -244,6 +245,70 @@ def test_inline_submission_defaults_to_static_and_result_is_polled(tmp_path: Pat
     request = runner.run.call_args.args[0]
     assert request.execution_policy.value == "STATIC_DISCOVERY_ONLY"
     service.shutdown()
+
+
+def test_job_status_and_terminal_result_expose_nullable_coverage_progress(
+    tmp_path: Path,
+) -> None:
+    client, service, _ = _client(tmp_path)
+    with client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "def target():\n    return 1\n"},
+        )
+        job_id = submitted.json()["job_id"]
+        service.wait(job_id, timeout=5)
+        snapshot = client.get(f"/api/v1/jobs/{job_id}")
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["coverage_progress"] is None
+    assert result.status_code == 200
+    assert result.json()["coverage_progress"] is None
+    service.shutdown()
+
+
+def test_job_status_schema_rejects_unknown_coverage_metric() -> None:
+    payload = {
+        "job_id": "opaque",
+        "source_kind": "INLINE_PYTHON_SOURCE",
+        "analysis_policy": "STATIC_DISCOVERY_ONLY",
+        "status": "RUNNING",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "progress_stage": "EXTERNAL_ANALYSIS",
+        "safe_error_category": None,
+        "cancellation_requested": False,
+        "artifact_count": 0,
+        "project_timeout_seconds": None,
+        "project_deadline_exceeded": False,
+        "last_completed_stage": None,
+        "deadline_stage": None,
+        "coverage_progress": {
+            "revision": 1,
+            "stage": "COVERAGE_OPTIMIZATION",
+            "metric": "PRIVATE_METRIC",
+            "coverage_percent": 50.0,
+            "line_percent": 50.0,
+            "branch_percent": None,
+            "covered_lines": 1,
+            "total_lines": 2,
+            "covered_branches": 0,
+            "total_branches": 0,
+            "candidate_count": 1,
+            "validated_count": 1,
+            "effective_test_count": 1,
+            "last_gain_percent": 50.0,
+            "last_new_line_count": 1,
+            "last_new_branch_count": 0,
+            "plateau_count": 0,
+            "stop_reason": None,
+        },
+    }
+
+    with pytest.raises(ValueError):
+        JobStatusResponse.model_validate(payload)
 
 
 def test_completed_job_result_exposes_input_rejections_without_status_promotion(

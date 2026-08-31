@@ -19,6 +19,7 @@ from analyzer.python_source_reader import (
     decode_python_source_bytes,
 )
 from analyzer.python_analyzer import PythonAnalyzer
+from models.coverage_progress import CoverageProgressSnapshot
 from models.external_source_analysis_result import (
     ExternalAnalysisStatus,
     ExternalExecutionPolicy,
@@ -104,9 +105,21 @@ class ExternalSourceAnalysisService:
         )
         self._clock = clock
 
-    def run(self, request: ExternalSourceAnalysisRequest) -> ExternalSourceAnalysisResult:
+    def run(
+        self,
+        request: ExternalSourceAnalysisRequest,
+        *,
+        coverage_progress_callback: (
+            Callable[[CoverageProgressSnapshot], None] | None
+        ) = None,
+    ) -> ExternalSourceAnalysisResult:
         if not isinstance(request, ExternalSourceAnalysisRequest):
             raise TypeError("request ExternalSourceAnalysisRequest olmalıdır.")
+        if (
+            coverage_progress_callback is not None
+            and not callable(coverage_progress_callback)
+        ):
+            raise TypeError("coverage_progress_callback callable olmalıdır.")
         validate_external_source_execution_policy(
             request.source,
             request.execution_policy,
@@ -410,6 +423,7 @@ class ExternalSourceAnalysisService:
                 output_root=output_root,
                 target_inventories=target_inventories,
                 deadline=deadline,
+                coverage_progress_callback=coverage_progress_callback,
             )
             last_completed_stage = "PROJECT_COVERAGE"
             status = self._derive_status(
@@ -568,6 +582,10 @@ class ExternalSourceAnalysisService:
                     comparison_timeout_seconds=request.configuration.comparison_timeout_seconds,
                     relative_module_path=module.relative_path,
                     project_deadline=deadline,
+                    allow_safe_object_setup=not isinstance(
+                        request.source,
+                        PublicGitHubRepository,
+                    ),
                 )
             except ModuleNotFoundError:
                 results.append(
@@ -651,6 +669,9 @@ class ExternalSourceAnalysisService:
         output_root: Path,
         target_inventories: dict[str, tuple[str, ...]],
         deadline: ProjectDeadline,
+        coverage_progress_callback: (
+            Callable[[CoverageProgressSnapshot], None] | None
+        ),
     ) -> ProjectCoverageResult | None:
         if request.execution_policy is ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY:
             return None
@@ -683,14 +704,15 @@ class ExternalSourceAnalysisService:
             module_results=module_results,
             target_inventories=target_inventories,
         )
-        coverage_timeout = request.configuration.pytest_coverage_timeout_seconds
-        if remaining is not None:
-            coverage_timeout = min(float(coverage_timeout), remaining)
         return self._project_coverage_service.measure_and_minimize(
             candidates=tuple(candidates),
             scope=scope,
             output_root=output_root,
-            timeout_seconds=coverage_timeout,
+            timeout_seconds=(
+                request.configuration.pytest_coverage_timeout_seconds
+            ),
+            overall_timeout_seconds=remaining,
+            coverage_progress_callback=coverage_progress_callback,
         )
 
     @staticmethod

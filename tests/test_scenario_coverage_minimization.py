@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import os
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -591,6 +591,33 @@ def test_run_local_cache_key_isolated_by_source_function_and_config(
         timeout_seconds=20.0,
         **common,
     )
+
+
+def test_run_local_cache_key_includes_internal_setup_execution_identity(
+    tmp_path: Path,
+) -> None:
+    class SetupPlanStub:
+        def __init__(self, fingerprint: str) -> None:
+            self.execution_fingerprint = fingerprint
+
+    source = tmp_path / "target.py"
+    source.write_text("def classify(value):\n    return value\n", encoding="utf-8")
+    baseline = _scenario("stable-public-id", 1)
+    first = replace(baseline, setup_plan=SetupPlanStub("setup-first"))
+    second = replace(baseline, setup_plan=SetupPlanStub("setup-second"))
+
+    def key(scenario: Scenario) -> tuple[object, ...]:
+        return ScenarioCoverageMinimizationService._cache_key(
+            source=source,
+            function_name="classify",
+            start_line=1,
+            end_line=2,
+            timeout_seconds=10.0,
+            scenario=scenario,
+        )
+
+    assert first.scenario_id == second.scenario_id
+    assert key(first) != key(second)
 
 
 def test_service_rejects_duplicate_scenario_ids(tmp_path: Path) -> None:

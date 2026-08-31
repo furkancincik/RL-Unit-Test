@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from models.analysis_job_result import AnalysisJobStatus
+from models.coverage_progress import CoverageStopReason
 from models.external_source_analysis_result import (
     ExternalExecutionPolicy,
     ExternalModuleSelectionMode,
@@ -161,6 +162,29 @@ class JobStatusResponse(BaseModel):
     project_deadline_exceeded: bool
     last_completed_stage: str | None
     deadline_stage: str | None
+    coverage_progress: "CoverageProgressResponse | None" = None
+
+
+class CoverageProgressResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=1)
+    stage: Literal["COVERAGE_OPTIMIZATION"]
+    metric: Literal["LINE", "COMBINED"]
+    coverage_percent: float
+    line_percent: float
+    branch_percent: float | None
+    covered_lines: int = Field(ge=0)
+    total_lines: int = Field(ge=0)
+    covered_branches: int = Field(ge=0)
+    total_branches: int = Field(ge=0)
+    candidate_count: int = Field(ge=0)
+    validated_count: int = Field(ge=0)
+    effective_test_count: int = Field(ge=0)
+    last_gain_percent: float
+    last_new_line_count: int = Field(ge=0)
+    last_new_branch_count: int = Field(ge=0)
+    plateau_count: int = Field(ge=0)
+    stop_reason: CoverageStopReason | None
 
 
 class InputRejectionCategoryResponse(BaseModel):
@@ -250,6 +274,7 @@ class JobResultResponse(BaseModel):
     completed_function_count: int
     partial_function_count: int
     timed_out_function_count: int
+    coverage_progress: CoverageProgressResponse | None = None
 
 
 class ArtifactResponse(BaseModel):

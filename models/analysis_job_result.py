@@ -7,6 +7,7 @@ from typing import Any
 
 from generator.scenario_generator import ScenarioRejectionCategory
 from models.external_source_analysis_result import ExternalExecutionPolicy, ExternalSourceKind
+from models.coverage_progress import CoverageProgressSnapshot
 
 
 def normalize_public_input_rejection_categories(
@@ -201,6 +202,7 @@ class AnalysisJobResultSummary:
     partial_function_count: int = 0
     timed_out_function_count: int = 0
     resolved_commit_sha: str | None = None
+    coverage_progress: CoverageProgressSnapshot | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +233,11 @@ class AnalysisJobResultSummary:
             "completed_function_count": self.completed_function_count,
             "partial_function_count": self.partial_function_count,
             "timed_out_function_count": self.timed_out_function_count,
+            "coverage_progress": (
+                self.coverage_progress.to_dict()
+                if self.coverage_progress is not None
+                else None
+            ),
         }
 
 
@@ -251,6 +258,7 @@ class AnalysisJobSummary:
     project_deadline_exceeded: bool = False
     last_completed_stage: str | None = None
     deadline_stage: str | None = None
+    coverage_progress: CoverageProgressSnapshot | None = None
 
     def __post_init__(self) -> None:
         for value in (self.created_at, self.started_at, self.finished_at):
@@ -274,4 +282,9 @@ class AnalysisJobSummary:
             "project_deadline_exceeded": self.project_deadline_exceeded,
             "last_completed_stage": self.last_completed_stage,
             "deadline_stage": self.deadline_stage,
+            "coverage_progress": (
+                self.coverage_progress.to_dict()
+                if self.coverage_progress is not None
+                else None
+            ),
         }

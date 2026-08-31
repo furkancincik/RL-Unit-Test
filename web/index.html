@@ -232,6 +232,26 @@
           <span id="job-status-badge" class="status-badge">QUEUED</span>
         </div>
         <div id="job-live-status" class="job-stage" aria-live="polite" aria-atomic="true">İş kuyruğa alındı.</div>
+        <section id="coverage-progress-card" class="coverage-progress-card" aria-labelledby="coverage-progress-heading">
+          <div class="coverage-progress-header">
+            <div>
+              <p class="step-label">Canlı ölçüm</p>
+              <h3 id="coverage-progress-heading">Coverage ilerlemesi</h3>
+            </div>
+            <strong id="coverage-progress-metric">Ölçüm bekleniyor</strong>
+          </div>
+          <progress id="coverage-progress-bar" class="coverage-progress-bar" max="100" aria-label="Canlı coverage ilerlemesi"></progress>
+          <dl class="metric-grid compact coverage-progress-metrics">
+            <div><dt>Aşama</dt><dd id="coverage-progress-stage">Ölçüm bekleniyor</dd></div>
+            <div><dt>Satır</dt><dd id="coverage-progress-line">Ölçüm bekleniyor</dd></div>
+            <div><dt>Branch</dt><dd id="coverage-progress-branch">Ölçüm bekleniyor</dd></div>
+            <div><dt>Aday</dt><dd id="coverage-progress-candidates">Ölçüm bekleniyor</dd></div>
+            <div><dt>Doğrulanan</dt><dd id="coverage-progress-validated">Ölçüm bekleniyor</dd></div>
+            <div><dt>Etkili test</dt><dd id="coverage-progress-effective">Ölçüm bekleniyor</dd></div>
+            <div><dt>Son kazanım</dt><dd id="coverage-progress-last-gain">Ölçüm bekleniyor</dd></div>
+            <div><dt>Durma nedeni</dt><dd id="coverage-progress-stop-reason">Ölçüm bekleniyor</dd></div>
+          </dl>
+        </section>
         <dl class="metric-grid compact" id="job-metrics">
           <div><dt>Aşama</dt><dd id="job-stage">QUEUED</dd></div>
           <div><dt>Kaynak</dt><dd id="job-source-kind">Ölçülmedi</dd></div>

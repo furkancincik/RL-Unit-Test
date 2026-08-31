@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from models.analysis_job_result import AnalysisJobStatus
+from models.coverage_progress import CoverageProgressSnapshot
 from models.external_source_analysis_result import (
     ExternalAnalysisConfiguration,
     ExternalAnalysisStatus,
@@ -33,6 +34,7 @@ from services.analysis_job_service import (
     AnalysisJobStateConflictError,
     PinnedGitHubAuthorizationError,
 )
+from services.external_source_analysis_service import ExternalSourceAnalysisService
 
 
 def _request(output: Path) -> ExternalSourceAnalysisRequest:
@@ -147,6 +149,193 @@ def test_job_runs_once_and_reaches_terminal_state(tmp_path: Path) -> None:
     assert runner.run.call_count == 1
     assert completed.started_at is not None
     assert completed.finished_at is not None
+    service.shutdown()
+
+
+def _progress(revision: int, coverage_percent: float) -> CoverageProgressSnapshot:
+    covered = int(coverage_percent // 25)
+    return CoverageProgressSnapshot(
+        revision=revision,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="LINE",
+        coverage_percent=coverage_percent,
+        line_percent=coverage_percent,
+        branch_percent=None,
+        covered_lines=covered,
+        total_lines=4,
+        covered_branches=0,
+        total_branches=0,
+        candidate_count=4,
+        validated_count=min(covered, 4),
+        effective_test_count=min(covered, 4),
+        last_gain_percent=25.0 if covered else 0.0,
+        last_new_line_count=1 if covered else 0,
+        last_new_branch_count=0,
+        plateau_count=0,
+        stop_reason=None,
+    )
+
+
+def test_real_runner_progress_is_published_monotonically_and_reaches_result(
+    tmp_path: Path,
+) -> None:
+    started = Event()
+    release = Event()
+
+    class ProgressRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback):
+            coverage_progress_callback(_progress(1, 25.0))
+            coverage_progress_callback(_progress(2, 50.0))
+            started.set()
+            assert release.wait(5)
+            return _result(request.configuration.output_root)
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=ProgressRunner,
+    )
+    job = service.submit(_request(tmp_path / "ignored"))
+    assert started.wait(5)
+    snapshot = service.get(job.job_id)
+    assert snapshot.coverage_progress == _progress(2, 50.0)
+    release.set()
+    service.wait(job.job_id, timeout=5)
+    assert service.get_result(job.job_id).coverage_progress == _progress(2, 50.0)
+    service.shutdown()
+
+
+def test_progress_rejects_stale_revision_and_ignores_terminal_callback(
+    tmp_path: Path,
+) -> None:
+    callbacks = []
+
+    class ProgressRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback):
+            callbacks.append(coverage_progress_callback)
+            coverage_progress_callback(_progress(2, 50.0))
+            coverage_progress_callback(_progress(1, 25.0))
+            return _result(request.configuration.output_root)
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=ProgressRunner,
+    )
+    job = service.submit(_request(tmp_path / "ignored"))
+    service.wait(job.job_id, timeout=5)
+    callbacks[0](_progress(3, 75.0))
+    assert service.get(job.job_id).coverage_progress == _progress(2, 50.0)
+    service.shutdown()
+
+
+def test_worker_failure_preserves_last_valid_progress_snapshot(tmp_path: Path) -> None:
+    class FailingProgressRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback):
+            coverage_progress_callback(_progress(1, 25.0))
+            raise RuntimeError("internal failure")
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=FailingProgressRunner,
+    )
+    job = service.submit(_request(tmp_path / "ignored"))
+    with pytest.raises(RuntimeError, match="internal failure"):
+        service.wait(job.job_id, timeout=5)
+
+    assert service.get(job.job_id).coverage_progress == _progress(1, 25.0)
+    assert service.get_result(job.job_id).coverage_progress == _progress(1, 25.0)
+    service.shutdown()
+
+
+def test_invalid_progress_callback_payload_fails_safely_and_preserves_snapshot(
+    tmp_path: Path,
+) -> None:
+    private_detail = "private callback object detail"
+
+    class InvalidProgressRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback):
+            coverage_progress_callback(_progress(1, 25.0))
+            coverage_progress_callback(object())
+            raise AssertionError(private_detail)
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=InvalidProgressRunner,
+    )
+    job = service.submit(_request(tmp_path / "ignored"))
+    with pytest.raises(TypeError, match="CoverageProgressSnapshot"):
+        service.wait(job.job_id, timeout=5)
+
+    summary = service.get(job.job_id)
+    result = service.get_result(job.job_id)
+    assert summary.status is AnalysisJobStatus.FAILED
+    assert summary.safe_error_category == "INTERNAL_WORKER_ERROR"
+    assert summary.coverage_progress == _progress(1, 25.0)
+    assert result.coverage_progress == _progress(1, 25.0)
+    serialized = repr((summary.to_dict(), result.to_dict()))
+    assert "TypeError" not in serialized
+    assert private_detail not in serialized
+    assert "private callback object" not in serialized
+    service.shutdown()
+
+
+def test_running_cancellation_request_ignores_later_progress_and_preserves_snapshot(
+    tmp_path: Path,
+) -> None:
+    callback_ready = Event()
+    release = Event()
+    callbacks = []
+
+    class ProgressRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback):
+            callbacks.append(coverage_progress_callback)
+            coverage_progress_callback(_progress(1, 25.0))
+            callback_ready.set()
+            assert release.wait(5)
+            return _result(request.configuration.output_root)
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=ProgressRunner,
+    )
+    job = service.submit(_request(tmp_path / "ignored"))
+    assert callback_ready.wait(5)
+    with pytest.raises(AnalysisJobStateConflictError, match="desteklenmiyor"):
+        service.cancel(job.job_id)
+
+    callbacks[0](_progress(2, 50.0))
+    assert service.get(job.job_id).coverage_progress == _progress(1, 25.0)
+    release.set()
+    service.wait(job.job_id, timeout=5)
+    assert service.get_result(job.job_id).coverage_progress == _progress(1, 25.0)
+    service.shutdown()
+
+
+def test_legacy_fake_runner_does_not_require_progress_keyword(tmp_path: Path) -> None:
+    runner = Mock()
+    runner.run.side_effect = lambda request: _result(request.configuration.output_root)
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path),
+        runner_factory=Mock(return_value=runner),
+    )
+    job = service.submit(_request(tmp_path / "ignored"))
+    service.wait(job.job_id, timeout=5)
+    runner.run.assert_called_once()
+    assert runner.run.call_args.kwargs == {}
     service.shutdown()
 
 

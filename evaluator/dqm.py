@@ -99,10 +99,17 @@ class DecisionQualityMatrix:
                 )
             )
 
+        return self._sort_scores(results)
+
+    @staticmethod
+    def _sort_scores(scores: list[DQMScore]) -> list[DQMScore]:
+        """Skor ve özgün path kimliğiyle deterministik toplam sıra kurar."""
         return sorted(
-            results,
-            key=lambda result: result.normalized_score,
-            reverse=True,
+            scores,
+            key=lambda result: (
+                -result.normalized_score,
+                result.path_index,
+            ),
         )
 
     def _calculate_raw_score(

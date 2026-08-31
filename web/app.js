@@ -39,6 +39,7 @@ const state = {
   pollGeneration: 0,
   retryAttempt: 0,
   createdAt: null,
+  coverageProgressRevision: -1,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -107,6 +108,37 @@ function policyLabel(value) {
     : value === "TRUSTED_DYNAMIC_ANALYSIS"
       ? "Güvenilir Dinamik Analiz"
       : measured(value);
+}
+
+function coverageStageLabel(value) {
+  const labels = {
+    COVERAGE_OPTIMIZATION: "Coverage optimizasyonu",
+  };
+  return labels[value] || "Bilinmeyen coverage aşaması";
+}
+
+function coverageMetricLabel(value) {
+  const labels = {
+    LINE: "Satır coverage",
+    COMBINED: "Birleşik coverage",
+  };
+  return labels[value] || "Bilinmeyen coverage metriği";
+}
+
+function coverageStopReasonLabel(value) {
+  if (value === null || value === undefined || value === "") {
+    return "Devam ediyor";
+  }
+  const labels = {
+    TARGET_REACHED: "Seçili güvenli aday kapsamı tamamlandı",
+    CANDIDATES_EXHAUSTED: "Güvenli adaylar tamamlandı",
+    PROVEN_PLATEAU: "Yeni doğrulanabilir coverage katkısı bulunamadı",
+    TEST_LIMIT_REACHED: "Test sınırına ulaşıldı",
+    DEADLINE_REACHED: "Zaman sınırına ulaşıldı",
+    CANCELLED: "Analiz iptal edildi",
+    FAILED: "Coverage ölçümü başarısız oldu",
+  };
+  return labels[value] || "Bilinmeyen durma nedeni";
 }
 
 function setMessage(message) {
@@ -726,6 +758,85 @@ function resetOutput() {
   }
 }
 
+function resetCoverageProgress() {
+  state.coverageProgressRevision = -1;
+  const bar = byId("coverage-progress-bar");
+  bar.removeAttribute("value");
+  byId("coverage-progress-metric").textContent = "Ölçüm bekleniyor";
+  for (const id of [
+    "coverage-progress-stage",
+    "coverage-progress-line",
+    "coverage-progress-branch",
+    "coverage-progress-candidates",
+    "coverage-progress-validated",
+    "coverage-progress-effective",
+    "coverage-progress-last-gain",
+    "coverage-progress-stop-reason",
+  ]) {
+    byId(id).textContent = "Ölçüm bekleniyor";
+  }
+}
+
+function progressCount(covered, total) {
+  if (!Number.isInteger(covered) || covered < 0
+      || !Number.isInteger(total) || total < 0 || covered > total) {
+    return "Ölçülmedi";
+  }
+  return `${covered} / ${total}`;
+}
+
+function progressCountWithPercent(covered, total, percent) {
+  const count = progressCount(covered, total);
+  const validPercent = percentage(percent);
+  if (count === "Ölçülmedi" && validPercent === null) {
+    return "Ölçülmedi";
+  }
+  if (count === "Ölçülmedi") {
+    return `%${validPercent.toFixed(2)}`;
+  }
+  return validPercent === null ? count : `${count} · %${validPercent.toFixed(2)}`;
+}
+
+function renderCoverageProgress(progress) {
+  if (!progress || typeof progress !== "object"
+      || !Number.isInteger(progress.revision) || progress.revision < 0
+      || progress.revision <= state.coverageProgressRevision) {
+    return;
+  }
+  state.coverageProgressRevision = progress.revision;
+  const bar = byId("coverage-progress-bar");
+  const overallPercent = percentage(progress.coverage_percent);
+  if (overallPercent === null) {
+    bar.removeAttribute("value");
+  } else {
+    bar.value = overallPercent;
+  }
+  byId("coverage-progress-stage").textContent = coverageStageLabel(progress.stage);
+  byId("coverage-progress-metric").textContent =
+    `${coverageMetricLabel(progress.metric)}: ${formatPercentage(progress.coverage_percent)}`;
+  byId("coverage-progress-line").textContent = progressCountWithPercent(
+    progress.covered_lines,
+    progress.total_lines,
+    progress.line_percent,
+  );
+  byId("coverage-progress-branch").textContent = progressCountWithPercent(
+    progress.covered_branches,
+    progress.total_branches,
+    progress.branch_percent,
+  );
+  byId("coverage-progress-candidates").textContent = measured(progress.candidate_count);
+  byId("coverage-progress-validated").textContent = measured(progress.validated_count);
+  byId("coverage-progress-effective").textContent = measured(progress.effective_test_count);
+  const lastGain = formatPercentage(progress.last_gain_percent);
+  const newLines = measured(progress.last_new_line_count);
+  const newBranches = measured(progress.last_new_branch_count);
+  const plateau = measured(progress.plateau_count);
+  byId("coverage-progress-last-gain").textContent =
+    `${lastGain} · +${newLines} satır · +${newBranches} branch · plateau ${plateau}`;
+  byId("coverage-progress-stop-reason").textContent =
+    coverageStopReasonLabel(progress.stop_reason);
+}
+
 function statusDescription(status) {
   return {
     QUEUED: "İş bounded kuyruğa alındı; worker bekleniyor.",
@@ -753,6 +864,13 @@ function updateJobStatus(snapshot) {
   byId("job-policy").textContent = policyLabel(snapshot.analysis_policy);
   byId("job-started-at").textContent = formatDate(snapshot.started_at);
   byId("job-finished-at").textContent = formatDate(snapshot.finished_at);
+  if (snapshot.coverage_progress === null) {
+    if (snapshot.status === "FAILED") {
+      resetCoverageProgress();
+    }
+  } else if (snapshot.coverage_progress !== undefined) {
+    renderCoverageProgress(snapshot.coverage_progress);
+  }
 
   const beginning = snapshot.started_at || snapshot.created_at || state.createdAt;
   const ending = snapshot.finished_at || new Date().toISOString();
@@ -847,6 +965,7 @@ async function pollJob() {
 function beginJob(snapshot, submission = null) {
   stopPolling();
   resetOutput();
+  resetCoverageProgress();
   state.currentJobId = snapshot.job_id;
   state.currentStatus = snapshot.status;
   state.createdAt = snapshot.created_at;

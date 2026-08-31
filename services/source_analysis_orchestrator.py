@@ -84,6 +84,7 @@ class SourceAnalysisOrchestrator:
         relative_module_path: str | None = None,
         target_selection: TargetSelection | None = None,
         project_deadline: ProjectDeadline | None = None,
+        allow_safe_object_setup: bool = True,
     ) -> ProjectAnalysisResult:
         started_at = self._clock()
         if project_deadline is not None and not isinstance(
@@ -118,6 +119,10 @@ class SourceAnalysisOrchestrator:
         if not isinstance(run_strategy_comparison, bool):
             raise SourceAnalysisValidationError(
                 "run_strategy_comparison bool olmalıdır."
+            )
+        if not isinstance(allow_safe_object_setup, bool):
+            raise SourceAnalysisValidationError(
+                "allow_safe_object_setup bool olmalıdır."
             )
 
         analysis = self._analyzer.analyze_file(normalized_source)
@@ -227,6 +232,7 @@ class SourceAnalysisOrchestrator:
                 run_greedy_baseline=run_greedy_baseline,
                 run_strategy_comparison=run_strategy_comparison,
                 comparison_timeout_seconds=comparison_timeout,
+                allow_safe_object_setup=allow_safe_object_setup,
             )
             diagnostic = self._extract_diagnostic(pipeline_result)
             if isinstance(pipeline_result, RealRLTrainingResult):
@@ -607,6 +613,7 @@ class SourceAnalysisOrchestrator:
         candidates: list[ProjectTestCandidate] = []
         for offset, scenario in enumerate(pipeline_result.scenarios, start=1):
             contribution = contributions.get(scenario.scenario_id)
+            may_reuse_target_only_contribution = scenario.setup_plan is None
             candidates.append(
                 ProjectTestCandidate(
                     project_test_id=(
@@ -625,16 +632,19 @@ class SourceAnalysisOrchestrator:
                     precomputed_line_identities=(
                         contribution.covered_line_identities
                         if contribution is not None
+                        and may_reuse_target_only_contribution
                         else None
                     ),
                     precomputed_branch_identities=(
                         contribution.covered_branch_identities
                         if contribution is not None
+                        and may_reuse_target_only_contribution
                         else None
                     ),
                     precomputed_execution_success=(
                         contribution.execution_success
                         if contribution is not None
+                        and may_reuse_target_only_contribution
                         else None
                     ),
                 )

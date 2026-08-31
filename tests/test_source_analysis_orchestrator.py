@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from analyzer.python_analyzer import PythonAnalyzer
+from generator.scenario_generator import Scenario
 from models.pipeline_diagnostic_result import (
     PipelineDiagnosticResult,
     PipelineFunnelSnapshot,
@@ -19,11 +22,11 @@ from models.project_analysis_result import (
     TargetSelection,
     TargetSelectionMode,
 )
+from services.project_deadline import ProjectDeadline
 from services.source_analysis_orchestrator import (
     SourceAnalysisOrchestrator,
     SourceAnalysisValidationError,
 )
-from services.project_deadline import ProjectDeadline
 
 
 SOURCE = """
@@ -46,6 +49,72 @@ class Handler:
 def last(value: int) -> int:
     return value - 1
 """
+
+
+def _candidate_scenario(*, setup_fingerprint: str | None) -> Scenario:
+    class SetupPlanStub:
+        def __init__(self, fingerprint: str) -> None:
+            self.execution_fingerprint = fingerprint
+
+    scenario = Scenario(
+        scenario_id="scenario-1",
+        name="scenario",
+        path_index=1,
+        priority_rank=1,
+        priority_level="High",
+        dqm_score=1.0,
+        node_ids=(1,),
+        edge_labels=(None,),
+        contains_loop=False,
+        contains_exception=False,
+        description="candidate",
+    )
+    if setup_fingerprint is None:
+        return scenario
+    return replace(scenario, setup_plan=SetupPlanStub(setup_fingerprint))
+
+
+def test_project_candidates_drop_target_only_contributions_for_setup_scenarios(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "module.py"
+    source.write_text("def target():\n    return 1\n", encoding="utf-8")
+    contribution = SimpleNamespace(
+        scenario_id="scenario-1",
+        covered_line_identities=(1, 2),
+        covered_branch_identities=(),
+        execution_success=True,
+    )
+    target = SimpleNamespace(
+        qualified_name="target",
+        name="target",
+        start_line=1,
+        end_line=2,
+    )
+
+    def build(scenario: Scenario):
+        pipeline = SimpleNamespace(
+            scenarios=(scenario,),
+            module_path="module",
+            minimization_result=SimpleNamespace(contributions=(contribution,)),
+        )
+        return SourceAnalysisOrchestrator._project_test_candidates(
+            pipeline_result=pipeline,
+            target=target,
+            source_file=source,
+            import_root=tmp_path,
+            relative_module_path="module.py",
+            initial_order=0,
+        )[0]
+
+    plain = build(_candidate_scenario(setup_fingerprint=None))
+    setup = build(_candidate_scenario(setup_fingerprint="setup"))
+
+    assert plain.precomputed_line_identities == (1, 2)
+    assert plain.precomputed_execution_success is True
+    assert setup.precomputed_line_identities is None
+    assert setup.precomputed_branch_identities is None
+    assert setup.precomputed_execution_success is None
 
 
 def _diagnostic(
@@ -156,6 +225,7 @@ def test_single_function_selection_and_timeout_forwarding(
         function_name="first",
         all_functions=False,
         maximum_functions=1,
+        allow_safe_object_setup=False,
     )
 
     assert result.function_results[0].target.name == "first"
@@ -165,6 +235,7 @@ def test_single_function_selection_and_timeout_forwarding(
         for item in result.function_results[1:]
     )
     assert calls[0]["pipeline_timeout_seconds"] == 2.0
+    assert calls[0]["allow_safe_object_setup"] is False
     assert result.status is ProjectRunStatus.COMPLETED
 
 

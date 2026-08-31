@@ -111,6 +111,20 @@ def test_web_ui_contains_separate_sources_and_accessible_controls(tmp_path: Path
     )
 
 
+def test_web_ui_contains_accessible_authoritative_coverage_progress(tmp_path: Path) -> None:
+    with _client(tmp_path) as client:
+        html = client.get("/").text
+
+    assert 'id="coverage-progress-card"' in html
+    assert 'id="coverage-progress-bar"' in html
+    assert 'aria-label="Canlı coverage ilerlemesi"' in html
+    assert 'id="coverage-progress-stage"' in html
+    assert 'id="coverage-progress-line"' in html
+    assert 'id="coverage-progress-branch"' in html
+    assert 'id="coverage-progress-stop-reason"' in html
+    assert "Ölçüm bekleniyor" in html
+
+
 def test_importing_server_does_not_start_uvicorn() -> None:
     sys.modules.pop("api.server", None)
 

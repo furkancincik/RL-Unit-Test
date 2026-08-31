@@ -21,13 +21,22 @@ from models.external_source_analysis_result import (
     ExternalWorkspaceCleanupStatus,
     InlinePythonSource,
     LocalProjectDirectory,
+    PinnedGitHubDynamicAuthorization,
+    PublicGitHubRepository,
     UploadedPythonFile,
+)
+from models.coverage_progress import CoverageProgressSnapshot
+from models.project_analysis_result import (
+    QualifiedTargetSelector,
+    TargetSelection,
+    TargetSelectionMode,
 )
 from models.pipeline_diagnostic_result import PipelineDiagnosticResult
 from services.analysis_job_service import AnalysisJobService, AnalysisJobSettings
 from services.external_source_analysis_service import ExternalSourceAnalysisService
 from services.real_rl_training_service import RealRLTrainingResult, RealRLTrainingService
 from services.source_analysis_orchestrator import SourceAnalysisOrchestrator
+from services.source_acquisition_service import SourceAcquisitionService
 
 
 BRANCH_SOURCE = """\
@@ -122,6 +131,147 @@ def test_real_uploaded_dynamic_analysis_uses_distinct_tool_workspace(tmp_path: P
     assert result.module_results[0].relative_path == "branch.py"
     for json_artifact in result.output_root.rglob("*.json"):
         assert "rl-unit-test-upload-" not in json_artifact.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("source_kind", ("inline", "upload"))
+def test_real_three_input_dynamic_progress_is_monotonic_and_matches_final_suite(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    private_marker = "private_progress_marker_9173"
+    source_code = BRANCH_SOURCE + f"\n# {private_marker}\n"
+    source = (
+        InlinePythonSource(source_code)
+        if source_kind == "inline"
+        else UploadedPythonFile("progress-branch.py", source_code.encode("utf-8"))
+    )
+    snapshots: list[CoverageProgressSnapshot] = []
+
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            source,
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(
+                tmp_path / f"{source_kind}_progress_output",
+                run_greedy_baseline=True,
+            ),
+        ),
+        coverage_progress_callback=snapshots.append,
+    )
+
+    assert result.status in {
+        ExternalAnalysisStatus.COMPLETED,
+        ExternalAnalysisStatus.PARTIAL,
+    }
+    assert len(snapshots) >= 2
+    assert [item.revision for item in snapshots] == list(
+        range(1, len(snapshots) + 1)
+    )
+    assert len({item.total_lines for item in snapshots}) == 1
+    assert len({item.total_branches for item in snapshots}) == 1
+    assert all(
+        before.covered_lines <= after.covered_lines
+        and before.covered_branches <= after.covered_branches
+        and before.validated_count <= after.validated_count
+        for before, after in zip(snapshots, snapshots[1:])
+    )
+    combined = result.project_coverage
+    assert combined is not None
+    final = snapshots[-1]
+    assert final.candidate_count == combined.full_scenario_count
+    assert final.effective_test_count == combined.final_selected_count
+    assert final.covered_lines == len(combined.minimized_covered_line_identities)
+    assert final.covered_branches == len(combined.minimized_covered_branch_identities)
+    serialized = result.report_path.read_text(encoding="utf-8")
+    assert source_code not in serialized
+    assert private_marker not in serialized
+    for private_name in (
+        "dqm_score",
+        "setup_plan",
+        "execution_fingerprint",
+        "semantic_shape_digest",
+        "keyword_arguments",
+        "expected_result",
+        "actual_result",
+    ):
+        assert private_name not in serialized
+
+
+def test_real_inline_static_analysis_emits_no_coverage_progress(tmp_path: Path) -> None:
+    snapshots: list[CoverageProgressSnapshot] = []
+
+    result = ExternalSourceAnalysisService().run(
+        ExternalSourceAnalysisRequest(
+            InlinePythonSource(BRANCH_SOURCE),
+            ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
+            _dynamic_configuration(tmp_path / "static_progress_output"),
+        ),
+        coverage_progress_callback=snapshots.append,
+    )
+
+    assert result.status is ExternalAnalysisStatus.STATIC_COMPLETED
+    assert snapshots == []
+
+
+def test_pinned_github_dynamic_progress_uses_exact_sha_without_network(
+    tmp_path: Path,
+) -> None:
+    commit_sha = "7" * 40
+    repository_url = "https://github.com/example/progress-fixture"
+
+    def runner(
+        arguments: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if "clone" in arguments:
+            destination = Path(arguments[-1])
+            destination.mkdir(parents=True)
+            (destination / "module.py").write_text(BRANCH_SOURCE, encoding="utf-8")
+        output = commit_sha if "rev-parse" in arguments else ""
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    selection = TargetSelection(
+        TargetSelectionMode.EXPLICIT_QUALIFIED_TARGETS,
+        (QualifiedTargetSelector("module", "classify"),),
+    )
+    authorization = PinnedGitHubDynamicAuthorization(
+        discovery_job_id="d" * 32,
+        repository_url=repository_url,
+        resolved_commit_sha=commit_sha,
+        selectors=selection.selectors,
+    )
+    snapshots: list[CoverageProgressSnapshot] = []
+
+    result = ExternalSourceAnalysisService(
+        acquisition_service=SourceAcquisitionService(
+            subprocess_runner=runner,
+            git_executable="git",
+        )
+    ).run(
+        ExternalSourceAnalysisRequest(
+            PublicGitHubRepository(repository_url, ref=commit_sha),
+            ExternalExecutionPolicy.TRUSTED_DYNAMIC_ANALYSIS,
+            _dynamic_configuration(
+                tmp_path / "github_progress_output",
+                target_selection=selection,
+                run_greedy_baseline=True,
+            ),
+            pinned_github_authorization=authorization,
+        ),
+        coverage_progress_callback=snapshots.append,
+    )
+
+    assert result.resolved_commit_sha == commit_sha
+    assert result.status in {
+        ExternalAnalysisStatus.COMPLETED,
+        ExternalAnalysisStatus.PARTIAL,
+    }
+    assert len(snapshots) >= 2
+    assert [item.revision for item in snapshots] == list(
+        range(1, len(snapshots) + 1)
+    )
+    assert snapshots[-1].stop_reason is not None
+    assert "INTERNAL_WORKER_ERROR" not in result.issues
 
 
 def test_real_uploaded_bom_dynamic_analysis_completes_without_internal_error(

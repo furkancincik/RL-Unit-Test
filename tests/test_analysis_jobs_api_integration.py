@@ -7,12 +7,22 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from threading import Event
 from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from api.schemas.analysis_jobs import JobStatusResponse
+from models.coverage_progress import CoverageProgressSnapshot
+from models.external_source_analysis_result import (
+    ExternalAnalysisStatus,
+    ExternalExecutionPolicy,
+    ExternalSourceAnalysisResult,
+    ExternalSourceKind,
+    ExternalWorkspaceCleanupStatus,
+)
 from services.analysis_job_service import AnalysisJobService, AnalysisJobSettings
 from services.external_source_analysis_service import ExternalSourceAnalysisService
 from services.pipeline_timeout_service import GlobalPipelineTimeoutRunner
@@ -30,6 +40,55 @@ def _service(tmp_path: Path) -> AnalysisJobService:
             maximum_upload_bytes=100_000,
             maximum_inline_source_bytes=100_000,
         )
+    )
+
+
+def _progress(revision: int, covered: int) -> CoverageProgressSnapshot:
+    percent = covered / 4 * 100.0
+    return CoverageProgressSnapshot(
+        revision=revision,
+        stage="COVERAGE_OPTIMIZATION",
+        metric="LINE",
+        coverage_percent=percent,
+        line_percent=percent,
+        branch_percent=None,
+        covered_lines=covered,
+        total_lines=4,
+        covered_branches=0,
+        total_branches=0,
+        candidate_count=4,
+        validated_count=covered,
+        effective_test_count=covered,
+        last_gain_percent=25.0,
+        last_new_line_count=1,
+        last_new_branch_count=0,
+        plateau_count=0,
+        stop_reason=None,
+    )
+
+
+def _progress_result(request) -> ExternalSourceAnalysisResult:
+    output = request.configuration.output_root
+    output.mkdir(parents=True, exist_ok=True)
+    report = output / "external_source_analysis_report.json"
+    report.write_text("{}", encoding="utf-8")
+    return ExternalSourceAnalysisResult(
+        source_kind=ExternalSourceKind.INLINE_PYTHON_SOURCE,
+        execution_policy=ExternalExecutionPolicy.STATIC_DISCOVERY_ONLY,
+        status=ExternalAnalysisStatus.STATIC_COMPLETED,
+        acquisition_status="COMPLETED",
+        repository_name=None,
+        github_owner=None,
+        github_repository=None,
+        resolved_commit_sha=None,
+        discovered_module_count=0,
+        selected_module_count=0,
+        module_results=(),
+        output_root=output,
+        report_path=report,
+        duration_seconds=0.1,
+        cleanup_status=ExternalWorkspaceCleanupStatus.COMPLETED,
+        issues=(),
     )
 
 
@@ -59,6 +118,8 @@ def test_real_inline_static_job_is_safe_and_pollable(tmp_path: Path) -> None:
         result = client.get(f"/api/v1/jobs/{job_id}/result")
         artifacts = client.get(f"/api/v1/jobs/{job_id}/artifacts")
     assert status.json()["status"] == "COMPLETED"
+    assert status.json()["coverage_progress"] is None
+    assert result.json()["coverage_progress"] is None
     assert result.json()["analysis_policy"] == "STATIC_DISCOVERY_ONLY"
     assert result.json()["discovered_module_count"] == 1
     assert result.json()["selected_module_count"] == 1
@@ -894,3 +955,128 @@ def test_successful_github_without_python_is_partial_through_public_api(
     assert result["issues"] == ["NO_PYTHON_FILES"]
     assert result["modules"] == []
     service.shutdown()
+
+
+def test_progress_poll_result_consistency_and_new_job_isolation(tmp_path: Path) -> None:
+    published = Event()
+    release = Event()
+    run_count = 0
+
+    class ProgressRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback=None):
+            nonlocal run_count
+            run_count += 1
+            if run_count == 1:
+                assert coverage_progress_callback is not None
+                coverage_progress_callback(_progress(1, 1))
+                coverage_progress_callback(_progress(2, 2))
+                published.set()
+                assert release.wait(5)
+            return _progress_result(request)
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(
+            output_root=tmp_path / "jobs",
+            maximum_running_jobs=1,
+            maximum_queued_jobs=2,
+        ),
+        runner_factory=ProgressRunner,
+    )
+    with TestClient(create_app(job_service=service)) as client:
+        first = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "def first():\n    return 1\n"},
+        )
+        first_id = first.json()["job_id"]
+        assert published.wait(5)
+
+        polled = client.get(f"/api/v1/jobs/{first_id}")
+        pending_result = client.get(f"/api/v1/jobs/{first_id}/result")
+        assert polled.json()["coverage_progress"]["revision"] == 2
+        assert pending_result.status_code == 409
+
+        second = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "def second():\n    return 2\n"},
+        )
+        assert second.json()["job_id"] != first_id
+        assert second.json()["coverage_progress"] is None
+
+        release.set()
+        service.wait(first_id, timeout=5)
+        service.wait(second.json()["job_id"], timeout=5)
+        terminal_status = client.get(f"/api/v1/jobs/{first_id}").json()
+        terminal_result = client.get(f"/api/v1/jobs/{first_id}/result").json()
+        second_status = client.get(
+            f"/api/v1/jobs/{second.json()['job_id']}"
+        ).json()
+
+    assert terminal_status["coverage_progress"] == terminal_result["coverage_progress"]
+    assert terminal_result["coverage_progress"]["revision"] == 2
+    assert second_status["coverage_progress"] is None
+    service.shutdown()
+
+
+def test_unexpected_worker_failure_preserves_safe_progress_without_private_fields(
+    tmp_path: Path,
+) -> None:
+    class FailingRunner(ExternalSourceAnalysisService):
+        def __init__(self) -> None:
+            pass
+
+        def run(self, request, *, coverage_progress_callback=None):
+            assert coverage_progress_callback is not None
+            coverage_progress_callback(_progress(1, 1))
+            raise RuntimeError("private worker detail")
+
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=tmp_path / "jobs"),
+        runner_factory=FailingRunner,
+    )
+    with TestClient(create_app(job_service=service)) as client:
+        submitted = client.post(
+            "/api/v1/jobs/inline",
+            json={"source_code": "def target():\n    return 1\n"},
+        )
+        job_id = submitted.json()["job_id"]
+        with pytest.raises(RuntimeError, match="private worker detail"):
+            service.wait(job_id, timeout=5)
+        status = client.get(f"/api/v1/jobs/{job_id}")
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+
+    assert status.json()["status"] == "FAILED"
+    assert status.json()["coverage_progress"]["revision"] == 1
+    assert result.json()["coverage_progress"] == status.json()["coverage_progress"]
+    serialized = json.dumps((status.json(), result.json()))
+    assert "private worker detail" not in serialized
+    service.shutdown()
+
+
+def test_progress_schema_rejects_unknown_private_fields() -> None:
+    payload = {
+        "job_id": "opaque",
+        "source_kind": "INLINE_PYTHON_SOURCE",
+        "analysis_policy": "STATIC_DISCOVERY_ONLY",
+        "status": "RUNNING",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "progress_stage": "EXTERNAL_ANALYSIS",
+        "safe_error_category": None,
+        "cancellation_requested": False,
+        "artifact_count": 0,
+        "project_timeout_seconds": None,
+        "project_deadline_exceeded": False,
+        "last_completed_stage": None,
+        "deadline_stage": None,
+        "coverage_progress": {
+            **_progress(1, 1).to_dict(),
+            "raw_source": "private",
+        },
+    }
+
+    with pytest.raises(ValueError):
+        JobStatusResponse.model_validate(payload)
