@@ -26,6 +26,10 @@ from models.project_coverage_result import (
     ProjectLineIdentity,
     ProjectTestCandidate,
 )
+from models.strategy_evaluation_result import (
+    StrategyEvaluationCandidate,
+    StrategyEvaluationPool,
+)
 from services.coverage_service import CoverageExecutionTimeoutError, CoverageService
 
 
@@ -64,6 +68,7 @@ class ProjectScenarioCoverageSignature:
 @dataclass(frozen=True, slots=True)
 class ProjectExactCoverageSelection:
     selected_project_test_ids: tuple[str, ...]
+    greedy_selection_order_ids: tuple[str, ...]
     initial_selected_count: int
     redundancy_removed_count: int
 
@@ -139,6 +144,9 @@ class ProjectExactCoverageGreedySelector:
         )
         return ProjectExactCoverageSelection(
             selected_project_test_ids=ordered,
+            greedy_selection_order_ids=tuple(
+                item.project_test_id for item in selected
+            ),
             initial_selected_count=initial_count,
             redundancy_removed_count=removed_count,
         )
@@ -745,6 +753,85 @@ class ProjectCoverageService:
             failure_message=failure_message,
         )
         return self._write_report(result)
+
+    def measure_strategy_evaluation_pool(
+        self,
+        *,
+        candidates: tuple[ProjectTestCandidate, ...],
+        output_root: str | Path,
+        timeout_seconds: float = 30.0,
+        overall_timeout_seconds: float | None = None,
+    ) -> StrategyEvaluationPool:
+        """Ortak concrete-valid havuz için strategy-neutral exact oracle ölçer."""
+        started = self._clock()
+        values = self._validate_candidates(candidates)
+        if not values:
+            raise ValueError("Strategy evaluation candidate pool boş olamaz.")
+        timeout = self._validate_timeout(timeout_seconds)
+        overall_timeout = (
+            None
+            if overall_timeout_seconds is None
+            else self._validate_timeout(overall_timeout_seconds)
+        )
+        root = Path(output_root).resolve()
+        work = (root / "strategy_evaluation" / "oracle").resolve()
+        if not work.is_relative_to(root):
+            raise RuntimeError("Strategy evaluation oracle output root dışında.")
+        full_test = work / "full_pool" / "test_strategy_full_pool.py"
+        self._write_suite(values, full_test)
+        full = self._measure(
+            values,
+            full_test,
+            self._measurement_timeout(started, timeout, overall_timeout),
+            scope_candidates=values,
+        )
+        if full.test_exit_code != 0:
+            raise RuntimeError("Strategy evaluation full pool execution başarısız.")
+
+        evaluation_candidates: list[StrategyEvaluationCandidate] = []
+        target_lines = set(full.covered_lines)
+        target_branches = set(full.covered_branches)
+        for index, candidate in enumerate(values, start=1):
+            candidate_test = (
+                work
+                / "candidates"
+                / f"{index:04d}"
+                / "test_strategy_candidate.py"
+            )
+            self._write_suite((candidate,), candidate_test)
+            measurement = self._measure(
+                (candidate,),
+                candidate_test,
+                self._measurement_timeout(started, timeout, overall_timeout),
+                scope_candidates=values,
+            )
+            if (
+                measurement.executable_lines != full.executable_lines
+                or measurement.executable_branches != full.executable_branches
+            ):
+                raise RuntimeError(
+                    "Strategy evaluation exact denominator candidate'a göre değişti."
+                )
+            evaluation_candidates.append(
+                StrategyEvaluationCandidate(
+                    candidate_id=candidate.project_test_id,
+                    dqm_rank=candidate.original_order,
+                    covered_line_identities=tuple(
+                        sorted(set(measurement.covered_lines) & target_lines)
+                    ),
+                    covered_branch_identities=tuple(
+                        sorted(set(measurement.covered_branches) & target_branches)
+                    ),
+                    execution_success=measurement.test_exit_code == 0,
+                )
+            )
+        return StrategyEvaluationPool(
+            candidates=tuple(evaluation_candidates),
+            executable_line_identities=full.executable_lines,
+            executable_branch_identities=full.executable_branches,
+            target_line_identities=full.covered_lines,
+            target_branch_identities=full.covered_branches,
+        )
 
     def _measure_cumulative_progress(
         self,

@@ -120,6 +120,7 @@ def test_project_selector_uses_required_tie_break_and_backward_elimination() -> 
     )
 
     assert selection.selected_project_test_ids == ("z", "a")
+    assert selection.greedy_selection_order_ids == ("z", "a")
     assert selection.initial_selected_count == 2
     assert selection.redundancy_removed_count == 0
 
@@ -148,6 +149,11 @@ def test_project_selector_applies_backward_redundancy_elimination() -> None:
     assert selection.initial_selected_count == 3
     assert selection.redundancy_removed_count == 1
     assert selection.selected_project_test_ids == ("scenario-2", "scenario-4")
+    assert selection.greedy_selection_order_ids == (
+        "scenario-3",
+        "scenario-2",
+        "scenario-4",
+    )
 
 
 def test_real_two_module_project_combined_coverage_and_minimization(
@@ -967,6 +973,37 @@ def _progress_candidates(tmp_path: Path) -> tuple[ProjectTestCandidate, ...]:
             )
         )
     return tuple(reversed(values))
+
+
+def test_strategy_evaluation_pool_is_measured_once_in_common_dqm_order(
+    tmp_path: Path,
+) -> None:
+    service = _DeterministicProgressCoverageService(
+        {
+            "high": (1,),
+            "zero": (),
+            "later": (2,),
+        }
+    )
+
+    pool = service.measure_strategy_evaluation_pool(
+        candidates=_progress_candidates(tmp_path),
+        output_root=tmp_path / "strategy-output",
+    )
+
+    assert pool.candidate_ids == ("high", "zero", "later")
+    assert pool.executable_line_identities == (
+        ("module.py", 1),
+        ("module.py", 2),
+        ("module.py", 3),
+    )
+    assert pool.target_line_identities == (("module.py", 1), ("module.py", 2))
+    assert service.measurement_inputs == [
+        (("high", "zero", "later"), ("high", "zero", "later")),
+        (("high",), ("high", "zero", "later")),
+        (("zero",), ("high", "zero", "later")),
+        (("later",), ("high", "zero", "later")),
+    ]
 
 
 def test_online_progress_uses_dqm_order_fixed_scope_and_exact_marginal_gain(

@@ -24,6 +24,8 @@ class EpsilonGreedyPolicy:
     __slots__ = (
         "_epsilon",
         "_random",
+        "_exploration_selection_count",
+        "_exploitation_selection_count",
     )
 
     def __init__(
@@ -40,6 +42,8 @@ class EpsilonGreedyPolicy:
             if random_generator is not None
             else random.Random()
         )
+        self._exploration_selection_count = 0
+        self._exploitation_selection_count = 0
 
     @property
     def epsilon(self) -> float:
@@ -47,6 +51,16 @@ class EpsilonGreedyPolicy:
         Politikanın güncel keşif oranını döndürür.
         """
         return self._epsilon
+
+    @property
+    def exploration_selection_count(self) -> int:
+        """Bu policy instance'ının keşif yoluyla yaptığı seçim sayısıdır."""
+        return self._exploration_selection_count
+
+    @property
+    def exploitation_selection_count(self) -> int:
+        """Bu policy instance'ının exploitation seçim sayısıdır."""
+        return self._exploitation_selection_count
 
     def set_epsilon(
         self,
@@ -148,6 +162,7 @@ class EpsilonGreedyPolicy:
         )
 
         if should_explore:
+            self._exploration_selection_count += 1
             return self._random.choice(
                 actions
             )
@@ -157,6 +172,7 @@ class EpsilonGreedyPolicy:
             actions=actions,
         )
 
+        self._exploitation_selection_count += 1
         return self._random.choice(
             best_actions
         )

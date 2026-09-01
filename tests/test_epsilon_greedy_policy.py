@@ -784,3 +784,21 @@ def test_updated_epsilon_changes_exploration_decision() -> None:
 
     assert exploiting_result == first_action
 
+
+def test_policy_counts_exploration_and_exploitation_without_changing_selection() -> None:
+    random_generator = ControlledRandom(random_value=0.1)
+    policy = EpsilonGreedyPolicy(
+        epsilon=0.2,
+        random_generator=random_generator,
+    )
+    actions = (create_action(0), create_action(1))
+
+    assert policy.exploration_selection_count == 0
+    assert policy.exploitation_selection_count == 0
+    assert policy.select_action(create_state_key(), actions, QTable()) == actions[0]
+    random_generator._random_value = 0.9
+    assert policy.select_action(create_state_key(), actions, QTable()) == actions[0]
+
+    assert policy.exploration_selection_count == 1
+    assert policy.exploitation_selection_count == 1
+
