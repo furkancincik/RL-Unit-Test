@@ -463,7 +463,7 @@ Inline and upload payloads are byte-limited, encoding/syntax checked, written to
 
 Dynamic analysis reuses the production `SourceAnalysisOrchestrator` and creates fresh per-module/per-function service state. The validated project root or `src` root is passed only to the isolated worker and coverage subprocess. Coverage uses that root as `cwd` and as the complete run-specific `PYTHONPATH`; the parent process path and import cache are restored. Dependency installation is never attempted. Missing dependencies and import failures become safe per-module results without raw tracebacks, environment data, credentials, kwargs, or expected/actual values in the external JSON.
 
-The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Current regression: `2805 passed, 1 skipped in 665.51s`.
+The real inline acceptance produced a two-scenario pool, exact 100% line and branch coverage, a two-test greedy suite, and a two-test RL suite; exact coverage equality was verified and the comparison result was `TIE`. Real uploaded-file and local multi-module/package-relative-import acceptances also completed, persisted artifacts outside tool temp, preserved the local project, cleaned tool-owned workspaces, and left the parent `sys.path` unchanged. The function-limit acceptance discovered three eligible functions, executed the first two in source order, retained the third as `SKIPPED_LIMIT`, and reported the project as `PARTIAL`. The project-deadline acceptance retained one completed function, timed out the active function, skipped the unstarted function, and then verified on two renamed fixtures that a second trusted-dynamic run used fresh state and completed real worker, pytest, and combined-coverage execution. Final authoritative regression: `2834 passed, 1 skipped in 681.58s`; the single skip records unavailable Windows symlink creation.
 
 ---
 
@@ -621,18 +621,35 @@ The final `sample_complex_code.py` run completed all five functions in 139.60 se
 
 Server lifecycle acceptance confirmed import safety, localhost-only binding, all nine OpenAPI operations, static assets, `/docs`, `/redoc`, and graceful application shutdown after a Windows console break with no remaining port-8000 listener. A real two-second pipeline timeout produced a `TIMED_OUT` partial snapshot, running cancellation returned `409`, and the next job completed normally. Authentication, rate limiting, and sandboxing are not part of this local developer-tool release.
 
-## D4 Shopping Cart Coverage-Closure Evidence
+## Final D5-D7 Coverage and Strategy Evidence
 
-A read-only trusted-dynamic run selected all four safe targets discovered in the user-supplied Shopping Cart fixture. The full pool contained 10 concrete-valid scenarios; 11 monotonic snapshots processed all 10 candidates and retained 9 with non-zero exact contribution. Final cross-target greedy replay kept those 9 artifact tests while preserving the full suite's exact identities. Both generated pytest suites passed. The measured analyzed-module result was 60/92 lines (65.2174%), 27/42 branches (64.2857%), and 87/134 combined identities (64.9254%). Acquisition, module analysis, and cleanup completed; the overall project remained `PARTIAL` because controlled unsupported targets were retained in its inventory. This is the best verified result from the current safe candidate pool, not a 100% or theoretical-maximum claim.
+The official `datasets/shopping_cart.py` fixture is retained for reproducibility with SHA-256 `0a7b6d151cf707c69b5762186bdd5c6a5e7436bc849a0670304503b994acbbc1`. Bounded correlated collection witnesses closed the previously safe-supported-but-not-generated partition from 5 lines and 6 branch edges to 0/0. The resulting common concrete-valid pool contains 25 candidate tests and reaches 65/92 exact lines, 33/42 exact branches, and 98/134 combined identities. Deterministic exact greedy replay preserves that complete attainable identity set with 13 tests; `globally_minimal=false` remains explicit.
 
-| Qualified target | Final scenarios | Function line | Function branch | Controlled rejection |
-| --- | ---: | ---: | ---: | --- |
-| `ShoppingCart.calculate_total` | 3 | 66.67% | 70.00% | 22 `UNREACHABLE_INPUT` paths |
-| `ShoppingCart.get_most_expensive_item` | 1 | 27.27% | 12.50% | 13 `UNREACHABLE_INPUT` paths |
-| `ShoppingCart.summary` | 1 | 80.00% | 50.00% | 2 `UNREACHABLE_INPUT` paths |
-| `process_order` | 5 | 87.50% | 100.00% | 14 `UNSUPPORTED_INPUT_SYNTHESIS` paths |
+The final strategy evaluation separates scenario generation from selection. DQM orders paths using `(-normalized_score, path_index)`, after which safe synthesis and concrete validation establish one immutable common pool. `DQM_PREFIX`, `EXACT_GREEDY`, and RL receive that same pool, target, exact coverage oracle, denominator, and execution budget. DQM remains a prioritization layer, not coverage authority. Exact module-qualified line and branch identities are authoritative; combined coverage is `(covered lines + covered branches) / (total lines + total branches)`, while rounded percentages are display values only.
 
-The exact uncovered partition contains 12 controlled-unsupported-input/object lines and 6 corresponding branch edges, 2 exception-only lines, and 13 non-target/declaration lines with 3 edges. Five lines and six branch edges remain `SAFE_SUPPORTED_BUT_NOT_GENERATED`: correlated multi-field collection witnesses are not yet synthesized for the safe scalar-fold, argmax-object-return, and dictionary-record-return paths. D4 therefore remains blocked for release readiness even though `UNKNOWN=0`, `INTERNAL_WORKER_ERROR=0`, exact greedy preservation passed, and the preferred 70% line threshold was not relaxed or fabricated.
+RL evaluation used 20 episodes for each seed `7, 19, 31, 43, 59, 71, 83, 97, 109, 127`, epsilon `0.30`, decay `0.95`, minimum epsilon `0.05`, alpha `0.5`, and gamma `0.9`. RL reached every exact target in all 40 frozen-seed evaluations and improved over naive DQM ordering on the nontrivial Shopping Cart and `sample_complex_code.py` pools. `EXACT_GREEDY` nevertheless matched or exceeded RL's test-selection efficiency on every evaluated dataset. This demonstrates strong target reliability but weaker minimization under the frozen state, reward, and configuration; RL is not presented as superior.
+
+| Dataset | Common pool | DQM | Exact greedy | RL mean | RL best | Target rate | RL/Greedy | Winner |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Shopping Cart | 25 | 25 | 13 | 17.2 | 14 | 10/10 | 1.3231 | `BASELINE_WINS` |
+| `sample_code.py` | 3 | 3 | 3 | 3.0 | 3 | 10/10 | 1.0000 | `BASELINE_WINS` via duration tie-break |
+| `sample_complex_code.py` | 39 | 39 | 29 | 35.8 | 35 | 10/10 | 1.2345 | `BASELINE_WINS` |
+| `sample_robustness_code.py` | 7 | 7 | 7 | 7.0 | 7 | 10/10 | 1.0000 | `BASELINE_WINS` via duration tie-break |
+
+The exact greedy evaluator observes execution-derived marginal contributions, but it is not claimed to find a global optimum. The RL configuration was frozen rather than exhaustively tuned, the evaluation set is intentionally small, and some targets remain controlled `UNSUPPORTED`, `PARTIAL`, or `TIMED_OUT`. Known unsafe constructor, object-state, mutation, aliasing, and dynamic-call behavior is rejected when safe provenance cannot be established; these controlled outcomes are distinct from `FAILED`. Pipeline timeouts bound work but are not a security sandbox. The complete reproducibility table and configuration are preserved in `docs/final_strategy_results.md`.
+
+```text
+Source
+  -> AST and CFG/path analysis
+  -> DQM prioritization
+  -> safe input/setup/correlated-witness synthesis
+  -> concrete validation
+  -> common concrete-valid candidate pool
+  -> DQM prefix / exact greedy / RL selection
+  -> generated pytest and coverage.py
+  -> exact line/branch evaluation and reporting
+  -> API / localhost Web UI artifacts
+```
 
 ---
 
@@ -986,14 +1003,14 @@ The project contains an extensive automated test suite covering individual analy
 
 Latest full regression run:
 
-`2805 passed, 1 skipped in 665.51s`
+`2834 passed, 1 skipped in 681.58s`
 
 | Test result | Status |
 | --- | ---: |
-| Passed | 2,805 |
+| Passed | 2,834 |
 | Failed | 0 |
 | Skipped | 1 (Windows symlink creation unavailable) |
-| Duration | 665.51s |
+| Duration | 681.58s |
 
 ---
 
@@ -1160,7 +1177,7 @@ RL-Unit-Test
 - External dynamic analysis is opt-in trusted execution, not a sandbox. Per-function and total-project timeouts do not prevent source code from accessing host files, processes, or networks.
 - Public acquisition supports anonymous HTTPS repositories only. Private repositories, tokens, automatic dependency installation, and arbitrary untrusted project execution are intentionally unsupported.
 - Trusted GitHub dynamic execution is limited to a retained successful static snapshot, its server-authoritative exact SHA, and explicitly selected discovered targets. It does not add general object setup/method-effect synthesis or guarantee high coverage for every external source.
-- Bounded safe method setup supports only statically proven, budgeted receiver-call effects. Correlated multi-field collection witnesses needed by some otherwise safe fold, argmax-object-return, and dictionary-record-return paths are not yet generated; these gaps are reported as `SAFE_SUPPORTED_BUT_NOT_GENERATED`, not hidden as full coverage.
+- Bounded safe method setup and correlated collection witnesses support only statically proven, budgeted receiver-call effects and linked collection fields. Unsafe aliasing, mutation, dynamic calls, unproven provenance, and unsupported object graphs remain controlled rejections rather than being executed speculatively or hidden as full coverage.
 - The FastAPI job backend and local Web UI completed final localhost browser hardening, but authentication and rate limiting are not implemented. The terminal workflow remains the only interface for user-owned local project directories.
 - Job records are held in the application process memory. Restarting the API server does not restore previous job states; even when artifact files remain on disk, access through the old job endpoint is not guaranteed because the new process does not know the previous opaque job identifiers.
 
