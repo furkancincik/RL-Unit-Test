@@ -49,6 +49,7 @@ from models.coverage_result import (
 )
 from generator.safe_method_setup_plan import (
     SafeSetupPlanRejection,
+    analyze_safe_method_collection_context,
     analyze_safe_object_setup_context,
     materialize_safe_object_setup_plan,
 )
@@ -909,6 +910,17 @@ class RealRLTrainingService:
                 module_identity=normalized_module_path,
                 target_name=normalized_function_name,
                 custom_object_spec=custom_object_spec,
+            )
+        if (
+            allow_safe_object_setup
+            and setup_context is None
+            and method_spec is not None
+        ):
+            setup_context, _ = analyze_safe_method_collection_context(
+                source_tree,
+                module_identity=normalized_module_path,
+                target_name=normalized_function_name,
+                method_spec=method_spec,
             )
 
         stage_started = diagnostic.start_stage(

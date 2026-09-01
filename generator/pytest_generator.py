@@ -425,8 +425,8 @@ class PytestGenerator:
     ) -> tuple[list[str], dict[str, str]]:
         """Constructor ve setup çağrılarını kanıtlanmış sırayla render eder."""
         slot_variables = {
-            slot.slot_id: f"setup_object_{index}"
-            for index, slot in enumerate(plan.object_slots, start=1)
+            slot.slot_id: f"setup_object_{slot.slot_id}"
+            for slot in plan.object_slots
         }
         lines: list[str] = []
         for slot in plan.object_slots:

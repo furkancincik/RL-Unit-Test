@@ -33,6 +33,7 @@ from analyzer.safe_method_summary import (
     SafeStateEffect,
     analyze_safe_method_summaries,
 )
+from analyzer.simple_instance_method import SimpleInstanceMethodSpec
 from cfg.path_analyzer import ExecutionPath
 
 
@@ -668,6 +669,516 @@ class _ObserverProof:
 
 
 @dataclass(frozen=True, slots=True)
+class CorrelatedCollectionItem:
+    """Tek logical collection item'ına ait atomik primitive projection'lar."""
+
+    item_index: int
+    collection_key: int | float | str | bool
+    projections: tuple[tuple[tuple[str, ...], int | float | str | bool], ...]
+
+    def __post_init__(self) -> None:
+        if type(self.item_index) is not int or not 0 <= self.item_index < 2:
+            raise ValueError("Correlated item index bounded olmalıdır.")
+        if type(self.collection_key) not in _PRIMITIVE_TYPES.values():
+            raise TypeError("Correlated collection key primitive olmalıdır.")
+        _require_tuple(self.projections, "projections")
+        paths = tuple(path for path, _ in self.projections)
+        if len(set(paths)) != len(paths):
+            _reject(
+                SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+                "Aynı correlated projection çelişkili değer taşıyamaz.",
+            )
+        for path, value in self.projections:
+            if (
+                not path
+                or any(type(part) is not str or not part for part in path)
+                or type(value) not in _PRIMITIVE_TYPES.values()
+            ):
+                raise TypeError("Correlated projection exact primitive olmalıdır.")
+
+    @property
+    def canonical_payload(self) -> tuple[Any, ...]:
+        return (
+            self.item_index,
+            _canonical_primitive(self.collection_key),
+            tuple(
+                (path, _canonical_primitive(value))
+                for path, value in self.projections
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CorrelatedCollectionWitness:
+    """En fazla iki item taşıyan deterministic collection witness'ı."""
+
+    collection_identity: str
+    items: tuple[CorrelatedCollectionItem, ...]
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.collection_identity, "collection_identity")
+        _require_tuple(self.items, "items")
+        if len(self.items) > 2:
+            _reject(
+                SafeSetupPlanRejectionCategory.BUDGET_EXCEEDED,
+                "Correlated collection witness iki item bütçesini aşıyor.",
+            )
+        if not all(isinstance(item, CorrelatedCollectionItem) for item in self.items):
+            raise TypeError("items CorrelatedCollectionItem tuple olmalıdır.")
+
+    @property
+    def canonical_payload(self) -> tuple[Any, ...]:
+        return (
+            "CORRELATED_COLLECTION_WITNESS_V1",
+            self.collection_identity,
+            tuple(item.canonical_payload for item in self.items),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SafeMethodCollectionSetupContext:
+    """Basit instance method collection path'lerini bounded setup'a bağlar."""
+
+    module_identity: str = field(repr=False)
+    target_identity: str
+    method_spec: SimpleInstanceMethodSpec = field(repr=False)
+    collection_attribute: str
+    pattern_kind: str
+    root_class_fingerprint: str = field(repr=False)
+    nested_class_name: str
+    nested_constructor: tuple[_ConstructorArgumentProof, ...] = field(repr=False)
+    nested_class_fingerprint: str = field(repr=False)
+    nested_key_attribute: str
+    nested_value_attribute: str
+    nested_stock_attribute: str
+    setup_object_parameter: str
+    setup_quantity_parameter: str
+    setup_quantity_type: str
+    setup_summary: SafeMethodSummary = field(repr=False)
+    item_projection_paths: tuple[tuple[str, ...], ...] = ()
+    record_projection_paths: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    selection_operator: str | None = None
+    selected_identity_projection: tuple[str, ...] | None = None
+    selected_value_projection: tuple[str, ...] | None = None
+    aggregate_analysis_name: str | None = None
+    iterable_analysis_name: str | None = None
+    loop_target_name: str = ""
+    accumulator_name: str | None = None
+    selected_name: str | None = None
+    item_object_name: str | None = None
+    state_assignment_label: str = ""
+    loop_label: str = ""
+    neutral_assignment_labels: tuple[str, ...] = ()
+    update_label: str | None = None
+    state_condition_label: str | None = None
+    initial_selection_condition_label: str | None = None
+    selection_condition_label: str | None = None
+    initial_condition_analysis_names: tuple[str, ...] = ()
+    selection_condition_analysis_names: tuple[str, ...] = ()
+    return_label: str = ""
+    append_label: str | None = None
+
+    @property
+    def maximum_item_count(self) -> int:
+        return 2
+
+    def analysis_metadata(
+        self,
+        parameter_names: tuple[str, ...],
+        parameter_types: dict[str, str],
+    ) -> tuple[tuple[str, ...], dict[str, str]]:
+        names = list(parameter_names)
+        types = dict(parameter_types)
+        for private_name in (
+            self.aggregate_analysis_name,
+            self.iterable_analysis_name,
+        ):
+            if private_name is not None and private_name not in names:
+                names.append(private_name)
+        if self.aggregate_analysis_name is not None:
+            nested_types = {item.name: item.type_name for item in self.nested_constructor}
+            types[self.aggregate_analysis_name] = nested_types[self.nested_value_attribute]
+        if self.iterable_analysis_name is not None:
+            types[self.iterable_analysis_name] = "list"
+        for name in (
+            *self.initial_condition_analysis_names,
+            *self.selection_condition_analysis_names,
+        ):
+            if name not in names:
+                names.append(name)
+            types[name] = "bool"
+        return tuple(names), types
+
+    def rewrite_path(self, path: ExecutionPath) -> ExecutionPath:
+        if not isinstance(path, ExecutionPath):
+            raise TypeError("path ExecutionPath olmalıdır.")
+        iteration_count = _path_iteration_count(path, self.loop_label)
+        if iteration_count > self.maximum_item_count:
+            return path
+        labels: list[str] = []
+        initial_condition_index = 0
+        selection_condition_index = 0
+        for index, label in enumerate(path.node_labels):
+            outgoing = (
+                path.edge_labels[index]
+                if index < len(path.edge_labels)
+                else None
+            )
+            if label == self.state_assignment_label:
+                labels.append("__safe_collection_marker = 0")
+            elif label == self.loop_label:
+                labels.append(
+                    f"{self.loop_target_name} in {self.iterable_analysis_name}"
+                )
+            elif label in self.neutral_assignment_labels:
+                if self.pattern_kind == "ARG_EXTREME" and self.item_object_name:
+                    labels.append(
+                        f"{self.item_object_name} = {self.loop_target_name}"
+                    )
+                else:
+                    target = ast.parse(label).body[0]
+                    if isinstance(target, ast.Assign):
+                        labels.append(f"{ast.unparse(target.targets[0])} = 0")
+                    else:
+                        labels.append(label)
+            elif label == self.update_label:
+                labels.append(f"{self.accumulator_name} += 0")
+            elif (
+                self.pattern_kind == "SCALAR_FOLD"
+                and self.accumulator_name is not None
+                and label == f"{self.accumulator_name} = 0"
+            ):
+                labels.append(
+                    f"{self.accumulator_name} = {self.aggregate_analysis_name}"
+                )
+            elif label == self.state_condition_label:
+                labels.append(f"not {self.iterable_analysis_name}")
+            elif label == self.initial_selection_condition_label:
+                labels.append(
+                    self.initial_condition_analysis_names[
+                        initial_condition_index
+                    ]
+                )
+                initial_condition_index += 1
+            elif label == self.selection_condition_label:
+                labels.append(
+                    self.selection_condition_analysis_names[
+                        selection_condition_index
+                    ]
+                )
+                selection_condition_index += 1
+            elif label == self.return_label and self.pattern_kind == "ARG_EXTREME":
+                labels.append(f"return {self.selected_name}")
+            elif label == self.append_label:
+                labels.append("result.append(__safe_collection_index)")
+            else:
+                labels.append(label)
+        return ExecutionPath(
+            node_ids=list(path.node_ids),
+            edge_labels=list(path.edge_labels),
+            node_labels=labels,
+            node_types=list(path.node_types),
+            line_numbers=list(path.line_numbers),
+        )
+
+    def correlated_witness_for(
+        self,
+        *,
+        item_values: tuple[int | float, ...],
+        collection_nonempty: bool,
+    ) -> CorrelatedCollectionWitness:
+        _require_tuple(item_values, "item_values")
+        if type(collection_nonempty) is not bool:
+            raise TypeError("collection_nonempty bool olmalıdır.")
+        if not collection_nonempty and item_values:
+            _reject(
+                SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+                "Boş collection için correlated item constraint çelişkilidir.",
+            )
+        if len(item_values) > self.maximum_item_count:
+            _reject(
+                SafeSetupPlanRejectionCategory.BUDGET_EXCEEDED,
+                "Correlated item witness iki item bütçesini aşıyor.",
+            )
+        if any(type(value) not in {int, float} for value in item_values):
+            _reject(
+                SafeSetupPlanRejectionCategory.PRIMITIVE_DOMAIN_UNRESOLVED,
+                "Correlated item scalar değeri numeric olmalıdır.",
+            )
+        key_type = {
+            item.name: item.type_name for item in self.nested_constructor
+        }[self.nested_key_attribute]
+        projection_paths = tuple(dict.fromkeys(
+            (
+                *(self.item_projection_paths),
+                self.selected_value_projection or (self.nested_value_attribute,),
+            )
+        ))
+        items = tuple(
+            CorrelatedCollectionItem(
+                item_index=index,
+                collection_key=_indexed_setup_value(key_type, index),
+                projections=tuple(
+                    (
+                        path,
+                        (
+                            value
+                            if path == (
+                                self.selected_value_projection
+                                or (self.nested_value_attribute,)
+                            )
+                            else 1
+                        ),
+                    )
+                    for path in projection_paths
+                    if path != ("$key",)
+                ),
+            )
+            for index, value in enumerate(item_values)
+        )
+        return CorrelatedCollectionWitness(self.collection_attribute, items)
+
+    def bind_generated_input(
+        self,
+        generated_input: Any,
+        *,
+        path: ExecutionPath | None = None,
+    ) -> Any:
+        from generator.path_input_generator import GeneratedTestInput
+
+        if not isinstance(generated_input, GeneratedTestInput):
+            raise TypeError("generated_input GeneratedTestInput olmalıdır.")
+        if path is None:
+            raise TypeError("Correlated setup binding ExecutionPath gerektirir.")
+        iteration_count = _path_iteration_count(path, self._rewritten_loop_label())
+        if iteration_count > self.maximum_item_count:
+            _reject(
+                SafeSetupPlanRejectionCategory.BUDGET_EXCEEDED,
+                "Correlated path iki item bütçesini aşıyor.",
+            )
+        values = dict(generated_input.keyword_arguments)
+        item_values: tuple[int | float, ...]
+        if self.pattern_kind == "SCALAR_FOLD":
+            aggregate = values.get(self.aggregate_analysis_name)
+            if type(aggregate) not in {int, float}:
+                _reject(
+                    SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+                    "Scalar fold aggregate exact numeric olmalıdır.",
+                )
+            item_values = (
+                (aggregate,) if iteration_count == 1 else (aggregate, 0)
+            ) if iteration_count else ()
+        elif self.pattern_kind == "ARG_EXTREME":
+            raw_values = values.get(self.iterable_analysis_name)
+            if type(raw_values) is not list or len(raw_values) != iteration_count:
+                _reject(
+                    SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+                    "Arg-extreme iterable path cardinality ile eşleşmelidir.",
+                )
+            item_values = self._arg_extreme_values(path, iteration_count)
+        else:
+            item_values = tuple(index + 1 for index in range(iteration_count))
+
+        witness = self.correlated_witness_for(
+            item_values=item_values,
+            collection_nonempty=bool(iteration_count),
+        )
+        plan = self._setup_plan(witness)
+        expected_result = generated_input.expected_result
+        if self.pattern_kind == "ARG_EXTREME" and witness.items:
+            selector = max if self.selection_operator == ">" else min
+            selected = selector(
+                witness.items,
+                key=lambda item: dict(item.projections)[
+                    self.selected_value_projection or (self.nested_value_attribute,)
+                ],
+            )
+            expected_result = selected.collection_key
+        elif self.pattern_kind == "RECORD_PROJECTION":
+            expected_result = [
+                {
+                    output_name: self._projection_value(item, projection)
+                    for output_name, projection in self.record_projection_paths
+                }
+                for item in witness.items
+            ]
+        private_names = {
+            name for name in (self.aggregate_analysis_name, self.iterable_analysis_name)
+            if name is not None
+        }
+        private_names.update(self.initial_condition_analysis_names)
+        private_names.update(self.selection_condition_analysis_names)
+        constructor_names = {
+            parameter.analysis_name for parameter in self.method_spec.constructor_parameters
+        }
+        return replace(
+            generated_input,
+            keyword_arguments=tuple(
+                (name, value)
+                for name, value in generated_input.keyword_arguments
+                if name not in private_names and name not in constructor_names
+            ),
+            expected_result=expected_result,
+            setup_plan=plan,
+        )
+
+    def _rewritten_loop_label(self) -> str:
+        return f"{self.loop_target_name} in {self.iterable_analysis_name}"
+
+    def _arg_extreme_values(
+        self,
+        path: ExecutionPath,
+        iteration_count: int,
+    ) -> tuple[int, ...]:
+        initialization = tuple(
+            path.edge_labels[index] == "True"
+            for index, label in enumerate(path.node_labels[:-1])
+            if label in self.initial_condition_analysis_names
+        )
+        if initialization != tuple(index == 0 for index in range(iteration_count)):
+            _reject(
+                SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+                "Arg-extreme selected-item lifecycle path ile çelişiyor.",
+            )
+        comparisons = tuple(
+            path.edge_labels[index] == "True"
+            for index, label in enumerate(path.node_labels[:-1])
+            if label in self.selection_condition_analysis_names
+        )
+        if len(comparisons) != max(0, iteration_count - 1):
+            _reject(
+                SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+                "Arg-extreme comparison sayısı path cardinality ile çelişiyor.",
+            )
+        values = [0]
+        for selected, comparison_true in enumerate(comparisons):
+            previous = values[selected]
+            if self.selection_operator == ">":
+                values.append(previous + 1 if comparison_true else previous - 1)
+            else:
+                values.append(previous - 1 if comparison_true else previous + 1)
+        return tuple(values[:iteration_count])
+
+    def _projection_value(
+        self,
+        item: CorrelatedCollectionItem,
+        projection: tuple[str, ...],
+    ) -> int | float | str | bool:
+        if projection == ("$key",):
+            return item.collection_key
+        if projection[-1] == self.nested_key_attribute:
+            return item.collection_key
+        if projection[-1] == self.nested_value_attribute:
+            return dict(item.projections).get(
+                self.selected_value_projection or (self.nested_value_attribute,),
+                _canonical_setup_value(
+                    {entry.name: entry.type_name for entry in self.nested_constructor}[
+                        self.nested_value_attribute
+                    ]
+                ),
+            )
+        if projection[-1] == self.setup_quantity_parameter or len(projection) == 1:
+            return 1
+        raise SafeSetupPlanRejection(
+            SafeSetupPlanRejectionCategory.INVALID_RUNTIME_BINDING,
+            "Record projection correlated witness'a bağlanamadı.",
+        )
+
+    def _setup_plan(self, witness: CorrelatedCollectionWitness) -> SafeObjectSetupPlan:
+        root_arguments: list[tuple[str, int | float | str | bool]] = []
+        for parameter in self.method_spec.constructor_parameters:
+            root_arguments.append((parameter.name, _canonical_setup_value(parameter.type_name)))
+        root = SafeObjectSlot(
+            slot_id="root",
+            blueprint=SafeObjectConstructionBlueprint(
+                module_identity=self.module_identity,
+                class_name=self.method_spec.class_name,
+                constructor_arguments=tuple(root_arguments),
+                class_fingerprint=self.root_class_fingerprint,
+            ),
+            proven_empty_attributes=(self.collection_attribute,),
+        )
+        slots: list[SafeObjectSlot] = [root]
+        calls: list[SafeSetupCall] = []
+        nested_types = {item.name: item.type_name for item in self.nested_constructor}
+        for item in witness.items:
+            projected_value = dict(item.projections).get(
+                self.selected_value_projection or (self.nested_value_attribute,),
+                _canonical_setup_value(nested_types[self.nested_value_attribute]),
+            )
+            arguments: list[tuple[str, int | float | str | bool]] = []
+            for constructor in self.nested_constructor:
+                if constructor.name == self.nested_key_attribute:
+                    value = item.collection_key
+                elif constructor.name == self.nested_value_attribute:
+                    value = _coerce_setup_value(projected_value, constructor.type_name)
+                elif constructor.name == self.nested_stock_attribute:
+                    value = _coerce_setup_value(1, constructor.type_name)
+                else:
+                    value = _canonical_setup_value(constructor.type_name)
+                arguments.append((constructor.name, value))
+            slot_id = f"item_{item.item_index}"
+            slots.append(
+                SafeObjectSlot(
+                    slot_id=slot_id,
+                    blueprint=SafeObjectConstructionBlueprint(
+                        module_identity=self.module_identity,
+                        class_name=self.nested_class_name,
+                        constructor_arguments=tuple(arguments),
+                        class_fingerprint=self.nested_class_fingerprint,
+                    ),
+                    relation_depth=1,
+                    owner_slot_id="root",
+                )
+            )
+            calls.append(
+                SafeSetupCall(
+                    receiver_slot_id="root",
+                    method_summary=self.setup_summary,
+                    arguments=(
+                        SafeTypedArgumentBinding(
+                            parameter_name=self.setup_object_parameter,
+                            type_name="object",
+                            object_slot_id=slot_id,
+                        ),
+                        SafeTypedArgumentBinding(
+                            parameter_name=self.setup_quantity_parameter,
+                            type_name=self.setup_quantity_type,
+                            value=(1 if self.setup_quantity_type == "int" else 1.0),
+                        ),
+                    ),
+                    selected_guard_outcomes=tuple(
+                        (index, False) for index in range(len(self.setup_summary.guards))
+                    ),
+                )
+            )
+        budgets = replace(
+            DEFAULT_SAFE_METHOD_BUDGETS,
+            guards=max(DEFAULT_SAFE_METHOD_BUDGETS.guards, len(calls) * len(self.setup_summary.guards)),
+            state_effects=max(
+                DEFAULT_SAFE_METHOD_BUDGETS.state_effects,
+                len(calls) * self.setup_summary.budget_footprint.state_effects,
+            ),
+            observer_calls=max(
+                DEFAULT_SAFE_METHOD_BUDGETS.observer_calls,
+                len(calls) * self.setup_summary.budget_footprint.observer_calls,
+            ),
+            executable_statements=max(
+                DEFAULT_SAFE_METHOD_BUDGETS.executable_statements,
+                len(calls) * self.setup_summary.budget_footprint.executable_statements,
+            ),
+        )
+        return SafeObjectSetupPlan(
+            module_identity=self.module_identity,
+            target_identity=self.target_identity,
+            object_slots=tuple(slots),
+            setup_calls=tuple(calls),
+            receiver_slot_id="root",
+            budgets=budgets,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SafeObjectSetupContext:
     """Path marker'larını bounded setup proof'una bağlayan internal context."""
 
@@ -906,8 +1417,14 @@ class SafeObjectSetupContext:
             setup_plan=plan,
         )
 
-    def bind_generated_input(self, generated_input: Any) -> Any:
+    def bind_generated_input(
+        self,
+        generated_input: Any,
+        *,
+        path: ExecutionPath | None = None,
+    ) -> Any:
         """PathInputGenerator çıktısını planla atomik biçimde bağlar."""
+        del path
         from generator.path_input_generator import GeneratedTestInput
         from generator.scenario_generator import Scenario
 
@@ -1158,6 +1675,583 @@ def analyze_safe_object_setup_context(
         ),
         None,
     )
+
+
+def analyze_safe_method_collection_context(
+    tree: ast.Module,
+    *,
+    module_identity: str,
+    target_name: str,
+    method_spec: SimpleInstanceMethodSpec,
+) -> tuple[SafeMethodCollectionSetupContext | None, str | None]:
+    """Doğrudan method receiver'ı için üç bounded collection kalıbını kanıtlar."""
+    if not isinstance(tree, ast.Module):
+        raise TypeError("tree ast.Module olmalıdır.")
+    _validate_module_identity(module_identity)
+    if not isinstance(method_spec, SimpleInstanceMethodSpec):
+        raise TypeError("method_spec SimpleInstanceMethodSpec olmalıdır.")
+    if target_name != method_spec.qualified_name:
+        raise ValueError("target_name method spec qualified identity ile eşleşmelidir.")
+    if method_spec.constructor_parameters:
+        return None, "UNPROVEN_RECEIVER_CONSTRUCTOR_STATE"
+    empty_dict_states = tuple(
+        name
+        for name, initializer in method_spec.state_initializers
+        if isinstance(initializer, ast.Dict)
+        and not initializer.keys
+        and not initializer.values
+    )
+    if len(empty_dict_states) != 1:
+        return None, "UNPROVEN_EMPTY_COLLECTION"
+    collection_attribute = empty_dict_states[0]
+    classes = {
+        item.name: item for item in tree.body if isinstance(item, ast.ClassDef)
+    }
+    root_class = classes.get(method_spec.class_name)
+    if root_class is None or root_class.bases or root_class.keywords:
+        return None, "UNSAFE_ROOT_CLASS"
+    setup_proof = _find_bounded_insert_setup(
+        tree,
+        module_identity=module_identity,
+        classes=classes,
+        root_class=root_class,
+        collection_attribute=collection_attribute,
+    )
+    if setup_proof is None:
+        return None, "UNPROVEN_BOUNDED_SETUP"
+    (
+        nested_class,
+        nested_constructor,
+        nested_key_attribute,
+        nested_stock_attribute,
+        setup_object_parameter,
+        setup_quantity_parameter,
+        setup_quantity_type,
+        setup_summary,
+    ) = setup_proof
+    pattern = _analyze_collection_method_pattern(
+        method_spec.method_node,
+        collection_attribute=collection_attribute,
+        nested_constructor=nested_constructor,
+        nested_key_attribute=nested_key_attribute,
+        nested_stock_attribute=nested_stock_attribute,
+        setup_quantity_parameter=setup_quantity_parameter,
+    )
+    if pattern is None:
+        return None, "UNPROVEN_CORRELATED_COLLECTION_PATTERN"
+    occupied = {
+        node.id
+        for node in ast.walk(method_spec.method_node)
+        if isinstance(node, ast.Name)
+    }
+    aggregate_name = None
+    iterable_name = None
+    if pattern["pattern_kind"] == "SCALAR_FOLD":
+        aggregate_name = _fresh_analysis_name(
+            "__safe_collection_aggregate", occupied
+        )
+        occupied.add(aggregate_name)
+    iterable_name = _fresh_analysis_name(
+        "__safe_collection_values", occupied
+    )
+    occupied.add(iterable_name)
+    initial_condition_names: tuple[str, ...] = ()
+    selection_condition_names: tuple[str, ...] = ()
+    if pattern["pattern_kind"] == "ARG_EXTREME":
+        generated_initial_names: list[str] = []
+        for index in range(2):
+            name = _fresh_analysis_name(
+                f"__safe_selection_initial_{index}", occupied
+            )
+            occupied.add(name)
+            generated_initial_names.append(name)
+        initial_condition_names = tuple(generated_initial_names)
+        generated_selection_names: list[str] = []
+        for index in range(2):
+            name = _fresh_analysis_name(
+                f"__safe_selection_compare_{index}", occupied
+            )
+            occupied.add(name)
+            generated_selection_names.append(name)
+        selection_condition_names = tuple(generated_selection_names)
+    return (
+        SafeMethodCollectionSetupContext(
+            module_identity=module_identity,
+            target_identity=target_name,
+            method_spec=method_spec,
+            collection_attribute=collection_attribute,
+            root_class_fingerprint=setup_summary.receiver.class_fingerprint,
+            nested_class_name=nested_class.name,
+            nested_constructor=nested_constructor,
+            nested_class_fingerprint=(
+                setup_summary.local_calls[0].callee_summary.receiver.class_fingerprint
+            ),
+            nested_key_attribute=nested_key_attribute,
+            nested_value_attribute=pattern["nested_value_attribute"],
+            nested_stock_attribute=nested_stock_attribute,
+            setup_object_parameter=setup_object_parameter,
+            setup_quantity_parameter=setup_quantity_parameter,
+            setup_quantity_type=setup_quantity_type,
+            setup_summary=setup_summary,
+            item_projection_paths=pattern["item_projection_paths"],
+            record_projection_paths=pattern["record_projection_paths"],
+            selection_operator=pattern["selection_operator"],
+            selected_identity_projection=pattern["selected_identity_projection"],
+            selected_value_projection=pattern["selected_value_projection"],
+            aggregate_analysis_name=aggregate_name,
+            iterable_analysis_name=iterable_name,
+            loop_target_name=(
+                pattern["loop_target_name"]
+                if pattern["pattern_kind"] == "ARG_EXTREME"
+                else "__safe_collection_index"
+            ),
+            accumulator_name=pattern["accumulator_name"],
+            selected_name=pattern["selected_name"],
+            item_object_name=pattern["item_object_name"],
+            state_assignment_label=f"__self_{collection_attribute} = {{}}",
+            loop_label=pattern["loop_label"],
+            neutral_assignment_labels=pattern["neutral_assignment_labels"],
+            update_label=pattern["update_label"],
+            state_condition_label=(
+                f"not __self_{collection_attribute}"
+                if pattern["state_condition_label"] is not None
+                else None
+            ),
+            initial_selection_condition_label=pattern.get(
+                "initial_selection_condition_label"
+            ),
+            selection_condition_label=pattern["selection_condition_label"],
+            initial_condition_analysis_names=initial_condition_names,
+            selection_condition_analysis_names=selection_condition_names,
+            return_label=pattern["return_label"],
+            append_label=pattern["append_label"],
+            pattern_kind=pattern["pattern_kind"],
+        ),
+        None,
+    )
+
+
+def _analyze_collection_method_pattern(
+    method: ast.FunctionDef,
+    *,
+    collection_attribute: str,
+    nested_constructor: tuple[_ConstructorArgumentProof, ...],
+    nested_key_attribute: str,
+    nested_stock_attribute: str,
+    setup_quantity_parameter: str,
+) -> dict[str, Any] | None:
+    loops = [node for node in method.body if isinstance(node, ast.For)]
+    if len(loops) != 1:
+        return None
+    loop = loops[0]
+    view = _safe_collection_view(loop.iter, collection_attribute)
+    if view not in {"values", "items"} or loop.orelse:
+        return None
+    loop_label = f"{ast.unparse(loop.target)} in ()"
+    aliases: dict[str, tuple[str, ...]] = {}
+    projection_target = (
+        loop.target.elts[1]
+        if isinstance(loop.target, ast.Tuple) and len(loop.target.elts) == 2
+        else loop.target
+    )
+    neutral_labels: list[str] = []
+    for statement in loop.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            path = _safe_item_projection(
+                statement.value,
+                projection_target,
+                aliases,
+            )
+            if path is not None:
+                aliases[statement.targets[0].id] = path
+                neutral_labels.append(ast.unparse(statement))
+
+    constructor_names = {item.name for item in nested_constructor}
+    numeric_updates = [
+        node for node in loop.body
+        if isinstance(node, ast.AugAssign)
+        and isinstance(node.target, ast.Name)
+        and isinstance(node.op, ast.Add)
+    ]
+    if len(numeric_updates) == 1:
+        update = numeric_updates[0]
+        projections = tuple(
+            path
+            for node in _flatten_product(update.value)
+            if (path := _safe_item_projection(node, projection_target, aliases)) is not None
+        )
+        if len(projections) == 2:
+            value_paths = tuple(
+                path for path in projections if path[-1] in constructor_names
+            )
+            value_path = next(
+                (
+                    path for path in value_paths
+                    if path[-1] not in {nested_key_attribute, nested_stock_attribute}
+                ),
+                None,
+            )
+            if value_path is not None and _has_zero_initializer(
+                method.body, update.target.id, before=loop
+            ):
+                return_node = _single_return(method.body)
+                if return_node is not None:
+                    return {
+                        "pattern_kind": "SCALAR_FOLD",
+                        "nested_value_attribute": value_path[-1],
+                        "item_projection_paths": projections,
+                        "record_projection_paths": (),
+                        "selection_operator": None,
+                        "selected_identity_projection": None,
+                        "selected_value_projection": value_path,
+                        "loop_target_name": ast.unparse(loop.target),
+                        "accumulator_name": update.target.id,
+                        "selected_name": None,
+                        "item_object_name": None,
+                        "loop_label": loop_label,
+                        "neutral_assignment_labels": tuple(neutral_labels),
+                        "update_label": ast.unparse(update),
+                        "state_condition_label": None,
+                        "selection_condition_label": None,
+                        "return_label": ast.unparse(return_node),
+                        "append_label": None,
+                    }
+
+    if view == "values":
+        selection = _arg_extreme_pattern(
+            method,
+            loop,
+            aliases=aliases,
+            collection_attribute=collection_attribute,
+            constructor_names=constructor_names,
+            nested_key_attribute=nested_key_attribute,
+        )
+        if selection is not None:
+            selection.update(
+                loop_label=loop_label,
+                neutral_assignment_labels=tuple(neutral_labels),
+                item_projection_paths=(
+                    selection["selected_identity_projection"],
+                    selection["selected_value_projection"],
+                ),
+                record_projection_paths=(),
+                accumulator_name=None,
+                update_label=None,
+                append_label=None,
+            )
+            return selection
+
+    if view == "items" and isinstance(loop.target, ast.Tuple):
+        projection = _record_projection_pattern(
+            method,
+            loop,
+            aliases=aliases,
+            constructor_names=constructor_names,
+            nested_key_attribute=nested_key_attribute,
+            setup_quantity_parameter=setup_quantity_parameter,
+        )
+        if projection is not None:
+            projection.update(
+                loop_label=loop_label,
+                neutral_assignment_labels=tuple(neutral_labels),
+                item_projection_paths=tuple(
+                    path for _, path in projection["record_projection_paths"]
+                ),
+                selection_operator=None,
+                selected_identity_projection=None,
+                selected_value_projection=next(
+                    (
+                        path
+                        for _, path in projection["record_projection_paths"]
+                        if path[-1] in constructor_names
+                        and path[-1] not in {nested_key_attribute, nested_stock_attribute}
+                    ),
+                    None,
+                ),
+                accumulator_name=None,
+                selected_name=None,
+                item_object_name=None,
+                update_label=None,
+                state_condition_label=None,
+                selection_condition_label=None,
+            )
+            if projection["selected_value_projection"] is not None:
+                projection["nested_value_attribute"] = projection[
+                    "selected_value_projection"
+                ][-1]
+                return projection
+    return None
+
+
+def _arg_extreme_pattern(
+    method: ast.FunctionDef,
+    loop: ast.For,
+    *,
+    aliases: dict[str, tuple[str, ...]],
+    collection_attribute: str,
+    constructor_names: set[str],
+    nested_key_attribute: str,
+) -> dict[str, Any] | None:
+    selected_init = next(
+        (
+            node for node in method.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value is None
+        ),
+        None,
+    )
+    if selected_init is None:
+        return None
+    selected_name = selected_init.targets[0].id
+    initial_checks = [
+        node
+        for node in ast.walk(loop)
+        if isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Is)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == selected_name
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and node.comparators[0].value is None
+    ]
+    if len(initial_checks) != 1:
+        return None
+    object_alias = next(
+        (
+            name for name, path in aliases.items()
+            if len(path) == 1
+        ),
+        None,
+    )
+    if object_alias is None:
+        return None
+    comparisons = [
+        node for node in ast.walk(loop)
+        if isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], (ast.Gt, ast.Lt))
+    ]
+    if len(comparisons) != 1:
+        return None
+    comparison = comparisons[0]
+    left_path = _safe_item_projection(comparison.left, loop.target, aliases)
+    right = comparison.comparators[0]
+    if not (
+        left_path is not None
+        and left_path[-1] in constructor_names
+        and isinstance(right, ast.Attribute)
+        and isinstance(right.value, ast.Name)
+        and right.value.id == selected_name
+        and right.attr == left_path[-1]
+    ):
+        return None
+    return_node = _single_return(method.body)
+    if not (
+        return_node is not None
+        and isinstance(return_node.value, ast.Attribute)
+        and isinstance(return_node.value.value, ast.Name)
+        and return_node.value.value.id == selected_name
+        and return_node.value.attr == nested_key_attribute
+    ):
+        return None
+    state_if = next(
+        (
+            node for node in method.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.UnaryOp)
+            and isinstance(node.test.op, ast.Not)
+            and _is_self_collection_attribute(node.test.operand, collection_attribute)
+        ),
+        None,
+    )
+    if state_if is None:
+        return None
+    operator = ">" if isinstance(comparison.ops[0], ast.Gt) else "<"
+    return {
+        "pattern_kind": "ARG_EXTREME",
+        "nested_value_attribute": left_path[-1],
+        "selection_operator": operator,
+        "selected_identity_projection": (*aliases[object_alias], nested_key_attribute),
+        "selected_value_projection": left_path,
+        "loop_target_name": object_alias,
+        "selected_name": selected_name,
+        "item_object_name": object_alias,
+        "state_condition_label": ast.unparse(state_if.test),
+        "initial_selection_condition_label": ast.unparse(initial_checks[0]),
+        "selection_condition_label": ast.unparse(comparison),
+        "return_label": ast.unparse(return_node),
+    }
+
+
+def _record_projection_pattern(
+    method: ast.FunctionDef,
+    loop: ast.For,
+    *,
+    aliases: dict[str, tuple[str, ...]],
+    constructor_names: set[str],
+    nested_key_attribute: str,
+    setup_quantity_parameter: str,
+) -> dict[str, Any] | None:
+    if len(loop.target.elts) != 2 or not all(
+        isinstance(item, ast.Name) for item in loop.target.elts
+    ):
+        return None
+    key_name = loop.target.elts[0].id
+    record_name = loop.target.elts[1].id
+    append = next(
+        (
+            node for node in loop.body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "append"
+            and len(node.value.args) == 1
+            and isinstance(node.value.args[0], ast.Dict)
+        ),
+        None,
+    )
+    if append is None:
+        return None
+    result_name = append.value.func.value
+    if not isinstance(result_name, ast.Name):
+        return None
+    return_node = _single_return(method.body)
+    if not (
+        return_node is not None
+        and isinstance(return_node.value, ast.Name)
+        and return_node.value.id == result_name.id
+    ):
+        return None
+    projections: list[tuple[str, tuple[str, ...]]] = []
+    payload = append.value.args[0]
+    for key, value in zip(payload.keys, payload.values):
+        if not isinstance(key, ast.Constant) or type(key.value) is not str:
+            return None
+        if isinstance(value, ast.Name) and value.id == key_name:
+            path = ("$key",)
+        else:
+            path = _safe_item_projection(
+                value,
+                ast.Name(id=record_name, ctx=ast.Load()),
+                aliases,
+            )
+        if path is None:
+            return None
+        projections.append((key.value, path))
+    if not any(path[-1] in constructor_names for _, path in projections):
+        return None
+    return {
+        "pattern_kind": "RECORD_PROJECTION",
+        "record_projection_paths": tuple(projections),
+        "loop_target_name": ast.unparse(loop.target),
+        "return_label": ast.unparse(return_node),
+        "append_label": ast.unparse(append),
+    }
+
+
+def _safe_collection_view(node: ast.expr, attribute: str) -> str | None:
+    if not (
+        isinstance(node, ast.Call)
+        and not node.args
+        and not node.keywords
+        and isinstance(node.func, ast.Attribute)
+        and _is_self_collection_attribute(node.func.value, attribute)
+    ):
+        return None
+    return node.func.attr
+
+
+def _is_self_collection_attribute(node: ast.AST, attribute: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr == attribute
+    )
+
+
+def _safe_item_projection(
+    node: ast.expr,
+    loop_target: ast.expr,
+    aliases: dict[str, tuple[str, ...]],
+) -> tuple[str, ...] | None:
+    if isinstance(node, ast.Name):
+        if isinstance(loop_target, ast.Name) and node.id == loop_target.id:
+            return ()
+        return aliases.get(node.id)
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and type(node.slice.value) is str
+    ):
+        base = _safe_item_projection(node.value, loop_target, aliases)
+        return (*base, node.slice.value) if base is not None else None
+    if isinstance(node, ast.Attribute):
+        base = _safe_item_projection(node.value, loop_target, aliases)
+        return (*base, node.attr) if base is not None else None
+    return None
+
+
+def _flatten_product(node: ast.expr) -> tuple[ast.expr, ...]:
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        return (*_flatten_product(node.left), *_flatten_product(node.right))
+    return (node,)
+
+
+def _has_zero_initializer(
+    statements: list[ast.stmt],
+    name: str,
+    *,
+    before: ast.stmt,
+) -> bool:
+    for statement in statements:
+        if statement is before:
+            break
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == name
+            and isinstance(statement.value, ast.Constant)
+            and type(statement.value.value) in {int, float}
+            and statement.value.value == 0
+        ):
+            return True
+    return False
+
+
+def _single_return(statements: list[ast.stmt]) -> ast.Return | None:
+    values = [node for node in statements if isinstance(node, ast.Return)]
+    return values[-1] if values else None
+
+
+def _path_iteration_count(path: ExecutionPath, loop_label: str) -> int:
+    del loop_label
+    return sum(edge == "Iterate" for edge in path.edge_labels)
+
+
+def _indexed_setup_value(type_name: str, index: int) -> int | float | str | bool:
+    if type_name == "int":
+        return index + 1
+    if type_name == "float":
+        return float(index + 1)
+    if type_name == "str":
+        return f"item_{index + 1}"
+    if type_name == "bool":
+        return bool(index)
+    _reject(
+        SafeSetupPlanRejectionCategory.PRIMITIVE_DOMAIN_UNRESOLVED,
+        "Collection key primitive domain'i çözümlenemedi.",
+    )
+    raise AssertionError("unreachable")
 
 
 def _find_bounded_insert_setup(

@@ -14,6 +14,7 @@ from generator.path_input_generator import (
     UnsupportedInputSynthesisError,
 )
 from generator.safe_method_setup_plan import (
+    SafeMethodCollectionSetupContext,
     SafeObjectSetupContext,
     SafeSetupPlanRejection,
 )
@@ -206,7 +207,9 @@ class ScenarioGenerator:
             int,
             dict[str, Any],
         ] | None = None,
-        setup_context: SafeObjectSetupContext | None = None,
+        setup_context: (
+            SafeObjectSetupContext | SafeMethodCollectionSetupContext | None
+        ) = None,
     ) -> list[Scenario]:
         """
         Bir fonksiyona ait yürütme yollarını test senaryolarına
@@ -265,9 +268,9 @@ class ScenarioGenerator:
         )
         if setup_context is not None and not isinstance(
             setup_context,
-            SafeObjectSetupContext,
+            (SafeObjectSetupContext, SafeMethodCollectionSetupContext),
         ):
-            raise TypeError("setup_context SafeObjectSetupContext olmalıdır.")
+            raise TypeError("setup_context güvenli setup context olmalıdır.")
 
         normalized_parameter_types = (
             self._normalize_parameter_types(
@@ -303,7 +306,8 @@ class ScenarioGenerator:
                 )
                 if setup_context is not None:
                     generated_input = setup_context.bind_generated_input(
-                        generated_input
+                        generated_input,
+                        path=path,
                     )
             except UnreachablePathError as error:
                 rejections.append(
