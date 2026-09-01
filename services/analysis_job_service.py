@@ -238,8 +238,10 @@ class AnalysisJobService:
         self.purge_expired()
         job_id = uuid.uuid4().hex
         now = self._utc_now()
-        job_output = (self.settings.output_root.resolve() / job_id).resolve()
-        if not job_output.is_relative_to(self.settings.output_root.resolve()):
+        self.settings.output_root.mkdir(parents=True, exist_ok=True)
+        run_owned_root = self.settings.output_root.resolve()
+        job_output = run_owned_root / job_id
+        if job_output.parent != run_owned_root:
             raise RuntimeError("Job output root containment ihlali.")
         safe_request = ExternalSourceAnalysisRequest(
             source=request.source,

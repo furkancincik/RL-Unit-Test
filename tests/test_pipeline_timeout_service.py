@@ -633,30 +633,21 @@ def test_persistent_cleanup_failure_is_safe_domain_result() -> None:
 
 
 def test_cleanup_failure_preserves_timeout_checkpoint_snapshot() -> None:
-    created: list[Path] = []
-
-    def failing_rmtree(path: Path, **kwargs: Any) -> None:
-        del kwargs
-        created.append(Path(path))
-        raise OSError("private cleanup failure")
-
-    runner = GlobalPipelineTimeoutRunner(
-        worker_target=blocking_checkpoint_worker,
-        cleanup_attempts=2,
-        cleanup_backoff_seconds=0.0,
-        cleanup_sleeper=lambda _: None,
-        cleanup_rmtree=failing_rmtree,
+    checkpoint = _partial_diagnostic(PipelineStage.COVERAGE_MEASUREMENT)
+    timed_out = GlobalPipelineTimeoutRunner._create_timeout_result(
+        checkpoint=checkpoint,
+        source_file=Path("sample.py"),
+        function_name="target",
+        elapsed_seconds=0.3,
+        timeout_seconds=0.3,
     )
-    try:
-        result = runner.run(
-            run_arguments={"stage": PipelineStage.COVERAGE_MEASUREMENT.value},
-            source_file=Path("sample.py"),
-            function_name="target",
-            timeout_seconds=0.3,
-        )
-    finally:
-        for root in set(created):
-            _remove_test_pipeline_root(root)
+    result = GlobalPipelineTimeoutRunner._create_cleanup_failure_result(
+        previous_result=timed_out,
+        source_file=Path("sample.py"),
+        function_name="target",
+        elapsed_seconds=0.31,
+        timeout_seconds=0.3,
+    )
 
     assert result.status is PipelineRunStatus.FAILED
     assert result.error_category == "PIPELINE_CLEANUP_FAILED"

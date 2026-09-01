@@ -152,6 +152,59 @@ def test_job_runs_once_and_reaches_terminal_state(tmp_path: Path) -> None:
     service.shutdown()
 
 
+def test_submission_uses_one_canonical_run_owned_output_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "jobs"
+    canonical_root = output_root.absolute()
+    original_resolve = Path.resolve
+    root_resolution_count = 0
+    started = Event()
+    release = Event()
+    requests: list[ExternalSourceAnalysisRequest] = []
+
+    def resolve_once(path: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal root_resolution_count
+        if path == output_root:
+            root_resolution_count += 1
+            if root_resolution_count > 1:
+                raise AssertionError(
+                    "Run-owned output root submission sırasında yeniden resolve edildi."
+                )
+            return canonical_root
+        return original_resolve(path, *args, **kwargs)
+
+    runner = Mock()
+
+    def run(
+        request: ExternalSourceAnalysisRequest,
+    ) -> ExternalSourceAnalysisResult:
+        requests.append(request)
+        started.set()
+        release.wait(5)
+        return _result(request.configuration.output_root)
+
+    runner.run.side_effect = run
+    service = AnalysisJobService(
+        settings=AnalysisJobSettings(output_root=output_root),
+        runner_factory=Mock(return_value=runner),
+    )
+    monkeypatch.setattr(Path, "resolve", resolve_once)
+    job = None
+    try:
+        job = service.submit(_request(tmp_path / "ignored"))
+        assert started.wait(2)
+        assert root_resolution_count == 1
+        assert requests[0].configuration.output_root.parent == canonical_root
+    finally:
+        monkeypatch.undo()
+        release.set()
+        if job is not None:
+            service.wait(job.job_id, timeout=5)
+        service.shutdown()
+
+
 def _progress(revision: int, coverage_percent: float) -> CoverageProgressSnapshot:
     covered = int(coverage_percent // 25)
     return CoverageProgressSnapshot(
