@@ -47,6 +47,41 @@ def test_github_mode_requires_static_snapshot_before_trusted_dynamic() -> None:
     assert "restoreSourcePolicy" in script
 
 
+def test_github_dynamic_enablement_uses_one_authoritative_invariant() -> None:
+    script = _script()
+
+    assert "function canEnableGitHubDynamicAnalysis()" in script
+    eligibility = script.split(
+        "function canEnableGitHubDynamicAnalysis()", 1
+    )[1].split("function restoreSourcePolicy", 1)[0]
+    for prerequisite in (
+        'state.activeSource !== "github"',
+        "state.githubTrust === null",
+        '!byId("github-trust-commit").checked',
+        "currentTargetFingerprint === null",
+        "state.acknowledgedTargetFingerprint === null",
+        "state.acknowledgedTargetFingerprint === currentTargetFingerprint",
+    ):
+        assert prerequisite in eligibility
+
+    restore = script.split("function restoreSourcePolicy", 1)[1].split(
+        "function updateModeControls", 1
+    )[0]
+    assert "const githubDynamicAuthorized = canEnableGitHubDynamicAnalysis();" in restore
+
+
+def test_discovered_github_target_rechecks_eligibility_after_state_update() -> None:
+    script = _script()
+
+    handler = script.split(
+        'byId("github-discovered-target").addEventListener("change", (event) => {',
+        1,
+    )[1].split("});", 1)[0]
+    assert handler.index("updateTargetSelectionControls();") < handler.rindex(
+        "invalidateGitHubTargetAcknowledgement();"
+    )
+
+
 def test_submission_guards_and_polling_lifecycle_are_explicit() -> None:
     script = _script()
     markup = Path("web/index.html").read_text(encoding="utf-8")
@@ -128,6 +163,22 @@ def test_source_mode_switch_resets_target_and_ref_state() -> None:
     assert 'byId("module-target-rows").replaceChildren()' in script
     assert 'byId("github-ref").value = ""' in script
     assert "resetSourceSpecificControls()" in script
+
+
+def test_source_switch_and_invalid_submission_clear_stale_results() -> None:
+    script = _script()
+
+    activate_source = script.split("function activateSource", 1)[1].split(
+        "function handleTabKeydown", 1
+    )[0]
+    assert "resetOutput();" in activate_source
+
+    submit = script.split("async function submitAnalysis", 1)[1].split(
+        "function appendMetric", 1
+    )[0]
+    assert submit.index("resetOutput();") < submit.index(
+        "await sourceRequest(buildAnalysisOptions())"
+    )
 
 
 def test_project_deadline_has_distinct_input_and_backend_authoritative_metrics() -> None:
@@ -319,10 +370,11 @@ def test_github_target_acknowledgement_is_bound_to_current_target_fingerprint() 
     assert "acknowledgedTargetFingerprint" in script
     assert "currentGitHubTargetFingerprint" in script
     assert "invalidateGitHubTargetAcknowledgement" in script
+    assert "const currentTargetFingerprint = currentGitHubTargetFingerprint();" in script
     assert (
-        "state.acknowledgedTargetFingerprint === "
-        "currentGitHubTargetFingerprint()"
-    ) in script
+        "state.acknowledgedTargetFingerprint === currentTargetFingerprint"
+        in script
+    )
 
     target_invalidation = script.split(
         "function invalidateGitHubTargetAcknowledgement()", 1

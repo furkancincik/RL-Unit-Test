@@ -166,6 +166,7 @@ function resetSourceSpecificControls() {
 function activateSource(source, focusPanel = false) {
   if (state.activeSource !== source) {
     rememberSourcePolicy();
+    resetOutput();
     resetSourceSpecificControls();
   }
   state.activeSource = source;
@@ -338,6 +339,20 @@ function rememberSourcePolicy() {
   }
 }
 
+function canEnableGitHubDynamicAnalysis() {
+  if (state.activeSource !== "github"
+      || state.githubTrust === null
+      || !byId("github-trust-commit").checked) {
+    return false;
+  }
+  const currentTargetFingerprint = currentGitHubTargetFingerprint();
+  if (currentTargetFingerprint === null
+      || state.acknowledgedTargetFingerprint === null) {
+    return false;
+  }
+  return state.acknowledgedTargetFingerprint === currentTargetFingerprint;
+}
+
 function restoreSourcePolicy() {
   const githubMode = state.activeSource === "github";
   const staticPolicy = document.querySelector(
@@ -346,11 +361,7 @@ function restoreSourcePolicy() {
   const dynamicPolicy = document.querySelector(
     'input[name="analysis-mode"][value="TRUSTED_DYNAMIC_ANALYSIS"]',
   );
-  const githubDynamicAuthorized = githubMode
-    && state.githubTrust !== null
-    && byId("github-trust-commit").checked
-    && state.acknowledgedTargetFingerprint !== null
-    && state.acknowledgedTargetFingerprint === currentGitHubTargetFingerprint();
+  const githubDynamicAuthorized = canEnableGitHubDynamicAnalysis();
   dynamicPolicy.disabled = githubMode && !githubDynamicAuthorized;
   if (githubMode) {
     if (!githubDynamicAuthorized) {
@@ -987,6 +998,7 @@ async function submitAnalysis(event) {
     return;
   }
   setMessage("");
+  resetOutput();
   try {
     const request = await sourceRequest(buildAnalysisOptions());
     setSubmitting(true);
@@ -1636,9 +1648,9 @@ byId("github-trust-commit").addEventListener(
   updateGitHubTargetAcknowledgement,
 );
 byId("github-discovered-target").addEventListener("change", (event) => {
-  invalidateGitHubTargetAcknowledgement();
   const [moduleIdentity, qualifiedName] = event.currentTarget.value.split("\u0000");
   if (!moduleIdentity || !qualifiedName) {
+    invalidateGitHubTargetAcknowledgement();
     return;
   }
   byId("target-selection-mode").value = "EXPLICIT_QUALIFIED_TARGETS";
@@ -1648,6 +1660,7 @@ byId("github-discovered-target").addEventListener("change", (event) => {
   row.querySelector("[data-qualified-target]").value = qualifiedName;
   byId("module-target-rows").append(row);
   updateTargetSelectionControls();
+  invalidateGitHubTargetAcknowledgement();
 });
 byId("analysis-form").addEventListener("submit", submitAnalysis);
 byId("cancel-job").addEventListener("click", cancelCurrentJob);
